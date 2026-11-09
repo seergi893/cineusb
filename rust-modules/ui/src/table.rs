@@ -1549,6 +1549,13 @@ impl TableView {
         self.scroll.step(sc, 300.0, dt);
     }
 
+    /// Step the table and report whether its visible motion requires another presentation.
+    pub fn update_for_present(&mut self, dt: f32, frame_h: f32) -> bool {
+        let before = (self.hl_top.pos, self.hl_bot.pos, self.scroll.pos);
+        self.update(dt, frame_h);
+        before != (self.hl_top.pos, self.hl_bot.pos, self.scroll.pos)
+    }
+
     /// The highlight springs as `(top position, top velocity, bottom position, bottom velocity)`.
     /// Test-only: screens need to prove they actually advance the shared table motion without
     /// exposing its implementation as product API.

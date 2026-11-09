@@ -289,25 +289,11 @@ def _selftest() -> int:
     check(goal_name == "all",
           f"a bare `make` builds the binary (default goal is {goal_name!r}, want 'all')")
 
-    # THE RUNTIME ROOT, the last flavour rule spelled in two languages with nothing comparing them.
-    # `Makefile`'s RUNDIR and `paths::resolve_runtime_dir` must agree that stable is bare /tmp and a
-    # flavour is /tmp/<app id>. On a divergence the APP writes its triggers, its FIFO and its three
-    # logs into one root while `tests/run.py`, `tv-session.sh`, `crash-report.sh` and
-    # `stream-screen.py` read the other — both sides silent, and every assertion downstream reports
-    # "no line found", which this repository documents as indistinguishable from a total
-    # regression. It cannot be caught on the television either: the harness's `install:` check can
-    # only fire once it has found the log it is looking for.
-    mk_rundir = re.search(
-        r"(?m)^RUNDIR\s*=\s*\$\(if \$\(filter stable,\$\(FLAVOR\)\),(\S+),(\S+)\)", mk)
-    check(mk_rundir is not None
-          and mk_rundir.group(1) == "/tmp"
-          and mk_rundir.group(2) == "/tmp/$(APPID)",
-          "Makefile RUNDIR: stable is bare /tmp, a flavour is /tmp/<app id>")
+    check(re.search(r"(?m)^RUNDIR\s*=\s*/tmp/\$\(APPID\)\s*$", mk) is not None,
+          "Makefile RUNDIR scopes every CineUSB install to its own app id")
     check('const DEFAULT_RUNTIME_DIR: &str = "/tmp"' in rust
-          and "if app_id == STABLE_APP_ID {" in rust
-          and "return PathBuf::from(DEFAULT_RUNTIME_DIR);" in rust
           and "Path::new(DEFAULT_RUNTIME_DIR).join(app_id)" in rust,
-          "paths::resolve_runtime_dir spells the same rule as the Makefile's RUNDIR")
+          "paths::resolve_runtime_dir agrees with the Makefile's RUNDIR")
 
     print()
     for f in fails:

@@ -1,17 +1,17 @@
 [
   {
     "name": "stable",
-    "app_id": "com.beb.plxnative",
-    "object_id": "plxstate.stable"
+    "app_id": "com.seergi893.cineusb",
+    "object_id": "cineusb.stable"
   },
   {
     "name": "debug",
-    "app_id": "com.beb.plxnative.debug",
-    "object_id": "plxstate.debug"
+    "app_id": "com.seergi893.cineusb.debug",
+    "object_id": "cineusb.debug"
   },
   {
     "name": "nightly",
-    "app_id": "com.beb.plxnative.nightly",
-    "object_id": "plxstate.night"
+    "app_id": "com.seergi893.cineusb.nightly",
+    "object_id": "cineusb.night"
   }
 ]

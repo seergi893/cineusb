@@ -103,7 +103,7 @@ fn main() {
     // The dev loop keeps its loud failure where it belongs: the Makefile's `SIM_PRE` refuses to
     // launch when `SIM_PMS` is empty, so `make sim-run` still says "no PMS host" rather than
     // silently booting a sign-in screen at somebody expecting Home.
-    if host.is_empty() {
+    if host.is_empty() && !cfg!(feature = "local-usb") {
         eprintln!(
             "plxnative-sim: no PMS host given — starting the plex.tv sign-in flow.\n\
              (pass one as `plxnative-sim <numeric-ip> [port]`, or set PLXNATIVE_PMS_HOST, to boot\n\

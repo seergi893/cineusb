@@ -29,8 +29,8 @@
 # make uninstall— remove this flavour from the TV (refuses the stable id)
 #
 # FLAVOR selects WHICH INSTALL every TV-facing target talks to: `debug` (the default —
-# com.beb.plxnative.debug, its own tile, its own sign-in, its own /tmp root) or `stable`
-# (com.beb.plxnative, the app users install). See the FLAVOR block below for why the default is the
+# com.seergi893.cineusb.debug, its own tile, its own sign-in, its own /tmp root) or `stable`
+# (com.seergi893.cineusb, the app users install). See the FLAVOR block below for why the default is the
 # developer one. A flavour must be `make FLAVOR=… install`ed once before `deploy` can reach it.
 #
 # RELEASE=1 drops BOTH default cargo features: `devtools` (the on-screen counter) and
@@ -95,10 +95,10 @@ tv-lock-require:
 
 # --- WHICH INSTALL: the FLAVOR axis --------------------------------------------------------
 #
-# Three builds live on one television: `stable` is the app users get (`com.beb.plxnative`, the id
+# Three builds live on one television: `stable` is the app users get (`com.seergi893.cineusb`, the id
 # in every release, manifest and channel listing); `debug` is the day-to-day developer build
-# beside it (`com.beb.plxnative.debug`) with its own launcher tile, its own sign-in and its own
-# runtime files; `nightly` (`com.beb.plxnative.nightly`) is a third install beside both — same
+# beside it (`com.seergi893.cineusb.debug`) with its own launcher tile, its own sign-in and its own
+# runtime files; `nightly` (`com.seergi893.cineusb.nightly`) is a third install beside both — same
 # per-flavour shape (own tile, own sign-in, own runtime root) but ALWAYS a RELEASE=1 build (see
 # `release-guard` below), with its own bumped package version and a dated reported version
 # (`rust-modules/build.rs::emit_version`'s `PLX_CHANNEL=nightly` arm). webOS keys everything — the
@@ -120,7 +120,7 @@ tv-lock-require:
 # is watching.
 #
 # The whitelist is not decoration. `make FLAVOR=stabel deploy` would otherwise mint a third
-# registered app called `com.beb.plxnative.stabel` on the television (LG's id charset accepts it,
+# registered app called `com.seergi893.cineusb.stabel` on the television (LG's id charset accepts it,
 # so nothing downstream objects) and the symptom is a mystery tile on a TV rather than a message on
 # a terminal. `$(error)` at parse time costs one line.
 FLAVORS     := $(shell python3 ci/flavor.py --list)
@@ -131,7 +131,7 @@ $(if $(filter $(FLAVOR),$(FLAVORS)),,$(error unknown FLAVOR "$(FLAVOR)" — one 
 # The id users get. Also `paths::STABLE_APP_ID` in the Rust half and `STABLE_ID` in ci/flavor.py —
 # three copies of one string, each in a language that cannot see the others, and ci/flavor.py's
 # selftest is what keeps them in step.
-APPID_STABLE = com.beb.plxnative
+APPID_STABLE = com.seergi893.cineusb
 APPID        = $(if $(filter stable,$(FLAVOR)),$(APPID_STABLE),$(APPID_STABLE).$(FLAVOR))
 APPDIR       = /media/developer/apps/usr/palm/applications/$(APPID)
 
@@ -147,12 +147,8 @@ SERVICEDIR   = /media/developer/apps/usr/palm/services/$(APPID).storage
 # is the same rule spelled for the shell, and `make print-rundir` is how every tool asks for it
 # instead of restating it a fourth time.
 #
-# The stable install keeps `/tmp` byte for byte, so every existing recipe, doc line and harness
-# glob stays true for the app users get. A flavoured install gets `/tmp/<app id>` — a DOT in the
-# name, never a hyphen, because `dev::any_trigger_present` scans the root for entries beginning
-# `plxnative-` and a sibling directory matching that prefix would silently suppress the OTHER
-# install's who's-watching picker.
-RUNDIR       = $(if $(filter stable,$(FLAVOR)),/tmp,/tmp/$(APPID))
+# All CineUSB installs use their own directory inside /tmp, including stable.
+RUNDIR       = /tmp/$(APPID)
 EVENTLOG     = $(RUNDIR)/plxnative-events.log
 
 # Machine-readable answers, so no tool has to restate any of the above. `make -s print-appdir
@@ -578,7 +574,7 @@ PLAYBACK_HAS_FEED = $(filter both feed,$(PLAYBACK_BACKENDS))
 PLAYBACK_EMPTY :=
 PLAYBACK_SPACE := $(PLAYBACK_EMPTY) $(PLAYBACK_EMPTY)
 PLAYBACK_COMMA := ,
-RUST_BUILD_FEATURES = $(subst $(PLAYBACK_SPACE),$(PLAYBACK_COMMA),$(strip $(subst $(PLAYBACK_COMMA),$(PLAYBACK_SPACE),$(RUST_BACKEND_FEATURES)) $(if $(RELEASE),,devtools devtriggers threadcheck) $(if $(LAB),lab-diagnostics,)))
+RUST_BUILD_FEATURES = $(subst $(PLAYBACK_SPACE),$(PLAYBACK_COMMA),$(strip $(subst $(PLAYBACK_COMMA),$(PLAYBACK_SPACE),$(RUST_BACKEND_FEATURES)) $(if $(RELEASE),,devtools devtriggers threadcheck) $(if $(LAB),lab-diagnostics,) local-usb))
 RUST_FEATFLAGS = --no-default-features $(if $(RUST_BUILD_FEATURES),--features $(RUST_BUILD_FEATURES),)
 RUST_TDIR = target$(if $(RELEASE),-release,)$(if $(LAB),-lab,)$(if $(SYMBOLS),-sym,)$(if $(filter both,$(PLAYBACK_BACKENDS)),,-$(PLAYBACK_BACKENDS))
 
@@ -2214,7 +2210,7 @@ ipk: pkg/plxnative pkg/plxnative-storage $(APPINFO) release-guard
 
 # THE STABLE INSTALL IS ALWAYS A RELEASE BUILD, and that is a gate rather than a habit.
 #
-# `com.beb.plxnative` is the id users get. A dev-featured binary under it carries the whole
+# `com.seergi893.cineusb` is the id users get. A dev-featured binary under it carries the whole
 # `/tmp` trigger surface, the world-writable `plxnative-remote` FIFO and the `:8910` capture
 # listener — the exact surface the `cut-release` skill's §2 exists to keep out of a shipped
 # artifact, seen from the other side. Before the flavour split this could only happen by
@@ -2226,7 +2222,7 @@ ipk: pkg/plxnative pkg/plxnative-storage $(APPINFO) release-guard
 # deleted rather than respected.
 # A LAB BUILD IS NEVER THE STABLE ID, and it never ships without its session file.
 #
-# Both halves are the same argument as `release-guard`'s, one feature along. `com.beb.plxnative` is
+# Both halves are the same argument as `release-guard`'s, one feature along. `com.seergi893.cineusb` is
 # the id users install; a lab-featured binary under it carries an upload endpoint and a bearer
 # secret, which is the one thing in this repository that must never reach a stranger's television.
 # And a LAB build with no `pkg/lab.json` is inert — it boots, logs `lab: INERT`, and answers the

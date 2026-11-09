@@ -57,14 +57,14 @@ pub const ENV_STEERABLE: bool = cfg!(feature = "hostsim");
 ///
 /// It is a FALLBACK and a comparison value — never the answer on its own. See [`app_id`]: which
 /// app this process is depends on where it was installed, not on what it was compiled with.
-pub const STABLE_APP_ID: &str = "com.beb.plxnative";
+pub const STABLE_APP_ID: &str = "com.seergi893.cineusb";
 
 /// The Developer Mode install dir. Only a last-resort fallback now — it is what the app used to
 /// hardcode, so it keeps the historical behaviour if `/proc` is somehow unreadable.
-const LEGACY_APP_DIR: &str = "/media/developer/apps/usr/palm/applications/com.beb.plxnative";
+const LEGACY_APP_DIR: &str = "/media/developer/apps/usr/palm/applications/com.seergi893.cineusb";
 
-/// **Which install this process is** — `com.beb.plxnative` for the app users get, or
-/// `com.beb.plxnative.<flavour>` for a developer build sitting beside it on the same television.
+/// **Which install this process is** — `com.seergi893.cineusb` for the app users get, or
+/// `com.seergi893.cineusb.<flavour>` for a developer build sitting beside it on the same television.
 ///
 /// Read from the INSTALL DIRECTORY, not compiled in, and that is the whole design.
 ///
@@ -124,7 +124,7 @@ fn installed_app_id(exe: &Path) -> Option<String> {
 }
 
 /// The flavour suffix of [`app_id`] — `None` for the app users get, `Some("debug")` for
-/// `com.beb.plxnative.debug`.
+/// `com.seergi893.cineusb.debug`.
 ///
 /// One definition, so no caller has to know how a flavour is spelled. Everything that must differ
 /// between two installs on one television — the runtime root, the session file, the plex.tv device
@@ -402,7 +402,7 @@ const DEFAULT_RUNTIME_DIR: &str = "/tmp";
 /// reason: it reads `current_exe` and `HOME`, neither of which a test can pin. `app_id` is a
 /// parameter for the same reason.
 ///
-/// **A flavoured install gets its own root, and the app users get keeps `/tmp` byte for byte.**
+/// **Every CineUSB install gets its own runtime root.**
 /// Two installs on one television otherwise share one event log (the launching one TRUNCATES it),
 /// one append-only crash log with nothing in it saying which binary faulted, one `plxnative-remote`
 /// FIFO, one `:8910` capture listener and one trigger namespace — a set of collisions whose
@@ -438,9 +438,6 @@ fn resolve_runtime_dir(
         if let Some(p) = bundled {
             return p;
         }
-    }
-    if app_id == STABLE_APP_ID {
-        return PathBuf::from(DEFAULT_RUNTIME_DIR);
     }
     Path::new(DEFAULT_RUNTIME_DIR).join(app_id)
 }
@@ -814,7 +811,7 @@ mod tests {
     fn hud_candidates_are_ordered_per_build_kind_and_keyed_by_the_install_id() {
         use std::path::PathBuf;
         let runtime = PathBuf::from("/run/instance/huds");
-        for id in [super::STABLE_APP_ID, "com.beb.plxnative.debug", "com.beb.plxnative.nightly"] {
+        for id in [super::STABLE_APP_ID, "com.seergi893.cineusb.debug", "com.seergi893.cineusb.nightly"] {
             let persistent = vec![
                 PathBuf::from(format!("/media/developer/{id}-huds")),
                 PathBuf::from(format!("/media/internal/.{id}-huds")),
@@ -834,7 +831,7 @@ mod tests {
     fn hud_candidates_of_two_flavours_share_no_persistent_directory() {
         let rt = |name: &str| std::path::PathBuf::from(format!("/tmp/{name}/huds"));
         let stable = super::hud_candidate_list(false, super::STABLE_APP_ID, rt("a"));
-        let debug = super::hud_candidate_list(false, "com.beb.plxnative.debug", rt("b"));
+        let debug = super::hud_candidate_list(false, "com.seergi893.cineusb.debug", rt("b"));
         for (a, b) in stable.iter().zip(&debug) {
             assert_ne!(a, b);
         }
@@ -983,21 +980,21 @@ mod tests {
     #[test]
     fn the_app_id_is_the_install_directory_and_only_a_real_one() {
         use std::path::Path;
-        let dev = "/media/developer/apps/usr/palm/applications/com.beb.plxnative.debug/plxnative";
-        let hbc = "/media/cryptofs/apps/usr/palm/applications/com.beb.plxnative/plxnative";
+        let dev = "/media/developer/apps/usr/palm/applications/com.seergi893.cineusb.debug/plxnative";
+        let hbc = "/media/cryptofs/apps/usr/palm/applications/com.seergi893.cineusb/plxnative";
         let nightly =
-            "/media/developer/apps/usr/palm/applications/com.beb.plxnative.nightly/plxnative";
+            "/media/developer/apps/usr/palm/applications/com.seergi893.cineusb.nightly/plxnative";
         assert_eq!(
             super::installed_app_id(Path::new(dev)).as_deref(),
-            Some("com.beb.plxnative.debug")
+            Some("com.seergi893.cineusb.debug")
         );
         assert_eq!(
             super::installed_app_id(Path::new(hbc)).as_deref(),
-            Some("com.beb.plxnative")
+            Some("com.seergi893.cineusb")
         );
         assert_eq!(
             super::installed_app_id(Path::new(nightly)).as_deref(),
-            Some("com.beb.plxnative.nightly")
+            Some("com.seergi893.cineusb.nightly")
         );
         // A host build: the parent is `debug`, whose parent is `target-sim` — not `applications`.
         // Without this arm the simulator would mint an app called `debug`, take `/tmp/debug` as its
@@ -1028,13 +1025,13 @@ mod tests {
             None
         );
         assert_eq!(
-            "com.beb.plxnative.debug"
+            "com.seergi893.cineusb.debug"
                 .strip_prefix(super::STABLE_APP_ID)
                 .and_then(|r| r.strip_prefix('.')),
             Some("debug")
         );
         assert_eq!(
-            "com.beb.plxnative.nightly"
+            "com.seergi893.cineusb.nightly"
                 .strip_prefix(super::STABLE_APP_ID)
                 .and_then(|r| r.strip_prefix('.')),
             Some("nightly")
@@ -1059,11 +1056,11 @@ mod tests {
             return; // a host build answers from the environment first; this is the television rule
         }
         let stable = super::resolve_runtime_dir(None, None, super::STABLE_APP_ID);
-        let debug = super::resolve_runtime_dir(None, None, "com.beb.plxnative.debug");
-        let nightly = super::resolve_runtime_dir(None, None, "com.beb.plxnative.nightly");
-        assert_eq!(stable, std::path::Path::new("/tmp"));
-        assert_eq!(debug, std::path::Path::new("/tmp/com.beb.plxnative.debug"));
-        assert_eq!(nightly, std::path::Path::new("/tmp/com.beb.plxnative.nightly"));
+        let debug = super::resolve_runtime_dir(None, None, "com.seergi893.cineusb.debug");
+        let nightly = super::resolve_runtime_dir(None, None, "com.seergi893.cineusb.nightly");
+        assert_eq!(stable, std::path::Path::new("/tmp/com.seergi893.cineusb"));
+        assert_eq!(debug, std::path::Path::new("/tmp/com.seergi893.cineusb.debug"));
+        assert_eq!(nightly, std::path::Path::new("/tmp/com.seergi893.cineusb.nightly"));
         assert_ne!(
             stable.join("plxnative-events.log"),
             debug.join("plxnative-events.log")
@@ -1081,7 +1078,7 @@ mod tests {
         }
     }
 
-    /// An absent or empty `PLXNATIVE_RUNTIME_DIR` must resolve to the television's `/tmp`. Empty
+    /// An absent or empty `PLXNATIVE_RUNTIME_DIR` must resolve to the install runtime directory. Empty
     /// matters on its own: `FOO= cmd` sets the variable to an empty string rather than unsetting
     /// it, and joining a name onto an empty root yields a RELATIVE path — trigger reads would then
     /// silently follow the process's working directory.
@@ -1089,11 +1086,11 @@ mod tests {
     fn absent_or_empty_runtime_root_is_the_television() {
         assert_eq!(
             super::resolve_runtime_dir(None, None, super::STABLE_APP_ID),
-            std::path::Path::new("/tmp")
+            std::path::Path::new("/tmp/com.seergi893.cineusb")
         );
         assert_eq!(
             super::resolve_runtime_dir(Some("".into()), None, super::STABLE_APP_ID),
-            std::path::Path::new("/tmp")
+            std::path::Path::new("/tmp/com.seergi893.cineusb")
         );
     }
 
@@ -1171,7 +1168,7 @@ mod tests {
                 Some("/also/anywhere".into()),
                 super::STABLE_APP_ID
             ),
-            std::path::Path::new("/tmp")
+            std::path::Path::new("/tmp/com.seergi893.cineusb")
         );
     }
 
@@ -1191,7 +1188,7 @@ mod tests {
             ]
         };
         let a = named(super::STABLE_APP_ID);
-        let b = named("com.beb.plxnative.debug");
+        let b = named("com.seergi893.cineusb.debug");
         assert!(
             a.iter().all(|p| !b.contains(p)),
             "{a:?} and {b:?} share a session file"

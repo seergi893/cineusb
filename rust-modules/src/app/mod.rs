@@ -122,6 +122,8 @@ pub(crate) mod words;
 pub(crate) mod page_title;
 pub(crate) mod clock;
 mod clock_notice;
+#[cfg(feature = "local-usb")]
+mod local_usb;
 mod hint_taught;
 mod recorder;
 mod window_activity;
@@ -578,7 +580,7 @@ fn enter_application(pms_host: *const c_char, pms_port: c_int) -> Result<App,c_i
     // The release every telemetry report carries, composed here because the packaged binary is
     // graded for this exact contiguous string (`ci/check-package.py`); second, before anything can
     // build an envelope or an SDK option.
-    plx_telemetry::telemetry::set_release(concat!("plxnative@", env!("PLX_VERSION")));
+    plx_telemetry::telemetry::set_release(concat!("cineusb@", env!("PLX_VERSION")));
     // The commit About and Source print: `PLX_BUILD_SHA` reaches this crate only, so the screens
     // crate is handed it (it panics in a shipping build if asked first); third, before any screen
     // can draw.
@@ -614,6 +616,10 @@ fn enter_application(pms_host: *const c_char, pms_port: c_int) -> Result<App,c_i
 
 /// The ten-line public skeleton: preflight/construction, then the ordinary loop and teardown.
 pub(crate) fn run_application(pms_host: *const c_char, pms_port: c_int) -> ! {
+    #[cfg(feature = "local-usb")]
+    if cfg!(feature = "local-usb") {
+        plx_base::process::exit_now(unsafe { local_usb::run() });
+    }
     // An early-boot refusal ends the same way: the workers it has already started (diagnostics,
     // capability probe, telemetry) are as live as after a played session.
     let mut app = match enter_application(pms_host,pms_port) { Ok(app) => app, Err(code) => plx_base::process::exit_now(code) };

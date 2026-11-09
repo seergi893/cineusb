@@ -1518,17 +1518,11 @@ pub(super) fn resume_stored(pages: &mut plx_ui::dispatch::Dispatcher<super::brid
     bridge.take_session_ready()
 }
 
-pub(crate) unsafe fn construct(
-    pms_host: *const c_char, pms_port: c_int, mt: plx_base::task::MainThread,
-    preflight: super::bootstrap::Preflight, initial: Option<super::bootstrap::Initial>,
-    deferred: Option<plx_plex::plex::session::DeferredLoad>,
-) -> Result<App, c_int> {
-    let controlled = preflight.controlled();
-    if let Some(initial) = &initial {
-        plx_data::stores::tape::init(initial.person_credits(), preflight.replay());
-        initial.home.restore(&mt).map_err(|_| 1)?;
-        plx_plex::plex::Client::restore_generation_seed(initial.primary_client).map_err(|_| 1)?;
-    }
+/// Open the shared native graphics surface before either application starts its content source.
+pub(super) unsafe fn open_graphics(
+    controlled: bool,
+    load_session: impl FnOnce() -> Option<plx_plex::plex::session::Session>,
+) -> Result<(GraphicsWindow, Option<plx_plex::plex::session::Session>), c_int> {
     SDL_SetMainReady();
     // DEAD END, measured 2026-07-31 — do not re-try this. The obvious answer to "a parked TV
     // should blank itself" is to stop inhibiting the platform screensaver here (and re-allow it
@@ -1593,16 +1587,7 @@ pub(crate) unsafe fn construct(
     // grant, and the only honest confirmation is `FB bits: … depth=0`.
     SDL_GL_SetAttribute(A_DEPTH, 0);
     SDL_GL_SetAttribute(A_STENCIL, 0);
-    // **The stored session is read HERE, before the window.** The window size is a setting
-    // (Settings > System > Interface resolution, install-wide: `Session::ui_resolution`), and
-    // `SDL_CreateWindow` below is the only moment it can be applied, so the record has to be read
-    // first. `peek_settled` would not do: it only reads the cache, which the session owner fills
-    // after boot, so its first call answers "not yet". The seams `load` consults (`install_plex_seams`) are installed by
-    // `enter_application`, before `boot`. A replay or captured boot brings its own session.
-    let session = match &initial {
-        Some(initial) => initial.session.persisted.clone(),
-        None => plx_plex::plex::session::load(),
-    };
+    let session = load_session();
     // The television is placed at 0,0 at exactly canvas size (unless a webOS 1-3 owner picked a smaller
     // Interface resolution, `requested_drawable`) and takes the panel. A desktop
     // window is centred (`SDL_WINDOWPOS_CENTERED`) at whatever fits — see `plan_desktop_window`.
@@ -1617,16 +1602,16 @@ pub(crate) unsafe fn construct(
     };
     #[cfg(not(feature = "hostsim"))]
     let (wx, wy, ww_req, wh_req) = {
-        let (w, h) = requested_drawable(&session).unwrap_or((SCR_W, SCR_H));
+        let (w, h) = session.as_ref().and_then(requested_drawable).unwrap_or((SCR_W, SCR_H));
         (0, 0, w, h)
     };
     // The title is furniture a television never draws (no window manager, no decoration) and
     // the first thing a desktop shows, so the two builds spell it differently: the device keeps
     // the process-shaped name every log, `pidof` recipe and skill already uses.
     #[cfg(feature = "hostsim")]
-    let title = c"PlxNative";
+    let title = if cfg!(feature = "local-usb") { c"CineUSB" } else { c"PlxNative" };
     #[cfg(not(feature = "hostsim"))]
-    let title = c"plxnative";
+    let title = if cfg!(feature = "local-usb") { c"cineusb" } else { c"plxnative" };
     // A frame dump's drawable is exactly the window's size in points: it is the one desktop window
     // that does not ask for ALLOW_HIGHDPI (0x2000), so its window is the 1920x1080 points of the
     // canonical Linux host on a Retina display too, and `fit_window_to_density` finds nothing to
@@ -1731,6 +1716,40 @@ pub(crate) unsafe fn construct(
     plx_gfx::text::init_text();
     plx_gfx::gfx::init_image();
     plx_gfx::gfx::init_blur();
+    Ok((GraphicsWindow {
+        win,
+        #[cfg(all(feature = "hostsim", target_os = "linux"))]
+        wslg_frame_pacing,
+    }, session))
+}
+
+pub(super) struct GraphicsWindow {
+    pub(super) win: *mut c_void,
+    #[cfg(all(feature = "hostsim", target_os = "linux"))]
+    wslg_frame_pacing: bool,
+}
+
+pub(crate) unsafe fn construct(
+    pms_host: *const c_char, pms_port: c_int, mt: plx_base::task::MainThread,
+    preflight: super::bootstrap::Preflight, initial: Option<super::bootstrap::Initial>,
+    deferred: Option<plx_plex::plex::session::DeferredLoad>,
+) -> Result<App, c_int> {
+    let controlled = preflight.controlled();
+    if let Some(initial) = &initial {
+        plx_data::stores::tape::init(initial.person_credits(), preflight.replay());
+        initial.home.restore(&mt).map_err(|_| 1)?;
+        plx_plex::plex::Client::restore_generation_seed(initial.primary_client).map_err(|_| 1)?;
+    }
+    let (graphics, session) = open_graphics(controlled, || {
+        Some(match &initial {
+            Some(initial) => initial.session.persisted.clone(),
+            None => plx_plex::plex::session::load(),
+        })
+    })?;
+    let session = session.expect("Plex boot supplies its settings");
+    let win = graphics.win;
+    #[cfg(all(feature = "hostsim", target_os = "linux"))]
+    let wslg_frame_pacing = graphics.wslg_frame_pacing;
     // The transport takes the client's `User-Agent` as a value (it names no Plex layer): hand it
     // over before any request can be made, so the first one already carries it.
     if plx_net::net::set_user_agent(plx_plex::plex::identity::user_agent()).is_err() {

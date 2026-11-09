@@ -1,0 +1,95 @@
+name: Build and publish CineUSB
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/cineusb-ipk.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cineusb-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: github.repository == 'seergi893/cineusb' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 55
+    permissions:
+      contents: write
+    env:
+      FLAVOR: stable
+      RELEASE: "1"
+      PLX_SENTRY_DSN: ""
+      PLX_POSTHOG_KEY: ""
+      PLX_SENTRY_DSN_DEV: ""
+      PLX_POSTHOG_KEY_DEV: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/rust-toolchain
+      - uses: ./.github/actions/webos-ndk
+        id: ndk
+      - name: Compile and verify the webOS package
+        env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
+        run: |
+          make -j"$(nproc)" all
+          make ipk
+      - name: Generate and verify the Homebrew manifest
+        run: |
+          packages=$(python3 ci/deps.py fetch webosbrew-toolbox --asset fw-symbols --asset ipk-verify --asset gen-manifest)
+          mapfile -t debs <<< "$packages"
+          sudo apt-get install -y "${debs[@]}"
+          ipks=(pkg/com.seergi893.cineusb_*_arm.ipk)
+          test "${#ipks[@]}" = 1
+          ipk="${ipks[0]}"
+          webosbrew-ipk-verify --details --format markdown --fw-releases '>=4.0' "$ipk" | tee "$GITHUB_STEP_SUMMARY"
+          manifest=pkg/com.seergi893.cineusb.manifest.json
+          webosbrew-gen-manifest -p "$ipk" \
+            -i "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/pkg/largeIcon.png" \
+            -l "https://github.com/$GITHUB_REPOSITORY" -r true -o "$manifest"
+          python3 - "$ipk" "$manifest" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+          ipk, manifest = map(Path, sys.argv[1:])
+          info = json.loads(manifest.read_text())
+          assert info["id"] == "com.seergi893.cineusb"
+          assert ipk.name == f'{info["id"]}_{info["version"]}_arm.ipk'
+          assert info["ipkUrl"] == ipk.name
+          assert info["ipkHash"]["sha256"] == hashlib.sha256(ipk.read_bytes()).hexdigest()
+          assert info["rootRequired"] is True
+          PY
+      - name: Prepare matching source and build instructions
+        env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
+        run: |
+          ipks=(pkg/com.seergi893.cineusb_*_arm.ipk)
+          ipk="${ipks[0]}"
+          version="${ipk#pkg/com.seergi893.cineusb_}"
+          version="${version%_arm.ipk}"
+          cargo +"$RUST_TOOLCHAIN" fetch --locked --manifest-path rust-modules/Cargo.toml
+          rustup component add rust-src --toolchain "$RUST_TOOLCHAIN"
+          printf '[]\n' > "$RUNNER_TEMP/cineusb-private-values.json"
+          python3 ci/prepare-source-release.py --inputs "$RUNNER_TEMP/cineusb-source-inputs" \
+            --output "pkg/cineusb-source-$version.tar.gz" --binary "$ipk" \
+            --private-values "$RUNNER_TEMP/cineusb-private-values.json"
+          cp "$(python3 ci/deps.py fetch ffmpeg)" pkg/
+          cp ci/build-ffmpeg.sh pkg/
+          echo "CINEUSB_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Publish the complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="cineusb-v$CINEUSB_VERSION"
+          gh release create "$tag" --target "$GITHUB_SHA" --draft \
+            --title "CineUSB $CINEUSB_VERSION · Prueba de USB" \
+            --notes "Prototipo para explorar carpetas y comprobar el acceso a archivos desde webOS. La reproducción de vídeo sigue en desarrollo. El código fuente correspondiente y la receta de compilación acompañan al paquete." \
+            pkg/com.seergi893.cineusb_*_arm.ipk pkg/com.seergi893.cineusb.manifest.json \
+            pkg/ipk.sha256 pkg/cineusb-source-*.tar.gz pkg/cineusb-source-*.tar.gz.release.json \
+            pkg/ffmpeg-*.tar.xz pkg/build-ffmpeg.sh
+          gh release edit "$tag" --draft=false --latest

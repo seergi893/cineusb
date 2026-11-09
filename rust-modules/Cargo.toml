@@ -72,6 +72,7 @@ path = "src/bin/sim.rs"
 required-features = ["hostsim"]
 
 [features]
+local-usb = []
 # On by default, so every ordinary `make`, every `make test` and every on-device harness run
 # retains both backend implementations. `make RELEASE=1` drops diagnostic defaults and passes
 # the selected backend features explicitly. Inclusion does not qualify or promote URI playback.

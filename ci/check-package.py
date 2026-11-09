@@ -114,7 +114,7 @@ def parse_release_line(content: str) -> "tuple[int, int] | None":
 
 
 def expected_dev_version(appinfo_version: str, release_line_content: "str | None") -> "tuple[str | None, str | None]":
-    """The `X.Y.Z-dev` string (no `plxnative@` prefix) `rust-modules/build.rs::emit_version`
+    """The `X.Y.Z-dev` string (no `cineusb@` prefix) `rust-modules/build.rs::emit_version`
     reports for a build that is not `RELEASE=1`, derived by the SAME rule build.rs documents —
     the two must never drift, which is exactly what going and re-deriving it separately here
     would risk. The arithmetic itself lives in `ci/version_rule.py::next_version_triplet`, shared
@@ -167,7 +167,7 @@ def expected_nightly_package_version(cargo_version: str, release_line_content: "
 
 def expected_nightly_reported_version(cargo_version: str, release_line_content: "str | None",
                                       date: "str | None") -> str:
-    """The version a nightly BINARY reports — `X.Y.Z-nightly-YYYYMMDD`, no `plxnative@` prefix —
+    """The version a nightly BINARY reports — `X.Y.Z-nightly-YYYYMMDD`, no `cineusb@` prefix —
     where `X.Y.Z` is the release the build is heading to (`version_rule.next_version_triplet`, the
     number `rust-modules/build.rs::emit_version` reads). It is NOT the package version plus a
     suffix any more: the package version carries the cut date as its patch
@@ -187,7 +187,7 @@ def nightly_stamp_date(stamp: str) -> "str | None":
     built with `FLAVOR=nightly` — `None` when the field is absent or is not exactly 8 digits.
 
     THE DATE IS GRADED BY VALUE, not by shape. An earlier version of this gate accepted any
-    `[0-9]{8}` in the binary's own `plxnative@X.Y.Z-nightly-YYYYMMDD` string, first with a
+    `[0-9]{8}` in the binary's own `cineusb@X.Y.Z-nightly-YYYYMMDD` string, first with a
     trailing `\\b` and then with `(?![0-9])` in its place — and BOTH failed against a real nightly
     build (`0.7.0-nightly-202609192m4m6m8m10m12m14m1`), because `concat!`'s output in `.rodata` is
     packed back to back with no NUL separator: the very next packed string literal in that build
@@ -211,7 +211,7 @@ def rc_stamp_number(stamp: str) -> "str | None":
 
     Read from the stamp rather than from the binary for exactly the reason `nightly_stamp_date`
     gives: `concat!`'s output is packed against whatever literal the linker put next, so
-    `plxnative@0.8.0-rc.1` followed by a digit is indistinguishable from `-rc.12` by shape alone.
+    `cineusb@0.8.0-rc.1` followed by a digit is indistinguishable from `-rc.12` by shape alone.
     """
     m = re.search(r"\+rc:([1-9][0-9]{0,3})(?=\+|$)", stamp.strip())
     return m.group(1) if m else None
@@ -367,24 +367,24 @@ def _selftest() -> int:
     # flag strings `""` and `--no-default-features`) answered None for every one of them and the
     # package gates graded nothing. `ci/test_arm_profile.py` closes the same loop against the stamp a
     # real `make` writes for every backend, so a Makefile change cannot leave these behind unnoticed.
-    dev_both = "--no-default-features --features play-uri,play-feed,devtools,devtriggers,threadcheck"
-    dev_feed = "--no-default-features --features play-feed,devtools,devtriggers,threadcheck"
-    rel_both = "--no-default-features --features play-uri,play-feed"
+    dev_both = "--no-default-features --features play-uri,play-feed,devtools,devtriggers,threadcheck,local-usb"
+    dev_feed = "--no-default-features --features play-feed,devtools,devtriggers,threadcheck,local-usb"
+    rel_both = "--no-default-features --features play-uri,play-feed,local-usb"
     cases = {
         # a dev build per backend, CI's and a plain local one (the tvdev profile term only a dev build carries)
         f"features:{dev_both}+tel:98c4b7d37a4c": "dev",
         f"features:{dev_both}+profile:tvdev+tel:98c4b7d37a4c": "dev",
         f"features:{dev_both}+symbols+tel:98c4b7d37a4c": "dev",
         f"features:{dev_feed}+tel:98c4b7d37a4c": "dev",                       # PLAYBACK_BACKENDS=feed
-        "features:--no-default-features --features play-uri,devtools,devtriggers,threadcheck+tel:98c4b7d37a4c": "dev",
+        "features:--no-default-features --features play-uri,devtools,devtriggers,threadcheck,local-usb+tel:98c4b7d37a4c": "dev",
         # the release build per backend, and the cuts built from it
         f"features:{rel_both}+tel:98c4b7d37a4c": "release",
         f"features:{rel_both}+symbols+tel:98c4b7d37a4c": "release",           # the release cut
         f"features:{rel_both}+profile:tvdev+tel:98c4b7d37a4c": "release",
         f"features:{rel_both}+symbols+nightly:20260919+tel:98c4b7d37a4c": "release",   # the nightly cut
         f"features:{rel_both}+symbols+rc:2+tel:98c4b7d37a4c": "release",      # a release candidate
-        "features:--no-default-features --features play-feed+tel:98c4b7d37a4c": "release",
-        "features:--no-default-features --features play-uri+symbols+tel:98c4b7d37a4c": "release",
+        "features:--no-default-features --features play-feed,local-usb+tel:98c4b7d37a4c": "release",
+        "features:--no-default-features --features play-uri,local-usb+symbols+tel:98c4b7d37a4c": "release",
         # no backend is refused by the Makefile at parse time (`PLAYBACK_BACKENDS=none` and a goal that builds), so it is no shipped configuration
         # either: `none` under RELEASE=1 is a bare `--no-default-features`, the literal this decoder used
         # to call "release"
@@ -502,22 +502,22 @@ def _selftest() -> int:
     print(f"check-package: --print-nightly-date CLI {2 - cli_bad}/2 cases correct")
 
     # ...and the actual grade, once a date is in hand: an EXACT substring, the same shape stable's
-    # own `plxnative@X.Y.Z` check already uses, no boundary assumed on either side. This is the
+    # own `cineusb@X.Y.Z` check already uses, no boundary assumed on either side. This is the
     # case that defeated both earlier shape rules (`\b`, then `(?![0-9])`): a real nightly binary's
-    # own bytes, `plxnative@0.7.0-nightly-20260919` immediately followed by more digits from the
+    # own bytes, `cineusb@0.7.0-nightly-20260919` immediately followed by more digits from the
     # next packed literal with no separator at all. Graded by VALUE, that adjacency is no longer
     # ambiguous — it either is that exact string, or it reports some other date, which must fail.
-    nightly_blob = b"plxnative@0.7.0-nightly-202609192m4m6m8m10m12m14m1"
+    nightly_blob = b"cineusb@0.7.0-nightly-202609192m4m6m8m10m12m14m1"
     nightly_blob_cases = {
         ("0.7.0", "20260919"): True,   # the adjacent-literal case above, graded by the real date
         ("0.7.0", "20260920"): False,  # a date one day off must not pass
     }
     nightly_blob_bad = 0
     for (version, date), want in nightly_blob_cases.items():
-        got = f"plxnative@{version}-nightly-{date}".encode() in nightly_blob
+        got = f"cineusb@{version}-nightly-{date}".encode() in nightly_blob
         if got != want:
             nightly_blob_bad += 1
-            print(f"  FAIL — plxnative@{version}-nightly-{date} in nightly_blob = {got!r}, want {want!r}")
+            print(f"  FAIL — cineusb@{version}-nightly-{date} in nightly_blob = {got!r}, want {want!r}")
     print(f"check-package: nightly exact-substring grading "
           f"{len(nightly_blob_cases) - nightly_blob_bad}/{len(nightly_blob_cases)} cases correct")
 
@@ -1373,7 +1373,7 @@ check(binary.exists(), f"the staged payload carries the binary ({binary.name})")
 # THE ID IS THE RULE, and it is graded whatever the stamp says — note the `if IS_STABLE`
 # below sits BESIDE the `BUILD` branch, never inside it.
 #
-# `com.beb.plxnative` is what a user installs, so a dev-featured binary under it ships the whole
+# `com.seergi893.cineusb` is what a user installs, so a dev-featured binary under it ships the whole
 # /tmp trigger surface, the world-writable `plxnative-remote` FIFO and the `:8910` listener to the
 # public. The Makefile's `release-guard` refuses to BUILD that; this is the same rule on the bytes,
 # which is the half that survives someone reaching for the documented `ALLOW_DEV_ON_STABLE=1`
@@ -1450,12 +1450,12 @@ if binary.exists():
     # applies, so this gate and the binary it grades can never quietly diverge on which arithmetic
     # applies to this checkout.
     #
-    # MATCHED WITH THE `plxnative@` PREFIX, not as a bare number, and that is the difference
+    # MATCHED WITH THE `cineusb@` PREFIX, not as a bare number, and that is the difference
     # between grading `PLX_VERSION` and grading whatever digits happen to be in .rodata: the About
     # page and any release note text carry the version too, so a bare-number search was satisfiable
     # by a page the version mechanism never touched. `enter_application`
-    # composes `concat!("plxnative@", env!("PLX_VERSION"))` in the application crate and hands it to
-    # `plx_telemetry::telemetry::set_release`, which every report reads, in every configuration —
+    # composes `concat!("cineusb@", env!("PLX_VERSION"))` in the application crate and hands it to
+    # `the startup log —
     # telemetry is ungated on purpose — so this witnesses the emitted value itself. (The telemetry
     # crate cannot compose it: a `cargo:rustc-env` reaches the application crate only.)
     #
@@ -1489,7 +1489,7 @@ if binary.exists():
             _cargo_text = (ROOT / "rust-modules/Cargo.toml").read_text()
             _cargo_m = re.search(r'^version = "([^"]+)"', _cargo_text, re.M)
             nightly_expect = (
-                f"plxnative@{expected_nightly_reported_version(_cargo_m.group(1), RELEASE_LINE_CONTENT, nightly_date)}"
+                f"cineusb@{expected_nightly_reported_version(_cargo_m.group(1), RELEASE_LINE_CONTENT, nightly_date)}"
             ).encode()
             check(_cargo_m is not None
                   and nightly_expect.decode().split("-nightly-")[0].split("@")[1].rsplit(".", 1)[0]
@@ -1501,11 +1501,11 @@ if binary.exists():
                             "(build.rs's PLX_CHANNEL=nightly arm, dated by the pkg/.build-config "
                             "+nightly: stamp)")
             if not nightly_found:
-                # Self-explaining on failure: list what the binary DOES carry after `plxnative@`,
+                # Self-explaining on failure: list what the binary DOES carry after `cineusb@`,
                 # rather than leaving the next person to go re-derive it from a raw `strings` dump.
                 seen = [m.decode("utf-8", errors="replace")
-                        for m in re.findall(rb"plxnative@[0-9A-Za-z.\-]{1,40}", blob)[:5]]
-                nightly_msg += f" — plxnative@ strings actually present: {seen}"
+                        for m in re.findall(rb"cineusb@[0-9A-Za-z.\-]{1,40}", blob)[:5]]
+                nightly_msg += f" — cineusb@ strings actually present: {seen}"
             check(nightly_found, nightly_msg)
         # Nightly is always RELEASE=1 (release-guard refuses otherwise) — grade that on the stamp
         # too, the same way the dev-trigger witness above grades it on the bytes.
@@ -1522,7 +1522,7 @@ if binary.exists():
             # already reported as broken.
             _major, _minor, _ = (int(x) for x in appinfo["version"].split("."))
             _dev_version_str = f"{_major}.{_minor + 1}.0-dev"
-        DEV_VERSION = f"plxnative@{_dev_version_str}".encode()
+        DEV_VERSION = f"cineusb@{_dev_version_str}".encode()
         #
         # The id is a rule of its own here too, so it sits BESIDE the stamp branch rather than
         # inside it: whatever configuration produced it, the package users install may not claim a
@@ -1534,7 +1534,7 @@ if binary.exists():
         # that is not a candidate must not — that second half is what keeps an `RC=` left in a
         # shell from quietly shipping as the release itself.
         rc_number = rc_stamp_number(STAMP_TEXT)
-        rc_prefix = f'plxnative@{appinfo["version"]}-rc.'.encode()
+        rc_prefix = f'cineusb@{appinfo["version"]}-rc.'.encode()
         if rc_number is not None:
             check(IS_STABLE,
                   f"a release candidate (+rc:{rc_number}) is a build of the stable id, not {PACKAGED_ID}")
@@ -1552,7 +1552,7 @@ if binary.exists():
             check(not says_dev,
                   f"the {PACKAGED_ID} binary reports a released version, not {DEV_VERSION.decode()}"
                   " (build.rs adds the suffix unless PLX_RELEASE is set — RELEASE=1 exports it)")
-            check(f'plxnative@{appinfo["version"]}'.encode() in blob,
+            check(f'cineusb@{appinfo["version"]}'.encode() in blob,
                   f'the {PACKAGED_ID} binary reports the packaged version ({appinfo["version"]})')
         # ...and the configuration is the other half. A `RELEASE=1` build of ANY flavour reports
         # the exact version — `make FLAVOR=debug RELEASE=1 ipk` is a real combination, the
@@ -1577,8 +1577,8 @@ elif sha_file.exists():
 
 # The Makefile derives IPK_VERSION from appinfo.json, so the built filename is the fourth witness.
 # Scoped to THIS flavour's id: two flavours' artifacts can sit in pkg/ side by side, and the
-# `_arm.ipk` suffix in the pattern is what keeps `com.beb.plxnative_*` from also matching
-# `com.beb.plxnative.debug_*` (the dot is not a `_`, but a bare prefix test would still match).
+# `_arm.ipk` suffix in the pattern is what keeps `com.seergi893.cineusb_*` from also matching
+# `com.seergi893.cineusb.debug_*` (the dot is not a `_`, but a bare prefix test would still match).
 built = sorted((ROOT / "pkg").glob(f"{PACKAGED_ID}_*_arm.ipk"))
 if built:
     check(len(built) == 1, f"exactly one built {PACKAGED_ID} ipk in pkg/ (saw {[p.name for p in built]})")
