@@ -1038,10 +1038,7 @@ def check_tracked_resources(expect_title: str) -> list:
         desc = d.get("appDescription", "")
         check(bool(desc.strip()) and desc != english,
               f"{loc}/appinfo.json appDescription is present and actually translated")
-        # The English sentence is a trademark disclaimer. A translation that transliterated the
-        # mark ("플렉스") would both lose the disclaimer's force and misuse it, and no reader of
-        # this repository is placed to catch that by eye in twelve languages.
-        check("Plex" in desc, f"{loc}/appinfo.json names Plex verbatim (the disclaimer's subject)")
+        check("USB" in desc, f"{loc}/appinfo.json describes the USB browser")
     return locales
 
 
