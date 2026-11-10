@@ -445,6 +445,18 @@ pub struct LocalMedia {
     pub height: u16,
     pub fps: f64,
     pub dovi: Option<AVDOVIDecoderConfigurationRecord>,
+    /// Embedded subtitle streams in file order, including normal and forced tracks.
+    pub subtitles: Vec<LocalSubtitle>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalSubtitle {
+    pub stream_index: i32,
+    pub codec: String,
+    pub language: Option<String>,
+    pub title: String,
+    pub forced: bool,
+    pub default: bool,
 }
 
 /// Each attempt exclusively owns the file cursor. FFmpeg duplicates the descriptor, so the
@@ -517,13 +529,27 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext) -> Result<LocalMedia, &'
     if !audio.is_empty() && crate::audio_payload_codec(&audio).is_none() {
         return Err("La pista de audio predeterminada usa un códec incompatible.");
     }
+    let mut subtitles = Vec::new();
+    for i in 0..(*fmt).nb_streams {
+        let stream = *(*fmt).streams.add(i as usize);
+        let params = stream_codecpar(stream);
+        if (*params).codec_type != AVMEDIA_TYPE_SUBTITLE { continue; }
+        subtitles.push(LocalSubtitle {
+            stream_index: i as i32,
+            codec: codec(params),
+            language: stream_language(stream),
+            title: stream_name(stream),
+            forced: ((*stream).disposition & AV_DISPOSITION_FORCED) != 0,
+            default: ((*stream).disposition & AV_DISPOSITION_DEFAULT) != 0,
+        });
+    }
     let rate = (*video).framerate;
     Ok(LocalMedia {
         video: codec(video), audio, audio_channels, audio_rate, audio_depth,
         width: u16::try_from((*video).width).unwrap_or(0),
         height: u16::try_from((*video).height).unwrap_or(0),
         fps: if rate.den > 0 { f64::from(rate.num) / f64::from(rate.den) } else { 0.0 },
-        dovi: dovi_conf(video),
+        dovi: dovi_conf(video), subtitles,
     })
 }
 
