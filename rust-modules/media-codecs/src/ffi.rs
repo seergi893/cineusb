@@ -47,12 +47,16 @@ pub const OFF_STREAM_INDEX: usize = 4; // NB not 0 — FFmpeg 5.0 put `const AVC
 pub const OFF_STREAM_CODECPAR: usize = 12;
 #[cfg(target_pointer_width = "32")]
 pub const OFF_STREAM_TIME_BASE: usize = 20;
+#[cfg(target_pointer_width = "32")]
+pub const OFF_STREAM_DISPOSITION: usize = 56;
 #[cfg(target_pointer_width = "64")]
 pub const OFF_STREAM_INDEX: usize = 8;
 #[cfg(target_pointer_width = "64")]
 pub const OFF_STREAM_CODECPAR: usize = 16;
 #[cfg(target_pointer_width = "64")]
 pub const OFF_STREAM_TIME_BASE: usize = 32;
+#[cfg(target_pointer_width = "64")]
+pub const OFF_STREAM_DISPOSITION: usize = 64;
 /// `AVStream.metadata` — the container's own per-track tags, which is where a track's NAME lives.
 ///
 /// It is read for one reason and it is a data reason, not a rendering one: **PMS does not send the
@@ -526,6 +530,15 @@ pub unsafe fn stream_codecpar(s: *mut AVStream) -> *mut AVCodecParameters {
 #[inline]
 pub unsafe fn stream_time_base(s: *mut AVStream) -> AVRational {
     *((s as *const u8).add(OFF_STREAM_TIME_BASE) as *const AVRational)
+}
+/// The stream disposition flags (default, forced, hearing impaired).
+/// The offset is asserted against the bundled FFmpeg headers by ci/ffabi-assert.c.
+pub const AV_DISPOSITION_DEFAULT: c_int = 1;
+pub const AV_DISPOSITION_FORCED: c_int = 1 << 6;
+pub const AV_DISPOSITION_HEARING_IMPAIRED: c_int = 1 << 7;
+#[inline]
+pub unsafe fn stream_disposition(s: *mut AVStream) -> c_int {
+    *((s as *const u8).add(OFF_STREAM_DISPOSITION) as *const c_int)
 }
 
 // ABI strategy (workflow-verified 2026-07-24 against the DEVICE's own libs — the
