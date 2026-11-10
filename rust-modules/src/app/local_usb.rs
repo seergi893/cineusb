@@ -1,16 +1,17 @@
 //! USB browsing and its off-frame filesystem jobs.
+mod art;
 mod disk;
 
+use art::Cover;
 use super::{App, Key, playback};
 use disk::{Entry, Kind, Scan, Volume};
 use plx_gfx::{gfx, text::TtfMeasure};
 use plx_machine::machine::Measure;
 use plx_ui::{
-    icons::{self, Icon},
     label::{HAlign, Label},
     poster_grid::{self, Card, Geom, GridPop, STYLE},
     screen::Dir,
-    theme, widgets::{self, Art}, Painter, Rect, Spring,
+    theme, widgets, Painter, Rect, Spring,
 };
 use std::fs::File;
 use std::io;
@@ -26,6 +27,7 @@ struct Folder {
     volume: Volume,
     path: PathBuf,
     entries: Vec<Entry>,
+    collection: Option<Cover>,
     selected: usize,
 }
 
@@ -41,6 +43,7 @@ pub(super) struct Browser {
     scroll: Spring,
     pop: GridPop,
     status: String,
+    greeting: &'static str,
     pending: Option<Receiver<DiskResult>>,
     scanning: Option<Receiver<Scan>>,
     next_scan: Instant,
@@ -53,6 +56,7 @@ impl Browser {
         Self {
             scan: Scan::default(), folders: Vec::new(), selected: 0,
             scroll: Spring::at(0.0), pop: GridPop::new(), status: "Buscando discos USB…".into(),
+            greeting: "Te damos la bienvenida",
             pending: None, scanning: None, next_scan: now, last_tick: now,
         }
     }
@@ -83,7 +87,8 @@ impl Browser {
                 match result {
                     DiskResult::Folder(volume, path, Ok(entries)) => {
                         if let Some(folder) = self.folders.last_mut() { folder.selected = self.selected; }
-                        self.folders.push(Folder { volume, path, entries, selected: 0 });
+                        let collection = path.strip_prefix(&volume.path).ok().and_then(art::collection);
+                        self.folders.push(Folder { volume, path, entries, collection, selected: 0 });
                         self.select(0, true);
                         self.status.clear();
                     }
@@ -131,6 +136,14 @@ impl Browser {
             }
             if self.scanning.is_none() && now >= self.next_scan {
                 self.next_scan = now + Duration::from_secs(5);
+                let greeting = match plx_platform::i18n::local_hour() {
+                    Some(6..=11) => "Buenos días",
+                    Some(12..=19) => "Buenas tardes",
+                    Some(_) => "Buenas noches",
+                    None => "Te damos la bienvenida",
+                };
+                changed |= greeting != self.greeting;
+                self.greeting = greeting;
                 let (send, receive) = mpsc::sync_channel(1);
                 if plx_base::task::spawn_off_frame("cineusb-volumes", move |_| {
                     let _ = send.send(scan_volumes());
@@ -250,16 +263,13 @@ impl Browser {
         }
     }
 
-    fn item(&self, index: usize) -> Option<(String, &'static str, Icon)> {
+    fn item(&self, index: usize) -> Option<(String, &'static str, Cover)> {
         if let Some(folder) = self.folders.last() {
             let entry = folder.entries.get(index)?;
-            let (kind, icon) = match entry.kind {
-                Kind::Folder => ("Carpeta", Icon::Chevron),
-                Kind::Video => ("Vídeo", Icon::Play),
-            };
-            Some((display_name(entry), kind, icon))
+            let (cover, kind) = art::entry_cover(entry, folder.collection);
+            Some((display_name(entry), kind, cover))
         } else {
-            self.scan.volumes.get(index).map(|volume| (volume_name(volume), "Disco USB", Icon::Chevron))
+            self.scan.volumes.get(index).map(|volume| (volume_name(volume), "Disco USB", Cover::Drive))
         }
     }
 
@@ -269,7 +279,7 @@ impl Browser {
         let p = Painter::root().alpha(plx_ui::nav::page_alpha());
         let x = plx_ui::consts::MARGIN_X;
         let width = 1920.0 - 2.0 * x;
-        draw_line(p, "CINEUSB    /    BIBLIOTECA LOCAL", Rect::new(x, 56.0, width, 34.0), theme::size::CAPTION, false);
+        draw_line(p, "CineUSB  ·  Biblioteca local", Rect::new(x, 56.0, width, 34.0), theme::size::CAPTION, true);
         let breadcrumb = self.folders.last().map(|folder| {
             let relative = folder.path.strip_prefix(&folder.volume.path).unwrap_or(&folder.path);
             let mut parts = vec![volume_name(&folder.volume)];
@@ -277,9 +287,12 @@ impl Browser {
             parts.join("   /   ")
         });
         let focused = self.item(self.selected);
-        let title = focused.as_ref().map_or("Tus discos USB", |(title, _, _)| title);
+        let (title, detail) = if breadcrumb.is_none() {
+            (self.greeting, "Tus películas y series, desde USB")
+        } else {
+            focused.as_ref().map_or(("Biblioteca USB", "Carpeta"), |(title, kind, _)| (title.as_str(), *kind))
+        };
         draw_line(p, title, Rect::new(x, 108.0, width, 96.0), theme::size::HERO, true);
-        let detail = focused.as_ref().map_or("Películas, series y carpetas", |(_, kind, _)| *kind);
         draw_line(p, detail, Rect::new(x, 206.0, width, 42.0), theme::size::BODY, false);
         let section = breadcrumb.as_deref().unwrap_or("Discos conectados");
         draw_line(p, section, Rect::new(x, 272.0, width, 48.0), theme::size::HEADLINE, true);
@@ -305,14 +318,14 @@ impl Browser {
     }
 
     fn draw_tile(&self, p: Painter, index: usize, focused: bool) {
-        let Some((title, _, icon)) = self.item(index) else { return };
+        let Some((title, kind, cover)) = self.item(index) else { return };
         let frame = poster_grid::cell_in(&GRID, index, TOP, self.scroll.pos, &[]);
         let scale = self.pop.scale(index, focused, &STYLE);
         let card = frame.scaled(scale);
         let radius = STYLE.tile_radius(card, scale);
-        widgets::card(p, frame, Art::Poster(None), radius, focused, scale, 0.0);
-        icons::draw(p, icon, Rect::new(card.x + (card.w - 64.0) / 2.0,
-            card.y + (card.h - 64.0) / 2.0, 64.0, 64.0), theme::TEXT_SECONDARY);
+        let lift = ((scale - 1.0) / (STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
+        cover.draw(p, card, radius, lift);
+        draw_line(p, kind, Rect::new(card.x + 16.0, card.y + card.h - 81.0, card.w - 32.0, 28.0), theme::size::CAPTION, false);
         widgets::poster_label(p, card, radius, &title, &TtfMeasure);
     }
 }
