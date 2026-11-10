@@ -435,7 +435,9 @@ const SEEK_CUR: c_int = 1;
 pub const SEEK_END: c_int = 2;
 pub const AVSEEK_SIZE: c_int = 0x10000;
 
-// LG's tntfs filesystem has been observed to fail on some large-file reads.
+static USB_PREAD_FALLBACK_LOGGED: AtomicBool = AtomicBool::new(false);
+
+// LG's tntfs filesystem may fail on some large-file reads.
 // Positional pread is preferred so the original descriptor's cursor is untouched.
 // If pread fails, retry with a normal seek+read before concluding the USB
 // filesystem returned a genuine I/O error. These operations run on the demux
@@ -447,10 +449,12 @@ fn local_read_bytes(file: &File, offset: u64, buffer: &mut [u8]) -> std::io::Res
             let mut borrowed = file;
             match borrowed.seek(SeekFrom::Start(offset)).and_then(|_| borrowed.read(buffer)) {
                 Ok(n) => {
-                    plx_base::eventlog::log(&format!(
-                        "cineusb: positional USB read failed (errno={:?}) but seek+read succeeded at offset={offset}",
-                        pread_error.raw_os_error()
-                    ));
+                    if !USB_PREAD_FALLBACK_LOGGED.swap(true, Ordering::Relaxed) {
+                        plx_base::eventlog::log(&format!(
+                            "cineusb: positional USB read failed (errno={:?}) but seek+read succeeded at offset={offset}",
+                            pread_error.raw_os_error()
+                        ));
+                    }
                     Ok(n)
                 }
                 Err(fallback_error) => {
