@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="halo"><stop stop-color="#285657"/><stop offset="1" stop-color="#10172a"/></radialGradient>
+    <linearGradient id="body" x1="15%" y1="10%" x2="95%" y2="100%"><stop stop-color="#bbffec"/><stop offset=".62" stop-color="#63e0ce"/><stop offset="1" stop-color="#42a7ba"/></linearGradient>
+    <linearGradient id="gold" x1="5%" y1="0%" x2="100%" y2="100%"><stop stop-color="#ffefbc"/><stop offset="1" stop-color="#f8a977"/></linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="#10172a"/>
+  <circle cx="255" cy="246" r="223" fill="url(#halo)"/>
+  <path d="M58 267a198 198 0 0 1 300-183m70 63a198 198 0 0 1-4 219M356 422a198 198 0 0 1-239-25" fill="none" stroke="#68c6c3" stroke-opacity=".44" stroke-width="5" stroke-linecap="round"/>
+  <path d="M208 345v42q0 15 15 15h66q15 0 15-15v-42" fill="url(#body)"/>
+  <rect x="227" y="376" width="16" height="10" rx="3" fill="#143541"/><rect x="269" y="376" width="16" height="10" rx="3" fill="#143541"/>
+  <rect x="113" y="146" width="286" height="212" rx="52" fill="url(#body)"/>
+  <rect x="132" y="164" width="248" height="175" rx="36" fill="#142434"/>
+  <path d="M154 192h24m-24 38h24m-24 38h24m-24 38h24m156-114h24m-24 38h24m-24 38h24m-24 38h24" stroke="#75d7cb" stroke-opacity=".86" stroke-width="9" stroke-linecap="round"/>
+  <path d="M225 207q0-14 12-7l74 43q13 8 0 16l-74 43q-12 7-12-7Z" fill="url(#gold)"/>
+  <circle cx="416" cy="115" r="10" fill="#ffd8a6"/>
+</svg>

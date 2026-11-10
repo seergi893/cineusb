@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="250" height="375" viewBox="0 0 250 375">
+  <defs>
+    <linearGradient id="ground" x1="0%" y1="0%" x2="85%" y2="100%"><stop stop-color="#463225"/><stop offset=".56" stop-color="#332720"/><stop offset="1" stop-color="#211a20"/></linearGradient>
+    <radialGradient id="light"><stop stop-color="#e2a25e" stop-opacity=".55"/><stop offset="1" stop-color="#e2a25e" stop-opacity="0"/></radialGradient>
+    <linearGradient id="mark" x1="5%" y1="10%" x2="92%" y2="100%"><stop stop-color="#ffe7b7"/><stop offset="1" stop-color="#e8aa6e"/></linearGradient>
+  </defs>
+  <rect width="250" height="375" fill="url(#ground)"/>
+  <ellipse cx="129" cy="144" rx="151" ry="139" fill="url(#light)"/>
+  <path d="M-18 175h63l32-38h87l26 28h71M-18 196h68l32-38h76l26 28h77M-18 217h73l32-38h65l26 28h83" fill="none" stroke="#f4c684" stroke-opacity=".28"/>
+  <circle cx="125" cy="168" r="80" fill="#47342a" stroke="#f4c684" stroke-opacity=".55" stroke-width="1.5"/>
+  <circle cx="125" cy="168" r="70" fill="none" stroke="#f4c684" stroke-opacity=".22"/>
+  <path d="M75 143q0-8 8-8h26q5 0 8 4l7 8h42q9 0 9 9v39q0 9-9 9H84q-9 0-9-9Z" fill="#c88a56"/>
+  <rect x="75" y="154" width="100" height="50" rx="9" fill="url(#mark)"/>
+  <path d="M91 170h35" stroke="#956039" stroke-width="4" stroke-linecap="round"/>
+</svg>

@@ -725,8 +725,17 @@ mod tests;
 /// the loop calls once per frame (the door reads this at most once a minute) and publishes the
 /// date to the screens as an input, the way a frame's time arrives on a `Tick`.
 pub fn local_calendar_today() -> Option<[i32; 3]> {
+    local_calendar_date(now_unix_seconds()?)
+}
+
+/// Hour in the operating system's timezone, for CineUSB's welcome message.
+pub fn local_hour() -> Option<i32> {
+    Some(civil_time(libc::time_t::try_from(now_unix_seconds()?).ok()?)?.tm_hour)
+}
+
+fn now_unix_seconds() -> Option<i64> {
     let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-    local_calendar_date(i64::try_from(seconds).ok()?)
+    i64::try_from(seconds).ok()
 }
 
 /// A Unix timestamp as a calendar date in the operating system's timezone. Called while building
@@ -740,11 +749,15 @@ pub fn local_calendar_date(seconds: i64) -> Option<[i32; 3]> {
 /// The civil date `stamp` falls on in the operating system's timezone, for any `time_t` (a stamp
 /// before 1970 included, which [`local_calendar_date`] refuses).
 fn civil_date_of(stamp: libc::time_t) -> Option<[i32; 3]> {
+    let date = civil_time(stamp)?;
+    Some([date.tm_year.checked_add(1900)?, date.tm_mon + 1, date.tm_mday])
+}
+
+fn civil_time(stamp: libc::time_t) -> Option<libc::tm> {
     let mut out = std::mem::MaybeUninit::<libc::tm>::uninit();
     // SAFETY: both pointers are valid for localtime_r; the result is read only on success.
     if unsafe { libc::localtime_r(&stamp, out.as_mut_ptr()) }.is_null() { return None; }
-    let date = unsafe { out.assume_init() };
-    Some([date.tm_year.checked_add(1900)?, date.tm_mon + 1, date.tm_mday])
+    Some(unsafe { out.assume_init() })
 }
 
 /// The Unix timestamp of the FIRST instant of a calendar date in the operating system's timezone: the
