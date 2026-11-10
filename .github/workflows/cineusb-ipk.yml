@@ -12,6 +12,7 @@ on:
       - ipkroot/ctl/control
       - rust-modules/Cargo.toml
       - rust-modules/Cargo.lock
+      - rust-modules/src/app/local_usb/**
   workflow_dispatch:
 
 permissions:
