@@ -35,7 +35,7 @@ fn decode_mount(field: &[u8]) -> PathBuf {
 fn live_mounts(table: &[u8]) -> Vec<(u64, PathBuf)> {
     let mut mounts: Vec<_> = table.split(|byte| *byte == b'\n').filter_map(|line| {
         let mut fields = line.split(|byte| *byte == b' ');
-        let id = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+        let id = std::str::from_utf8(fields.next()?).ok()?.parse::<u64>().ok()?;
         if fields.nth(2)? != b"/" { return None; }
         let path = decode_mount(fields.next()?);
         let relative = path.strip_prefix("/tmp/usb").ok()?;
