@@ -16,12 +16,37 @@ use plx_ui::{
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
+use plx_platform::i18n::{self, Language, Preference};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 const TOP: f32 = 338.0;
 const COLS: usize = poster_grid::COLS;
 const GRID: Geom = Geom::of(COLS, plx_ui::consts::MARGIN_X, &STYLE);
+
+fn tr(es: &'static str, ca: &'static str) -> &'static str {
+    if i18n::current().language() == Language::Ca { ca } else { es }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Action { Settings, Delete, Eject }
+
+const ACTIONS: [(Action, Rect); 3] = [
+    (Action::Settings, Rect::new(882.0, 46.0, 186.0, 56.0)),
+    (Action::Delete, Rect::new(1086.0, 46.0, 240.0, 56.0)),
+    (Action::Eject, Rect::new(1344.0, 46.0, 480.0, 56.0)),
+];
+const PANEL: Rect = Rect::new(510.0, 324.0, 900.0, 376.0);
+const OPTIONS: [Rect; 2] = [
+    Rect::new(555.0, 592.0, 390.0, 62.0),
+    Rect::new(975.0, 592.0, 390.0, 62.0),
+];
+
+enum Dialog {
+    Settings,
+    Delete { volume: Volume, path: PathBuf },
+    Eject(Volume),
+}
 
 struct Folder {
     volume: Volume,
@@ -34,6 +59,8 @@ struct Folder {
 enum DiskResult {
     Folder(Volume, PathBuf, io::Result<Vec<Entry>>),
     Video(Result<(File, plx_play_feed::LocalMedia, String), String>),
+    Delete(PathBuf, Result<(), String>),
+    Eject(Volume, Result<(), String>),
 }
 
 pub(super) struct Browser {
@@ -43,7 +70,12 @@ pub(super) struct Browser {
     scroll: Spring,
     pop: GridPop,
     status: String,
-    greeting: &'static str,
+    hour: Option<i32>,
+    action: Option<Action>,
+    dialog: Option<Dialog>,
+    option: usize,
+    mutating: bool,
+    language: Option<(Preference, Receiver<bool>)>,
     pending: Option<Receiver<DiskResult>>,
     scanning: Option<Receiver<Scan>>,
     next_scan: Instant,
@@ -55,8 +87,8 @@ impl Browser {
         let now = Instant::now();
         Self {
             scan: Scan::default(), folders: Vec::new(), selected: 0,
-            scroll: Spring::at(0.0), pop: GridPop::new(), status: "Buscando discos USB…".into(),
-            greeting: "Te damos la bienvenida",
+            scroll: Spring::at(0.0), pop: GridPop::new(), status: String::new(),
+            hour: None, action: None, dialog: None, option: 0, mutating: false, language: None,
             pending: None, scanning: None, next_scan: now, last_tick: now,
         }
     }
@@ -70,7 +102,7 @@ impl Browser {
         if plx_base::task::spawn_off_frame("cineusb-disk", move |_| { let _ = send.send(run()); }) {
             self.pending = Some(receive);
         } else {
-            self.status = "No se pudo iniciar la lectura del disco.".into();
+            self.status = tr("No se pudo iniciar la operación.", "No s’ha pogut iniciar l’operació.").into();
         }
     }
 
@@ -80,9 +112,31 @@ impl Browser {
         self.last_tick = now;
         let mut changed = false;
         let mut video = None;
+        if let Some((preference, result)) = self.language.as_ref() {
+            match result.try_recv() {
+                Ok(saved) => {
+                    if saved {
+                        i18n::apply_usb_language(*preference);
+                        self.dialog = None;
+                        self.status.clear();
+                    } else {
+                        self.status = tr("No se pudo guardar el idioma.", "No s’ha pogut desar l’idioma.").into();
+                    }
+                    self.language = None;
+                    changed = true;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.language = None;
+                    self.status = tr("No se pudo guardar el idioma.", "No s’ha pogut desar l’idioma.").into();
+                    changed = true;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         match self.pending.as_ref().map(Receiver::try_recv) {
             Some(Ok(result)) => {
                 self.pending = None;
+                self.mutating = false;
                 changed = true;
                 match result {
                     DiskResult::Folder(volume, path, Ok(entries)) => {
@@ -93,18 +147,45 @@ impl Browser {
                         self.status.clear();
                     }
                     DiskResult::Folder(_, _, Err(error)) => {
-                        self.status = format!("No se pudo abrir la carpeta · {error}");
+                        plx_base::eventlog::log(&format!("cineusb: USB folder listing failed: {error}"));
+                        self.status = tr("No se pudo abrir la carpeta.", "No s’ha pogut obrir la carpeta.").into();
                     }
                     DiskResult::Video(Ok(media)) => {
                         video = Some(media);
                         self.status.clear();
                     }
-                    DiskResult::Video(Err(error)) => self.status = error,
+                    DiskResult::Video(Err(error)) => {
+                        plx_base::eventlog::log(&format!("cineusb: video probe failed: {error}"));
+                        self.status = tr("No se pudo abrir el vídeo.", "No s’ha pogut obrir el vídeo.").into();
+                    }
+                    DiskResult::Delete(path, result) => {
+                        if result.is_ok() {
+                            if let Some(folder) = self.folders.last_mut() {
+                                folder.entries.retain(|entry| path.file_name() != Some(entry.name.as_os_str()));
+                            }
+                            self.select(self.selected, true);
+                        }
+                        self.finish_mutation(result, tr("Archivo eliminado.", "Fitxer esborrat."),
+                            tr("No se pudo eliminar el archivo. Comprueba si el disco admite escritura.",
+                                "No s’ha pogut esborrar el fitxer. Comprova si es pot escriure al disc."));
+                    }
+                    DiskResult::Eject(volume, result) => {
+                        if result.is_ok() {
+                            self.scan.volumes.retain(|item| *item != volume);
+                            self.folders.clear();
+                            self.action = None;
+                            self.select(0, true);
+                        }
+                        self.finish_mutation(result, tr("Ya puedes retirar el disco USB.", "Ja pots treure el disc USB."),
+                            tr("No se pudo expulsar el USB. Cierra las apps que lo usan y vuelve a intentarlo.",
+                                "No s’ha pogut expulsar l’USB. Tanca les aplicacions que el fan servir i torna-ho a provar."));
+                    }
                 }
             }
             Some(Err(TryRecvError::Disconnected)) => {
                 self.pending = None;
-                self.status = "Se interrumpió la lectura del disco.".into();
+                self.mutating = false;
+                self.status = tr("Se interrumpió la operación.", "L’operació s’ha interromput.").into();
                 changed = true;
             }
             _ => {}
@@ -115,19 +196,20 @@ impl Browser {
                     self.scanning = None;
                     // A temporary Homebrew failure must not bring back an old mount from the jail.
                     if (!self.scan.system || scan.system)
-                        && (self.scan != scan || self.status == "Buscando discos USB…") {
+                        && (self.scan != scan || self.status == tr("Buscando discos USB…", "Buscant discos USB…")) {
                         let selected = self.scan.volumes.get(self.selected).cloned();
                         self.scan = scan;
                         if self.folders.last().is_some_and(|folder| !self.scan.volumes.contains(&folder.volume)) {
                             self.folders.clear();
-                            self.status = "Se ha retirado el disco USB.".into();
+                            self.dialog = None;
+                            self.status = tr("Se ha retirado el disco USB.", "S’ha retirat el disc USB.").into();
                             video = None;
                         }
                         if self.folders.is_empty() {
                             let index = selected.and_then(|volume| self.scan.volumes.iter().position(|item| *item == volume));
                             self.select(index.unwrap_or_default(), true);
                         }
-                        if self.status == "Buscando discos USB…" { self.status.clear(); }
+                        if self.status == tr("Buscando discos USB…", "Buscant discos USB…") { self.status.clear(); }
                         changed = true;
                     }
                 }
@@ -136,14 +218,9 @@ impl Browser {
             }
             if self.scanning.is_none() && now >= self.next_scan {
                 self.next_scan = now + Duration::from_secs(5);
-                let greeting = match plx_platform::i18n::local_hour() {
-                    Some(6..=11) => "Buenos días",
-                    Some(12..=19) => "Buenas tardes",
-                    Some(_) => "Buenas noches",
-                    None => "Te damos la bienvenida",
-                };
-                changed |= greeting != self.greeting;
-                self.greeting = greeting;
+                let hour = i18n::local_hour();
+                changed |= hour != self.hour;
+                self.hour = hour;
                 let (send, receive) = mpsc::sync_channel(1);
                 if plx_base::task::spawn_off_frame("cineusb-volumes", move |_| {
                     let _ = send.send(scan_volumes());
@@ -151,6 +228,10 @@ impl Browser {
                     self.scanning = Some(receive);
                 }
             }
+        }
+        if self.action.is_some_and(|action| !self.action_available(action)) {
+            self.action = None;
+            changed = true;
         }
 
         let target = self.scroll_target();
@@ -169,6 +250,83 @@ impl Browser {
     fn scroll_target(&self) -> f32 {
         let row = self.selected / COLS;
         (row as f32 * GRID.pitch() + GRID.h - 570.0).max(0.0)
+    }
+
+    fn volume(&self) -> Option<&Volume> {
+        self.folders.last().map(|folder| &folder.volume)
+            .or_else(|| self.scan.volumes.get(self.selected))
+    }
+
+    fn selected_video(&self) -> Option<(&Volume, PathBuf)> {
+        let folder = self.folders.last()?;
+        let entry = folder.entries.get(self.selected)?;
+        (entry.kind == Kind::Video).then(|| (&folder.volume, folder.path.join(&entry.name)))
+    }
+
+    fn action_available(&self, action: Action) -> bool {
+        match action {
+            Action::Settings => true,
+            Action::Delete => self.selected_video().is_some_and(|(volume, _)| system_mount(volume).is_some()),
+            Action::Eject => self.volume().and_then(system_mount).is_some(),
+        }
+    }
+
+    fn open_action(&mut self, action: Action) {
+        if self.pending.is_some() || !self.action_available(action) { return; }
+        self.option = 0;
+        self.status.clear();
+        self.dialog = match action {
+            Action::Settings => {
+                self.option = usize::from(i18n::current().language() == Language::Ca);
+                Some(Dialog::Settings)
+            }
+            Action::Delete => self.selected_video().map(|(volume, path)| Dialog::Delete { volume: volume.clone(), path }),
+            Action::Eject => self.volume().cloned().map(Dialog::Eject),
+        };
+    }
+
+    fn choose_option(&mut self) {
+        if self.language.is_some() { return; }
+        match self.dialog.take() {
+            Some(Dialog::Settings) => {
+                let preference = if self.option == 0 { Preference::Es } else { Preference::Ca };
+                let (reply, receive) = mpsc::channel();
+                super::preferences::execute(plx_screens::registry::PreferenceCmd::Language { language: preference, reply });
+                self.language = Some((preference, receive));
+                self.dialog = Some(Dialog::Settings);
+            }
+            Some(Dialog::Delete { volume, path }) if self.option == 1 => {
+                if !self.scan.volumes.contains(&volume) { return; }
+                self.status = tr("Eliminando archivo…", "Esborrant el fitxer…").into();
+                self.request(move || {
+                    let result = mutate_usb(Action::Delete, &volume, &path);
+                    DiskResult::Delete(path, result)
+                });
+                self.mutating = self.pending.is_some();
+            }
+            Some(Dialog::Eject(volume)) if self.option == 1 => {
+                if !self.scan.volumes.contains(&volume) { return; }
+                self.status = tr("Expulsando disco…", "Expulsant el disc…").into();
+                self.request(move || {
+                    let result = mutate_usb(Action::Eject, &volume, &volume.path);
+                    DiskResult::Eject(volume, result)
+                });
+                self.mutating = self.pending.is_some();
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_mutation(&mut self, result: Result<(), String>, success: &str, failure: &str) {
+        self.scanning = None;
+        self.next_scan = Instant::now();
+        self.status = match result {
+            Ok(()) => success.into(),
+            Err(error) => {
+                plx_base::eventlog::log(&format!("cineusb: USB action failed: {error}"));
+                failure.into()
+            }
+        };
     }
 
     fn select(&mut self, index: usize, snap: bool) {
@@ -192,7 +350,7 @@ impl Browser {
                 Kind::Video => {
                     let title = display_name(entry);
                     let mount_id = system_mount(&folder.volume);
-                    self.status = "Abriendo vídeo…".into();
+                    self.status = tr("Abriendo vídeo…", "Obrint el vídeo…").into();
                     self.request(move || {
                         let result = inspect_video(&path, mount_id).map(|(file, info)| (file, info, title));
                         DiskResult::Video(result)
@@ -203,22 +361,21 @@ impl Browser {
             self.open_folder(volume.clone(), volume.path.clone());
         } else {
             self.next_scan = Instant::now();
-            self.status = "Buscando discos USB…".into();
+            self.status = tr("Buscando discos USB…", "Buscant discos USB…").into();
         }
     }
 
     fn open_folder(&mut self, volume: Volume, path: PathBuf) {
-        self.status = "Abriendo carpeta…".into();
+        self.status = tr("Abriendo carpeta…", "Obrint la carpeta…").into();
         self.request(move || {
             let entries = list_folder(&path, system_mount(&volume));
-            if let Err(error) = &entries {
-                plx_base::eventlog::log(&format!("cineusb: USB folder listing failed: {error}"));
-            }
             DiskResult::Folder(volume, path, entries)
         });
     }
 
     fn back(&mut self) {
+        if self.mutating || self.language.is_some() { return; }
+        if self.dialog.take().is_some() || self.action.take().is_some() { return; }
         if self.pending.take().is_some() {
             self.status.clear();
             return;
@@ -234,6 +391,19 @@ impl Browser {
     }
 
     fn click(&mut self, x: f32, y: f32) {
+        if self.mutating || self.language.is_some() { return; }
+        if self.dialog.is_some() {
+            if let Some(index) = OPTIONS.iter().position(|rect| hit(*rect, x, y)) {
+                self.option = index;
+                self.choose_option();
+            }
+            return;
+        }
+        if let Some((action, _)) = ACTIONS.iter().find(|(action, rect)| self.action_available(*action) && hit(*rect, x, y)) {
+            self.action = Some(*action);
+            self.open_action(*action);
+            return;
+        }
         // Magic Remote clicks are pointer events on webOS; the standalone USB
         // browser has no shared hit-map. Pick the clicked card when possible,
         // or activate the focused card (the physical OK button may arrive with
@@ -244,12 +414,46 @@ impl Browser {
                 && y >= rect.y && y < rect.y + rect.h
         }) {
             self.select(index, false);
+            self.action = None;
         }
-        self.open();
+        if let Some(action) = self.action {
+            self.open_action(action);
+        } else {
+            self.open();
+        }
     }
 
     fn key(&mut self, key: Key, repeat: bool) {
+        if self.mutating || self.language.is_some() { return; }
+        if self.dialog.is_some() {
+            match key {
+                Key::Left { alt: false } => self.option = 0,
+                Key::Right { alt: false } => self.option = 1,
+                Key::Ok if !repeat => self.choose_option(),
+                Key::Back if !repeat => self.back(),
+                _ => {}
+            }
+            return;
+        }
+        if let Some(action) = self.action {
+            let actions: Vec<_> = ACTIONS.iter().map(|(action, _)| *action)
+                .filter(|action| self.action_available(*action)).collect();
+            let index = actions.iter().position(|candidate| *candidate == action).unwrap_or(0);
+            match key {
+                Key::Left { alt: false } => self.action = actions.get(index.saturating_sub(1)).copied(),
+                Key::Right { alt: false } => self.action = actions.get(index + 1).copied().or(Some(action)),
+                Key::Down => self.action = None,
+                Key::Back if !repeat => self.back(),
+                Key::Ok if !repeat => self.open_action(action),
+                _ => {}
+            }
+            return;
+        }
         let dir = match key {
+            Key::Up if self.selected < COLS => {
+                self.action = Some(Action::Settings);
+                return;
+            }
             Key::Up => Dir::Up,
             Key::Down => Dir::Down,
             Key::Left { alt: false } => Dir::Left,
@@ -269,7 +473,7 @@ impl Browser {
             let (cover, kind) = art::entry_cover(entry, folder.collection);
             Some((display_name(entry), kind, cover))
         } else {
-            self.scan.volumes.get(index).map(|volume| (volume_name(volume), "Disco USB", Cover::Drive))
+        self.scan.volumes.get(index).map(|volume| (volume_name(volume), tr("Disco USB", "Disc USB"), Cover::Drive))
         }
     }
 
@@ -279,7 +483,17 @@ impl Browser {
         let p = Painter::root().alpha(plx_ui::nav::page_alpha());
         let x = plx_ui::consts::MARGIN_X;
         let width = 1920.0 - 2.0 * x;
-        draw_line(p, "CineUSB  ·  Biblioteca local", Rect::new(x, 56.0, width, 34.0), theme::size::CAPTION, true);
+        draw_line(p, "CineUSB  ·  Biblioteca local", Rect::new(x, 56.0, 720.0, 34.0), theme::size::CAPTION, true);
+        for (action, rect) in ACTIONS {
+            if self.action_available(action) {
+                let label = match action {
+                    Action::Settings => tr("Ajustes", "Ajustos"),
+                    Action::Delete => tr("Eliminar archivo", "Esborra el fitxer"),
+                    Action::Eject => tr("Desconectar USB de forma segura", "Expulsa l’USB amb seguretat"),
+                };
+                draw_button(p, rect, label, self.action == Some(action), action == Action::Delete);
+            }
+        }
         let breadcrumb = self.folders.last().map(|folder| {
             let relative = folder.path.strip_prefix(&folder.volume.path).unwrap_or(&folder.path);
             let mut parts = vec![volume_name(&folder.volume)];
@@ -288,22 +502,30 @@ impl Browser {
         });
         let focused = self.item(self.selected);
         let (title, detail) = if breadcrumb.is_none() {
-            (self.greeting, "Tus películas y series, desde USB")
+            let greeting = match self.hour {
+                Some(6..=11) => tr("Buenos días", "Bon dia"),
+                Some(12..=19) => tr("Buenas tardes", "Bona tarda"),
+                Some(_) => tr("Buenas noches", "Bona nit"),
+                None => tr("Te damos la bienvenida", "Benvingut a CineUSB"),
+            };
+            (greeting, tr("Tus películas y series, desde USB", "Les teves pel·lícules i sèries, a l’USB"))
         } else {
             focused.as_ref().map_or(("Biblioteca USB", "Carpeta"), |(title, kind, _)| (title.as_str(), *kind))
         };
         draw_line(p, title, Rect::new(x, 108.0, width, 96.0), theme::size::HERO, true);
         draw_line(p, detail, Rect::new(x, 206.0, width, 42.0), theme::size::BODY, false);
-        let section = breadcrumb.as_deref().unwrap_or("Discos conectados");
+        let section = breadcrumb.as_deref().unwrap_or(tr("Discos conectados", "Discos connectats"));
         draw_line(p, section, Rect::new(x, 272.0, width, 48.0), theme::size::HEADLINE, true);
 
         if self.len() == 0 {
             let message = if self.folders.last().is_some() {
-                "Esta carpeta no contiene subcarpetas ni vídeos compatibles."
+                tr("Esta carpeta no contiene subcarpetas ni vídeos compatibles.",
+                    "En aquesta carpeta no hi ha subcarpetes ni vídeos compatibles.")
             } else if self.scan.hidden_mounts {
-                "webOS detecta el USB, pero CineUSB todavía no puede leer su montaje. Pulsa OK para reintentar."
+                tr("CineUSB aún no puede leer el disco. Pulsa OK para volver a intentarlo.",
+                    "CineUSB encara no pot llegir el disc. Prem OK per tornar-ho a provar.")
             } else {
-                "Conecta un disco USB directamente a la televisión."
+                tr("Conecta un disco USB directamente a la televisión.", "Connecta un disc USB a la tele.")
             };
             draw_line(p, message, Rect::new(x, 380.0, width, 70.0), theme::size::BODY, false);
         } else {
@@ -313,20 +535,81 @@ impl Browser {
             self.draw_tile(p, self.selected, true);
             p.clip_clear();
         }
-        let hint = if self.status.is_empty() { "Flechas  Navegar      OK  Abrir / reproducir      Atrás  Volver" } else { &self.status };
+        let hint = if self.status.is_empty() {
+            tr("↑ Acciones    ·    OK Abrir o reproducir    ·    Atrás Volver",
+                "↑ Accions    ·    OK Obre o reprodueix    ·    Enrere Torna")
+        } else { &self.status };
         draw_line(p, hint, Rect::new(x, 990.0, width, 48.0), theme::size::CAPTION, false);
+        if let Some(dialog) = &self.dialog { self.draw_dialog(p, dialog); }
+    }
+
+    fn draw_dialog(&self, p: Painter, dialog: &Dialog) {
+        let cancel = tr("Cancelar", "Cancel·la");
+        let (title, subject, detail, options) = match dialog {
+            Dialog::Settings => (tr("Idioma de CineUSB", "Idioma del CineUSB"), String::new(),
+                if self.language.is_some() { tr("Guardando…", "Desant…") }
+                else if self.status.is_empty() { tr("Elige el idioma de la app.", "Tria en quin idioma vols fer servir l’app.") }
+                else { &self.status }, ["Castellano", "Català"]),
+            Dialog::Delete { path, .. } => (tr("¿Eliminar este archivo?", "Vols esborrar aquest fitxer?"),
+                path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                tr("Se borrará del disco y no se podrá deshacer.", "S’esborrarà del disc i no el podràs recuperar."),
+                [cancel, tr("Eliminar archivo", "Esborra el fitxer")]),
+            Dialog::Eject(volume) => (tr("Desconectar USB de forma segura", "Expulsa l’USB amb seguretat"),
+                volume_name(volume), tr("Espera el aviso antes de retirar el disco.", "Espera l’avís abans de treure el disc."),
+                [cancel, tr("Expulsar disco", "Expulsa el disc")]),
+        };
+        let (x, w) = (PANEL.x + 45.0, PANEL.w - 90.0);
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.62), theme::scrim_black(0.62), 0.0);
+        p.rect_sheened(PANEL, theme::ALERT_PANEL_RAD, theme::PANEL_TOP, theme::PANEL_BOT);
+        draw_line(p, title, Rect::new(x, 361.0, w, 60.0), theme::size::HEADLINE, true);
+        draw_line(p, &subject, Rect::new(x, 435.0, w, 48.0), theme::size::BODY, true);
+        draw_line(p, detail, Rect::new(x, 495.0, w, 42.0), theme::size::CAPTION, false);
+        for (index, (rect, label)) in OPTIONS.into_iter().zip(options).enumerate() {
+            draw_button(p, rect, label, self.option == index, index == 1 && matches!(dialog, Dialog::Delete { .. }));
+        }
     }
 
     fn draw_tile(&self, p: Painter, index: usize, focused: bool) {
         let Some((title, kind, cover)) = self.item(index) else { return };
         let frame = poster_grid::cell_in(&GRID, index, TOP, self.scroll.pos, &[]);
-        let scale = self.pop.scale(index, focused, &STYLE);
+        let scale = self.pop.scale(index, focused && self.action.is_none(), &STYLE);
         let card = frame.scaled(scale);
         let radius = STYLE.tile_radius(card, scale);
         let lift = ((scale - 1.0) / (STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
         cover.draw(p, card, radius, lift);
         draw_line(p, kind, Rect::new(card.x + 16.0, card.y + card.h - 81.0, card.w - 32.0, 28.0), theme::size::CAPTION, false);
         widgets::poster_label(p, card, radius, &title, &TtfMeasure);
+    }
+}
+
+fn hit(rect: Rect, x: f32, y: f32) -> bool {
+    x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
+}
+
+fn draw_button(p: Painter, rect: Rect, label: &str, focused: bool, danger: bool) {
+    let (fill, ink) = if focused { (theme::ACCENT, theme::ACCENT_INK) }
+        else if danger { (theme::CONTROL_DANGER_IDLE_FILL, theme::CONTROL_DANGER_IDLE_INK) }
+        else { (theme::CONTROL_IDLE_FILL, theme::TEXT_PRIMARY) };
+    widgets::draw_control_face(p, rect, fill, focused, widgets::ControlGround::Keyed);
+    let run = TtfMeasure.fit_line(label, rect.w - 24.0, theme::size::CAPTION, true);
+    Label::new(run.as_ptr(), theme::size::CAPTION, ink).h(HAlign::Center).bold().draw(p, rect);
+}
+
+fn mutate_usb(action: Action, volume: &Volume, path: &std::path::Path) -> Result<(), String> {
+    #[cfg(not(feature = "hostsim"))]
+    {
+        let id = system_mount(volume).ok_or("missing live USB mount")?;
+        let result = match action {
+            Action::Delete => crate::port::delete_usb_video(path, id),
+            Action::Eject => crate::port::eject_usb_disk(path, id),
+            Action::Settings => unreachable!(),
+        };
+        result.map_err(|error| format!("{error:?}"))
+    }
+    #[cfg(feature = "hostsim")]
+    {
+        let _ = (action, volume, path);
+        Err("USB actions require webOS".into())
     }
 }
 
@@ -493,7 +776,7 @@ pub(super) fn tick(app: &mut App) {
         }
         plx_media::route::clear_url(ps);
     }
-    app.usb.status = "No se pudo iniciar el reproductor con este vídeo.".into();
+    app.usb.status = tr("No se pudo iniciar el reproductor con este vídeo.", "No s’ha pogut reproduir aquest vídeo.").into();
 }
 
 #[cfg(test)]

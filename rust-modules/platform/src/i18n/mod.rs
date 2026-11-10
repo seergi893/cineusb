@@ -508,6 +508,9 @@ pub fn webos_release_line(info: &crate::tv::device::Info) -> String {
     }
 }
 static CURRENT: OnceLock<LocaleContext> = OnceLock::new();
+static USB_ES: OnceLock<LocaleContext> = OnceLock::new();
+static USB_CA: OnceLock<LocaleContext> = OnceLock::new();
+static USB_LANGUAGE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 static SAVED_PREFERENCE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// The confirmed next-launch setting. Reading it never touches credential storage.
@@ -592,6 +595,12 @@ pub fn current() -> &'static LocaleContext {
     if let Some(cx) = THREAD_LOCALE.with(std::cell::Cell::get) {
         return cx;
     }
+    let usb = match Preference::from_slot(USB_LANGUAGE.load(std::sync::atomic::Ordering::Acquire)) {
+        Preference::Es => USB_ES.get(),
+        Preference::Ca => USB_CA.get(),
+        _ => None,
+    };
+    if let Some(cx) = usb { return cx; }
     #[cfg(any(test, feature = "test-support"))]
     {
         CURRENT.get_or_init(|| LocaleContext::resolve(Preference::En, None, None, None, None))
@@ -602,6 +611,22 @@ pub fn current() -> &'static LocaleContext {
             .get()
             .expect("locale initialized before any screen or Plex request")
     }
+}
+
+/// Apply CineUSB's two-language preference to its library and the shared playback menus.
+pub fn apply_usb_language(preference: Preference) {
+    let (preference, slot) = match preference {
+        Preference::Ca => (Preference::Ca, &USB_CA),
+        _ => (Preference::Es, &USB_ES),
+    };
+    let previous = current();
+    slot.get_or_init(|| LocaleContext::resolve(preference, None, Some(previous.format_locale()),
+        match previous.clock() {
+            Clock::H12 => Some("12"),
+            Clock::H24 => Some("24"),
+            Clock::Locale => None,
+        }, None));
+    USB_LANGUAGE.store(preference.slot(), std::sync::atomic::Ordering::Release);
 }
 // Always compiled, though no test calls it: the application's boot calls it from code that is
 // itself `cfg(not(test))`, and that code builds against this crate WITH `test-support` whenever

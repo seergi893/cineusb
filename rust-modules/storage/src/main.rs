@@ -36,7 +36,9 @@ fn main() {
                 ("--cineusb-open", [pid, slot, id, path]) => Some(usb_open::run(pid, slot, id, path)),
                 ("--cineusb-volumes", []) => Some(usb_open::list_volumes()),
                 ("--cineusb-list", [id, path]) => Some(usb_open::list_folder(id, path)),
-                ("--cineusb-open" | "--cineusb-volumes" | "--cineusb-list", _) => {
+                ("--cineusb-delete", [id, path]) => Some(usb_open::delete(id, path)),
+                ("--cineusb-eject", [id, path]) => Some(usb_open::eject(id, path)),
+                ("--cineusb-open" | "--cineusb-volumes" | "--cineusb-list" | "--cineusb-delete" | "--cineusb-eject", _) => {
                     Some(Err(std::io::Error::other("invalid CineUSB USB request")))
                 }
                 _ => None,

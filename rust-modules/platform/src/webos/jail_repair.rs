@@ -162,6 +162,26 @@ pub fn list_usb_folder(path: &Path, mount_id: u64) -> Result<Vec<(std::ffi::OsSt
     }).collect()
 }
 
+#[cfg(target_os = "linux")]
+pub fn delete_usb_video(path: &Path, mount_id: u64) -> Result<(), Failure> {
+    usb_mutation("--cineusb-delete", path, mount_id)
+}
+
+#[cfg(target_os = "linux")]
+pub fn eject_usb_disk(path: &Path, mount_id: u64) -> Result<(), Failure> {
+    usb_mutation("--cineusb-eject", path, mount_id)
+}
+
+#[cfg(target_os = "linux")]
+fn usb_mutation(operation: &str, path: &Path, mount_id: u64) -> Result<(), Failure> {
+    let hex = usb_path_hex(path)?;
+    if run_usb_helper(&format!("{operation} {mount_id} '{hex}'"))? == "CINEUSB_USB_OK" {
+        Ok(())
+    } else {
+        Err(Failure::CommandFailed)
+    }
+}
+
 fn device_readable(path: &str) -> bool {
     std::ffi::CString::new(path)
         .map(|p| unsafe { libc::access(p.as_ptr(), libc::R_OK) } == 0)
