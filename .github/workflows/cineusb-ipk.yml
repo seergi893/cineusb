@@ -42,10 +42,21 @@ jobs:
               -f lavfi -i anullsrc=r=48000:cl=stereo -t 1 -c:v libx264 -c:a aac \
               "$CINEUSB_FD_FIXTURES/Película.$ext"
           done
+          printf '1\\n00:00:00,100 --> 00:00:00,800\\nFull subtitle\\n' > "$CINEUSB_FD_FIXTURES/full.srt"
+          printf '1\\n00:00:00,200 --> 00:00:00,900\\nSigns subtitle\\n' > "$CINEUSB_FD_FIXTURES/signs.srt"
+          ffmpeg -nostdin -v error -f lavfi -i color=size=160x90:rate=24 \\
+            -f lavfi -i anullsrc=r=48000:cl=stereo \\
+            -i "$CINEUSB_FD_FIXTURES/full.srt" -i "$CINEUSB_FD_FIXTURES/signs.srt" \\
+            -t 1 -map 0:v -map 1:a -map 2:0 -map 3:0 \\
+            -c:v libx264 -c:a aac -c:s srt \\
+            -metadata:s:s:0 language=spa -metadata:s:s:0 title=Full \\
+            -metadata:s:s:1 language=eng -metadata:s:s:1 title=Signs \\
+            -disposition:s:0 default -disposition:s:1 forced \\
+            "$CINEUSB_FD_FIXTURES/subtitled.mkv"
           printf 'Not a Matroska file\n' > "$CINEUSB_FD_FIXTURES/invalid.mkv"
           cd rust-modules
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plx_play_feed --lib --features plx_base/hostsim \
-            cineusb_opens_and_reopens_mkv_and_mp4_by_descriptor -- --nocapture
+            cineusb_ -- --nocapture
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-storage --bin plxnative-storage usb_
   package:
     if: github.repository == 'seergi893/cineusb'
