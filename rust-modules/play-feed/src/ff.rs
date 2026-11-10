@@ -7275,3 +7275,23 @@ mod aac_timestamp_tests;
 #[cfg(test)]
 #[path = "ff_packet_framing_tests.rs"]
 mod packet_framing_tests;
+
+#[cfg(test)]
+mod cineusb_local_file_read_tests {
+    use super::*;
+
+    #[test]
+    fn local_reader_handles_random_offsets_and_end_of_file() {
+        let dir = plx_base::testscratch::process_dir("cineusb-local-file-read");
+        let path = dir.join("sample.mkv");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let file = File::open(&path).unwrap();
+        let mut data = [0u8; 3];
+        assert_eq!(local_read_bytes(&file, 2, &mut data).unwrap(), 3);
+        assert_eq!(&data, b"cde");
+        assert_eq!(local_read_bytes(&file, 6, &mut data).unwrap(), 0);
+        assert_eq!(local_read_bytes(&file, 0, &mut data).unwrap(), 3);
+        assert_eq!(&data, b"abc");
+        plx_base::testscratch::remove_tree(&dir);
+    }
+}
