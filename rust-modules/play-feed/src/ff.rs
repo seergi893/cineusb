@@ -7254,6 +7254,26 @@ mod cineusb_descriptor_tests {
 
     // The packaging workflow supplies fixtures and the host build of the shipping FFmpeg.
     #[test]
+    fn cineusb_reads_normal_forced_and_sdh_tracks_from_real_mkv() {
+        let Some(fixtures) = std::env::var_os("CINEUSB_FD_FIXTURES") else { return };
+        plx_media_codecs::ffi::boot();
+        assert!(abi_ok(), "bundled FFmpeg is required to inspect the file");
+        let file = File::open(std::path::PathBuf::from(fixtures).join("subtitled.mkv")).unwrap();
+        let info = probe_local(&file).expect("probe local MKV with two subtitle streams");
+        assert_eq!(info.subtitles.len(), 2);
+        assert_eq!(info.subtitles[0].stream_index, 2);
+        assert_eq!(info.subtitles[0].language.as_deref(), Some("spa"));
+        assert_eq!(info.subtitles[0].title, "Full");
+        assert!(info.subtitles[0].default);
+        assert!(!info.subtitles[0].forced);
+        assert_eq!(info.subtitles[1].stream_index, 3);
+        assert_eq!(info.subtitles[1].language.as_deref(), Some("eng"));
+        assert_eq!(info.subtitles[1].title, "Signs");
+        assert!(info.subtitles[1].forced);
+        assert!(!info.subtitles[1].default);
+    }
+
+    #[test]
     fn cineusb_opens_and_reopens_mkv_and_mp4_by_descriptor() {
         let Some(fixtures) = std::env::var_os("CINEUSB_FD_FIXTURES") else { return };
         plx_media_codecs::ffi::boot();
