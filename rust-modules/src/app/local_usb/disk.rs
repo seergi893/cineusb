@@ -3,6 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::ffi::OsStringExt;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -185,6 +186,13 @@ pub(super) fn open_video(path: &Path) -> io::Result<fs::File> {
             io::ErrorKind::InvalidInput,
             "expected a regular file",
         ));
+    }
+    // O_NONBLOCK protects the initial open if the directory entry was replaced by a FIFO.
+    // The regular file is now pinned by its descriptor. Give FFmpeg blocking reads on it.
+    let fd = file.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(file)
 }

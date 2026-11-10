@@ -96,3 +96,8 @@ mod tests {
 pub(crate) fn sync_usb_volumes() -> Result<(), plx_platform::tv::sandbox::Failure> {
     plx_platform::webos::jail_repair::sync_usb_volumes()
 }
+
+#[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
+pub(crate) fn open_usb_file(path: &std::path::Path) -> Result<std::fs::File, plx_platform::tv::sandbox::Failure> {
+    plx_platform::webos::jail_repair::open_usb_file(path)
+}

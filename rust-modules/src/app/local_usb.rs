@@ -188,9 +188,7 @@ impl Browser {
                     let title = display_name(entry);
                     self.status = "Abriendo vídeo…".into();
                     self.request(move || {
-                        let result = disk::open_video(&path).map_err(|err| format!("No se pudo abrir el vídeo · {err}"))
-                            .and_then(|file| plx_play_feed::probe_local(&file)
-                                .map(|info| (file, info, title)).map_err(str::to_owned));
+                        let result = inspect_video(&path).map(|(file, info)| (file, info, title));
                         DiskResult::Video(result)
                     });
                 }
@@ -321,6 +319,20 @@ impl Browser {
             card.y + (card.h - 64.0) / 2.0, 64.0, 64.0), theme::TEXT_SECONDARY);
         widgets::poster_label(p, card, radius, &title, &TtfMeasure);
     }
+}
+
+fn inspect_video(path: &std::path::Path) -> Result<(File, plx_play_feed::LocalMedia), String> {
+    let inspect = |file: File| plx_play_feed::probe_local(&file).map(|info| (file, info));
+    let direct = disk::open_video(path).map_err(|error| format!("No se pudo abrir el vídeo · {error}"))
+        .and_then(inspect);
+    #[cfg(not(feature = "hostsim"))]
+    if direct.is_err() {
+        match crate::port::open_usb_file(path) {
+            Ok(file) => return inspect(file),
+            Err(error) => plx_base::eventlog::log(&format!("cineusb: Homebrew USB descriptor failed: {error:?}")),
+        }
+    }
+    direct
 }
 
 fn display_name(entry: &Entry) -> String {

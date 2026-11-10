@@ -14,8 +14,8 @@ use plx_net::range_io::{self, RangeFactory, RangeReader};
 use plx_playback_contract::demux::DemuxFault;
 use std::ffi::CString;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::FileExt;
+use std::io::Seek;
+use std::os::fd::AsRawFd;
 use std::os::raw::{c_int, c_long, c_uchar, c_uint, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -435,73 +435,6 @@ const SEEK_CUR: c_int = 1;
 pub const SEEK_END: c_int = 2;
 pub const AVSEEK_SIZE: c_int = 0x10000;
 
-static USB_PREAD_FALLBACK_LOGGED: AtomicBool = AtomicBool::new(false);
-
-// LG's tntfs filesystem may fail on some large-file reads.
-// Positional pread is preferred so the original descriptor's cursor is untouched.
-// If pread fails, retry with a normal seek+read before concluding the USB
-// filesystem returned a genuine I/O error. These operations run on the demux
-// worker's single local descriptor; the fallback is not for concurrent readers.
-fn local_read_bytes(file: &File, offset: u64, buffer: &mut [u8]) -> std::io::Result<usize> {
-    match file.read_at(buffer, offset) {
-        Ok(n) => Ok(n),
-        Err(pread_error) => {
-            let mut borrowed = file;
-            match borrowed.seek(SeekFrom::Start(offset)).and_then(|_| borrowed.read(buffer)) {
-                Ok(n) => {
-                    if !USB_PREAD_FALLBACK_LOGGED.swap(true, Ordering::Relaxed) {
-                        plx_base::eventlog::log(&format!(
-                            "cineusb: positional USB read failed (errno={:?}) but seek+read succeeded at offset={offset}",
-                            pread_error.raw_os_error()
-                        ));
-                    }
-                    Ok(n)
-                }
-                Err(fallback_error) => {
-                    plx_base::eventlog::log(&format!(
-                        "cineusb: USB read failed at offset={offset}, pread_errno={:?}, seek_read_errno={:?}",
-                        pread_error.raw_os_error(), fallback_error.raw_os_error()
-                    ));
-                    Err(fallback_error)
-                }
-            }
-        }
-    }
-}
-
-unsafe fn local_read(file: &File, offset: &mut i64, dst: *mut u8, len: c_int) -> c_int {
-    if dst.is_null() || len <= 0 || *offset < 0 { return AVERROR_IO; }
-    let buffer = std::slice::from_raw_parts_mut(dst, len as usize);
-    match local_read_bytes(file, *offset as u64, buffer) {
-        Ok(0) => AVERROR_EOF,
-        Ok(n) => { *offset += n as i64; n as c_int }
-        Err(_) => AVERROR_IO,
-    }
-}
-
-struct LocalProbe<'a> { file: &'a File, offset: i64, size: i64 }
-
-extern "C" fn local_probe_read(ctx: *mut c_void, dst: *mut u8, len: c_int) -> c_int {
-    unsafe {
-        let probe = &mut *ctx.cast::<LocalProbe<'_>>();
-        local_read(probe.file, &mut probe.offset, dst, len)
-    }
-}
-
-extern "C" fn local_probe_seek(ctx: *mut c_void, offset: i64, whence: c_int) -> i64 {
-    let probe = unsafe { &mut *ctx.cast::<LocalProbe<'_>>() };
-    let base = match whence & !0x20000 {
-        AVSEEK_SIZE => return probe.size,
-        SEEK_SET => 0,
-        SEEK_CUR => probe.offset,
-        SEEK_END => probe.size,
-        _ => return -1,
-    };
-    let Some(target) = base.checked_add(offset).filter(|target| *target >= 0) else { return -1 };
-    probe.offset = target;
-    target
-}
-
 pub struct LocalMedia {
     pub video: String,
     pub audio: String,
@@ -514,51 +447,51 @@ pub struct LocalMedia {
     pub dovi: Option<AVDOVIDecoderConfigurationRecord>,
 }
 
-/// Probe the open descriptor with the same bundled demuxers the playback worker uses.
-pub fn probe_local(file: &File) -> Result<LocalMedia, &'static str> {
-    if !abi_ok() { return Err("El lector de vídeo no está disponible."); }
+/// Each attempt exclusively owns the file cursor. FFmpeg duplicates the descriptor, so the
+/// probe and any later restart must rewind the shared cursor before handing it over again.
+unsafe fn open_local_format(file: &File, fmt: &mut *mut AVFormatContext) -> c_int {
+    if let Err(error) = (&*file).rewind() {
+        return -error.raw_os_error().unwrap_or(libc::EIO);
+    }
+    let mut options = std::ptr::null_mut();
+    let mut result = av_dict_set_int(&mut options, c"fd".as_ptr(), i64::from(file.as_raw_fd()), 0);
+    if result >= 0 {
+        result = av_dict_set(&mut options, c"protocol_whitelist".as_ptr(), c"fd".as_ptr(), 0);
+    }
+    if result >= 0 {
+        result = avformat_open_input(fmt, c"fd:".as_ptr(), std::ptr::null_mut(), &mut options);
+    }
+    av_dict_free(&mut options);
+    result
+}
+
+/// Probe the same open descriptor and native FFmpeg input that Feed will use.
+pub fn probe_local(file: &File) -> Result<LocalMedia, String> {
+    if !abi_ok() { return Err("El lector de vídeo no está disponible.".into()); }
+    if file.metadata().map_err(|error| format!("No se pudo consultar el vídeo · {error}"))?.len() == 0 {
+        return Err("El archivo de vídeo está vacío.".into());
+    }
     ensure_registered();
-    let size = file.metadata().ok().and_then(|m| i64::try_from(m.len()).ok())
-        .ok_or("No se pudo consultar el tamaño del vídeo.")?;
-    let mut input = LocalProbe { file, offset: 0, size };
     unsafe {
-        let buffer = av_malloc(65536).cast::<u8>();
-        if buffer.is_null() { return Err("Memoria insuficiente para abrir el vídeo."); }
-        let avio = avio_alloc_context(buffer, 65536, 0,
-            (&mut input as *mut LocalProbe<'_>).cast(), Some(local_probe_read), None, Some(local_probe_seek));
-        if avio.is_null() {
-            free_ptr(buffer.cast());
-            return Err("Memoria insuficiente para abrir el vídeo.");
-        }
-        let mut fmt = avformat_alloc_context();
-        if fmt.is_null() {
-            free_avio(avio);
-            return Err("Memoria insuficiente para abrir el vídeo.");
-        }
-        (*fmt).pb = avio;
-        // Keep the two failure stages distinct: a read problem, an unrecognised
-        // container and missing stream metadata must not all look identical.
-        let open_code = avformat_open_input(
-            &mut fmt, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut()
-        );
-        let result = if open_code < 0 {
-            plx_base::eventlog::log(&format!(
-                "cineusb: FFmpeg local avformat_open_input failed code={open_code}"
-            ));
-            Err("No se pudo abrir o identificar el contenedor del vídeo (consulta el registro).")
-        } else {
-            let stream_code = avformat_find_stream_info(fmt, std::ptr::null_mut());
-            if stream_code < 0 {
-                plx_base::eventlog::log(&format!(
-                    "cineusb: FFmpeg local avformat_find_stream_info failed code={stream_code}"
-                ));
-                Err("No se pudieron analizar las pistas del vídeo (consulta el registro).")
+        let mut fmt = std::ptr::null_mut();
+        let code = open_local_format(file, &mut fmt);
+        let result = if code < 0 {
+            plx_base::eventlog::log(&format!("cineusb: avformat_open_input(fd) failed code={code}"));
+            if code == -libc::EIO {
+                Err(format!("Error de lectura del disco USB ({code})."))
             } else {
-                local_stream_facts(fmt)
+                Err(format!("No se pudo abrir o identificar el contenedor del vídeo ({code})."))
+            }
+        } else {
+            let code = avformat_find_stream_info(fmt, std::ptr::null_mut());
+            if code < 0 {
+                plx_base::eventlog::log(&format!("cineusb: avformat_find_stream_info(fd) failed code={code}"));
+                Err(format!("No se pudieron analizar las pistas del vídeo ({code})."))
+            } else {
+                local_stream_facts(fmt).map_err(str::to_owned)
             }
         };
         avformat_close_input(&mut fmt);
-        free_avio(avio);
         result
     }
 }
@@ -1624,12 +1557,6 @@ fn heal_at_offset(s: &mut AvioState) -> bool {
 pub extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
     unsafe {
         let s = &mut *(op as *mut AvioState);
-        if let Src::Local(file) = &s.src {
-            if crate::aq::aq_is_aborted(s.aq) || s.parked_at_end { return AVERROR_EOF; }
-            let result = local_read(file, &mut s.off, dst, n);
-            s.io_failed = result == AVERROR_IO;
-            return result;
-        }
         loop {
             // interrupt: bail out of a blocked read on teardown (aborted) only. A seek does NOT
             // interrupt the read — the demux thread services it itself between two av_read_frame
@@ -1977,8 +1904,7 @@ pub extern "C" fn seek_cb(op: *mut c_void, offset: i64, whence: c_int) -> i64 {
             // deliberate: bytes from the head of the file, delivered as though they were the bytes
             // at `target`, are corruption that looks like success.
             Src::Curl(cs) => cs.seek(target),
-            Src::Local(_) => true,
-            Src::Idle => false,
+            Src::Idle | Src::Local(_) => false,
         };
         if let Some(cs) = hopped_to_tls {
             s.src = Src::Curl(cs);
@@ -6326,41 +6252,47 @@ pub(crate) fn demux_source(
                     body_silence: BODY_SILENCE,
                     heal: HealBudget::default(),
                 });
-                let buf = av_malloc(65536) as *mut u8;
-                if buf.is_null() {
-                    session.media().record("ff: av_malloc failed");
-                    session.media().publish(DemuxEffect::NoteFault(DemuxFault::Other));
-                    break;
-                }
-                let avio = avio_alloc_context(
-                    buf,
-                    65536,
-                    0,
-                    &mut *state as *mut AvioState as *mut c_void,
-                    Some(read_cb),
-                    None,
-                    Some(seek_cb),
-                );
-                if avio.is_null() {
-                    session.media().record("ff: avio_alloc_context failed");
-                    session.media().publish(DemuxEffect::NoteFault(DemuxFault::Other));
-                    free_ptr(buf as *mut c_void);
-                    break;
-                }
-                let mut fmt = avformat_alloc_context();
-                if fmt.is_null() {
-                    session.media().record("ff: avformat_alloc_context failed");
-                    session.media().publish(DemuxEffect::NoteFault(DemuxFault::Other));
-                    free_avio(avio);
-                    break;
-                }
-                (*fmt).pb = avio;
-                let r = avformat_open_input(
-                    &mut fmt,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
+                let mut avio = std::ptr::null_mut();
+                let mut fmt = std::ptr::null_mut();
+                let r = if let Src::Local(file) = &state.src {
+                    open_local_format(file, &mut fmt)
+                } else {
+                    let buf = av_malloc(65536) as *mut u8;
+                    if buf.is_null() {
+                        session.media().record("ff: av_malloc failed");
+                        session.media().publish(DemuxEffect::NoteFault(DemuxFault::Other));
+                        break;
+                    }
+                    avio = avio_alloc_context(
+                        buf,
+                        65536,
+                        0,
+                        &mut *state as *mut AvioState as *mut c_void,
+                        Some(read_cb),
+                        None,
+                        Some(seek_cb),
+                    );
+                    if avio.is_null() {
+                        session.media().record("ff: avio_alloc_context failed");
+                        session.media().publish(DemuxEffect::NoteFault(DemuxFault::Other));
+                        free_ptr(buf as *mut c_void);
+                        break;
+                    }
+                    fmt = avformat_alloc_context();
+                    if fmt.is_null() {
+                        session.media().record("ff: avformat_alloc_context failed");
+                        session.media().publish(DemuxEffect::NoteFault(DemuxFault::Other));
+                        free_avio(avio);
+                        break;
+                    }
+                    (*fmt).pb = avio;
+                    avformat_open_input(
+                        &mut fmt,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                };
                 if r < 0 || fmt.is_null() {
                     let lane_aborted = crate::aq::aq_is_aborted(aq_p);
                     session.media().record(&open_input_failure_note(r, lane_aborted));
@@ -7277,21 +7209,36 @@ mod aac_timestamp_tests;
 mod packet_framing_tests;
 
 #[cfg(test)]
-mod cineusb_local_file_read_tests {
+mod cineusb_descriptor_tests {
     use super::*;
 
+    // The packaging workflow supplies fixtures and the host build of the shipping FFmpeg.
     #[test]
-    fn local_reader_handles_random_offsets_and_end_of_file() {
-        let dir = plx_base::testscratch::process_dir("cineusb-local-file-read");
-        let path = dir.join("sample.mkv");
-        std::fs::write(&path, b"abcdef").unwrap();
-        let file = File::open(&path).unwrap();
-        let mut data = [0u8; 3];
-        assert_eq!(local_read_bytes(&file, 2, &mut data).unwrap(), 3);
-        assert_eq!(&data, b"cde");
-        assert_eq!(local_read_bytes(&file, 6, &mut data).unwrap(), 0);
-        assert_eq!(local_read_bytes(&file, 0, &mut data).unwrap(), 3);
-        assert_eq!(&data, b"abc");
-        plx_base::testscratch::remove_tree(&dir);
+    fn cineusb_opens_and_reopens_mkv_and_mp4_by_descriptor() {
+        let Some(fixtures) = std::env::var_os("CINEUSB_FD_FIXTURES") else { return };
+        plx_media_codecs::ffi::boot();
+        assert!(abi_ok(), "the bundled FFmpeg must load for the CineUSB smoke test");
+        let fixtures = std::path::PathBuf::from(fixtures);
+        for name in ["Película.mkv", "Película.mp4"] {
+            let path = fixtures.join(name);
+            let mut file = File::open(&path).unwrap();
+            std::fs::remove_file(path).unwrap();
+            file.seek(std::io::SeekFrom::End(0)).unwrap();
+            let facts = probe_local(&file).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!((facts.video.as_str(), facts.width, facts.height), ("h264", 160, 90));
+            assert_eq!(facts.audio, "aac");
+            unsafe {
+                let mut fmt = std::ptr::null_mut();
+                assert_eq!(open_local_format(&file, &mut fmt), 0, "reopen {name}");
+                assert!(avformat_find_stream_info(fmt, std::ptr::null_mut()) >= 0);
+                let mut packet = av_packet_alloc();
+                assert!(!packet.is_null());
+                assert!(av_read_frame(fmt, packet) >= 0, "first packet of {name}");
+                av_packet_free(&mut packet);
+                avformat_close_input(&mut fmt);
+            }
+        }
+        let invalid = File::open(fixtures.join("invalid.mkv")).unwrap();
+        assert!(matches!(probe_local(&invalid), Err(error) if error.contains("contenedor")));
     }
 }
