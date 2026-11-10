@@ -1215,7 +1215,26 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         let key = classify(sym, wcode);
         #[cfg(feature = "local-usb")]
         if app.route() == AppArg::LocalUsb {
-            if et == SDL_KEYDOWN { super::local_usb::key(app, key, state & 0x100 != 0); }
+            // The native LG remote supplies an SDL scancode in wcode. Some
+            // firmware builds leave sym unset; the shared classifier then
+            // returns Other even for the D-pad and the centre OK button.
+            // Use these documented SDL scancodes only for the USB route,
+            // leaving PlxNative's global input rules unchanged.
+            let usb_key = if key == Key::Other && sym == 0 {
+                match wcode {
+                    40 => Key::Ok, // SDL_SCANCODE_RETURN
+                    82 => Key::Up,
+                    81 => Key::Down,
+                    80 => Key::Left { alt: false },
+                    79 => Key::Right { alt: false },
+                    _ => key,
+                }
+            } else {
+                key
+            };
+            if et == SDL_KEYDOWN {
+                super::local_usb::key(app, usb_key, state & 0x100 != 0);
+            }
             return;
         }
         // LG can report its own pointer hide as a key-shaped SDL event. It is

@@ -8,6 +8,10 @@ on:
     paths:
       - .github/workflows/cineusb-ipk.yml
       - ci/check-package.py
+      - pkg/appinfo.json
+      - ipkroot/ctl/control
+      - rust-modules/Cargo.toml
+      - rust-modules/Cargo.lock
   workflow_dispatch:
 
 permissions:
