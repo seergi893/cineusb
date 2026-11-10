@@ -1589,6 +1589,16 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // 6/7/10): all three are owned screens or surfaces now, so their hover was already taken
         // by `owns_input()` above.
     } else if et == SDL_MOUSEBUTTONDOWN {
+        // CineUSB is a standalone UI, not a mounted screen in the shared hit map.
+        // LG Magic Remote's centre button may arrive as SDL_MOUSEBUTTONDOWN instead
+        // of SDL_KEYDOWN/Return. Forward it before the generic pointer ladder,
+        // otherwise the selected USB volume looks clickable but never opens.
+        #[cfg(feature = "local-usb")]
+        if app.route() == AppArg::LocalUsb && !super::bridge::player_arriving(&app.pages) {
+            let (cx, cy) = ptr_xy(&app.ev);
+            super::local_usb::click(app, cx, cy);
+            return;
+        }
         // OK on a set whose pointer the app can only make transparent: see `click_is_ok`. Pushed
         // as an OK key-down, so it reaches the focused control by the key path.
         let on_control = {
@@ -1674,6 +1684,12 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // its clicks. The menu's panel in particular is why the container answers a click off a
         // surface by construction: a click cannot fall through onto the shelf under it.)
     } else if et == SDL_MOUSEBUTTONUP {
+        // The USB browser handles activation on button-down. Do not pass the
+        // matching release into the shared UI's press/drag state.
+        #[cfg(feature = "local-usb")]
+        if app.route() == AppArg::LocalUsb && !super::bridge::player_arriving(&app.pages) {
+            return;
+        }
         if std::mem::take(&mut app.ptr.ok_from_click) {
             super::events::remote_synth_key_edge(SDLK_RETURN, 0, false);
             return;

@@ -222,6 +222,21 @@ impl Browser {
         self.status.clear();
     }
 
+    fn click(&mut self, x: f32, y: f32) {
+        // Magic Remote clicks are pointer events on webOS; the standalone USB
+        // browser has no shared hit-map. Pick the clicked card when possible,
+        // or activate the focused card (the physical OK button may arrive with
+        // the pointer parked outside the cards).
+        if let Some(index) = (0..self.len()).find(|&index| {
+            let rect = poster_grid::cell_in(&GRID, index, TOP, self.scroll.pos, &[]);
+            x >= rect.x && x < rect.x + rect.w
+                && y >= rect.y && y < rect.y + rect.h
+        }) {
+            self.select(index, false);
+        }
+        self.open();
+    }
+
     fn key(&mut self, key: Key, repeat: bool) {
         let dir = match key {
             Key::Up => Dir::Up,
@@ -323,6 +338,11 @@ fn draw_line(p: Painter, line: &str, frame: Rect, size: i32, strong: bool) {
     let ink = if strong { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY };
     let label = Label::new(line.as_ptr(), size, ink).h(HAlign::Left);
     if strong { label.bold().draw(p, frame); } else { label.draw(p, frame); }
+}
+
+pub(super) fn click(app: &mut App, x: f32, y: f32) {
+    app.usb.click(x, y);
+    plx_machine::idle::invalidate();
 }
 
 pub(super) fn key(app: &mut App, key: Key, repeat: bool) {
