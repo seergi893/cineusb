@@ -159,7 +159,7 @@ impl Browser {
     fn scroll_target(&self) -> f32 {
         let row = self.selected / COLS;
         let pitch = poster_grid::Geom::DEFAULT.pitch();
-        row.saturating_sub(1) as f32 * pitch
+        (row as f32 * pitch + poster_grid::Geom::DEFAULT.h - 570.0).max(0.0)
     }
 
     fn select(&mut self, index: usize, snap: bool) {
@@ -315,7 +315,7 @@ fn display_name(entry: &Entry) -> String {
 fn volume_name(volume: &Volume) -> String {
     let name = volume.path.file_name().unwrap_or_default().to_string_lossy();
     name.strip_prefix("usb-").and_then(|name| name.split_once('-'))
-        .map_or_else(|| name.into_owned(), |(_, label)| label.to_owned())
+        .map_or(name.as_ref(), |(_, label)| label).to_owned()
 }
 
 fn draw_line(p: Painter, line: &str, frame: Rect, size: i32, strong: bool) {
@@ -335,12 +335,17 @@ pub(super) fn tick(app: &mut App) {
     let Some((file, info, title)) = app.usb.update() else { return };
     let ps = &mut app.player.session;
     let dovi = info.dovi.map_or(plx_data::metadata::Dovi::NONE, |record| plx_data::metadata::Dovi {
-        present: record.dv_profile > 0, profile: record.dv_profile,
-        bl_compat: record.dv_bl_signal_compatibility_id, el_present: record.el_present_flag != 0,
+        present: record.dv_profile > 0, profile: i64::from(record.dv_profile),
+        bl_compat: i64::from(record.dv_bl_signal_compatibility_id), el_present: record.el_present_flag != 0,
         ..plx_data::metadata::Dovi::NONE
     });
+    let audio = (!info.audio.is_empty()).then(|| plx_media::route::CarriedAudio {
+        sid: 0, ordinal: -1, codec: info.audio.clone(), channels: info.audio_channels,
+        can_normalize_loudness: false, immersive: false, sample_rate: info.audio_rate,
+        bit_depth: info.audio_depth,
+    });
     let ok = plx_media::route::set_stream_declaration(ps, &info.video, &info.audio, info.fps, dovi, false)
-        && plx_media::route::set_local_source(ps, file, &title);
+        && plx_media::route::set_local_source(ps, file, &title, audio, playback::start_caps());
     if ok {
         plx_media::route::set_stream_source_raster(ps, info.width, info.height);
         if playback::start_playback(ps, &mut app.adapters.player, 0, playback::Origin::Here,

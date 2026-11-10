@@ -1,10 +1,10 @@
 # CineUSB
 
-Explorador de vídeo USB para LG webOS. CineUSB abre el disco directamente desde la tele y muestra sus carpetas con sus nombres originales. La primera versión comprueba la lectura de MKV, MP4 y M4V. La reproducción de vídeo sigue en desarrollo.
+Biblioteca de vídeo USB para televisores LG con webOS. CineUSB muestra los discos y sus carpetas en una cuadrícula para el mando. El reproductor nativo de PlxNative lee los archivos del disco y dibuja sus propios controles en pantalla. CineUSB arranca directamente en la biblioteca local.
 
 ## Instalar desde Homebrew Channel
 
-Añade este catálogo en Homebrew Channel después de que esté disponible la primera publicación de CineUSB.
+Añade este catálogo en Homebrew Channel con root.
 
 ```text
 https://raw.githubusercontent.com/seergi893/cineusb/main/homebrew/apps.json

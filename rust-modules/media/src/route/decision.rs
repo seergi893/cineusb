@@ -2071,9 +2071,12 @@ pub fn clear_url(ps: &mut PlaybackSession) {
     ps.local_file = None;
 }
 
-pub fn set_local_source(ps: &mut PlaybackSession, file: std::fs::File, title: &str) -> bool {
+pub fn set_local_source(ps: &mut PlaybackSession, file: std::fs::File, title: &str,
+    audio: Option<CarriedAudio>, caps: std::sync::Arc<plx_platform::devcaps::Caps>) -> bool {
+    ps.begin_attempt(caps);
     if !ps.qualify_explicit_feed_source() { return false; }
     ps.local_file = Some(std::sync::Arc::new(file));
+    ps.cur_audio = audio;
     ps.url = "file:///cineusb-video".into();
     unsafe {
         set_c(ps.title.as_mut_ptr(), ps.title.len(), title);

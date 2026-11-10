@@ -8,12 +8,16 @@ case "$jail" in
 esac
 bridge="$jail/tmp/cineusb-volumes"
 [ ! -L "$bridge" ] || exit 1
-mkdir -p "$bridge" || exit 1
+mkdir -p -m 755 "$bridge" || exit 1
+[ "$(stat -c '%u:%a' "$bridge")" = '0:755' ] || exit 1
 
 # Keep the Linux mount ID in each directory name. An unplugged partition must not survive
 # under its old name, even if webOS gives a replacement disk the same /tmp/usb path.
 table=$(cat /proc/self/mountinfo) || exit 1
 live=$(printf '%s\n' "$table" | awk '$5 ~ /^\/tmp\/usb\/[^/]+\// && $0 !~ / - (tmpfs|ramfs) / { print $1, $5 }')
+bridge_is_readonly() {
+    awk -v p="$1" '$5 == p && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' /proc/self/mountinfo
+}
 for target in "$bridge"/usb-*; do
     [ -d "$target" ] && [ ! -L "$target" ] || continue
     mount_id=${target##*/usb-}
@@ -37,8 +41,9 @@ printf '%s\n' "$live" | while IFS=' ' read -r mount_id escaped; do
     if ! awk -v p="$target" '$5 == p { found=1 } END { exit !found }' /proc/self/mountinfo; then
         mount --bind "$source" "$target" || exit 1
     fi
-    if ! mount -o remount,bind,ro,nosuid,nodev,noexec "$target" ||
-       ! awk -v p="$target" '$5 == p && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' /proc/self/mountinfo; then
+    if ! bridge_is_readonly "$target" && {
+        ! mount -o remount,bind,ro,nosuid,nodev,noexec "$target" || ! bridge_is_readonly "$target";
+    }; then
         umount -l "$target"
         exit 1
     fi

@@ -1369,6 +1369,7 @@ pub(crate) fn direct_trigger_server() -> Result<plx_plex::plex::ServerId, String
 /// Which screen the boot gate landed on — see the gate itself in `plex_run`, which is where the
 /// order of its four cases is argued.
 pub(crate) enum BootTo {
+    LocalUsb,
     Home,
     Login,
     Profiles,
@@ -2054,7 +2055,11 @@ pub(crate) unsafe fn construct(
     }
     };
     // Controlled Home constructs its App before executing the same bootstrap command path.
-    let boot_to = if controlled || cfg!(feature = "local-usb") { BootTo::Home } else {
+    let boot_to = if controlled {
+        BootTo::Home
+    } else if cfg!(feature = "local-usb") {
+        BootTo::LocalUsb
+    } else {
         activate_session(&mut bridge, &mut pages, &mut super::recorder::Recplay::Off)
     };
     if !controlled {
@@ -2389,7 +2394,8 @@ pub(crate) unsafe fn construct(
     // Deferring it changes nothing about when it is ASKED: the surface would not have drawn until
     // the loop's first frame either way, and the route below is a page underneath it.
     let mut owes_consent_question = false;
-    let route = if cfg!(feature = "local-usb") { AppArg::LocalUsb } else { match boot_to {
+    let route = match boot_to {
+        BootTo::LocalUsb => AppArg::LocalUsb,
         // **Both Home arms ask, and the shared call is the point.** This is the one boot that
         // has no earlier hook — an install already signed in, either never asked or asked
         // against an older policy — and the sign-in's question has to come before every
@@ -2412,7 +2418,7 @@ pub(crate) unsafe fn construct(
         // soon as the account is authorized — earlier than here, and before the picker.
         BootTo::Login => AppArg::Login,
         BootTo::Profiles => AppArg::Profiles,
-    }};
+    };
     // (dev: /tmp/plxnative-acct used to open the profile menu HERE, beside a
     // `route = Route::Account { over: BarHost::Home }`. The menu is a `ModalStack` surface since
     // phase 10 and the container does not exist yet at this point in the boot, so the trigger is

@@ -1,15 +1,22 @@
 # CineUSB
 
-Prototipo de exploración USB para LG webOS, con la interfaz nativa de
+Biblioteca USB para LG webOS, con la interfaz nativa de
 [PlxNative](https://github.com/GLinnik21/plx-native) como base. El identificador de
 instalación es `com.seergi893.cineusb`. La compilación para webOS abre el
 explorador local directamente, sin iniciar la sesión de Plex.
 
-La primera prueba muestra los discos que el proceso puede ver y permite
-navegar por las subcarpetas. Al elegir un MKV, MP4 o M4V, lee el primer y el
-último byte para confirmar que puede abrir y recorrer el archivo. La prueba
-trabaja en modo de solo lectura. La reproducción se conectará después a la
-ruta nativa, una vez confirmado el acceso de la aplicación al USB.
+La cuadrícula usa las tarjetas y animaciones de PlxNative. Con las flechas
+eliges un disco, carpeta o vídeo, con OK lo abres y con Atrás vuelves al nivel
+anterior. Los archivos conservan sus nombres y la estructura de carpetas del disco.
+Los vídeos MKV, MP4, M4V, MOV, WebM, TS, M2TS y MTS se abren en el motor Feed con el
+HUD clásico integrado. La compatibilidad de cada pista depende del códec y el
+decodificador de la televisión.
+
+Si el disco aparece en la carpeta de webOS pero el aislamiento oculta su
+montaje, CineUSB solicita al servicio local de Homebrew Channel con root un
+montaje de solo lectura en su propio entorno. La aplicación comprueba el
+resultado antes de mostrar el volumen. El servicio vuelve a comprobar los
+montajes al conectar o retirar discos mientras se navega por la biblioteca.
 
 ## Compilar para webOS
 
@@ -28,12 +35,14 @@ fuente correspondiente.
 
 ## Probar en la LG
 
-Instala el IPK, conecta un disco, abre CineUSB y pulsa OK sobre una unidad.
-Entra en una subcarpeta y elige un vídeo. El mensaje «Lectura correcta»
-confirma que el proceso de CineUSB puede acceder a los datos del archivo.
-Prueba también a retirar y volver a conectar el disco. Si CineUSB no lo
-lista, el primer diagnóstico es comparar las rutas visibles en su
-entorno de aplicación con las que webOS expone al sistema.
+Instala el IPK en la LG con Homebrew Channel y root. Conecta el disco, abre
+CineUSB y pulsa OK sobre la unidad. Entra en una carpeta y reproduce un MP4
+H.264/AAC y un MKV. Comprueba pausa, avance y vuelta a la misma carpeta con
+Atrás. Luego retira el disco, espera a que desaparezca de la cuadrícula y
+vuelve a conectarlo con la app abierta.
+
+Si ves el aviso de montaje, pulsa OK para reintentar. Para diagnosticarlo,
+compara los montajes que ve el proceso de CineUSB con `/tmp/usb` en el sistema.
 
 ## Código y licencia
 

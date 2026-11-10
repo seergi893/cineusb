@@ -470,6 +470,9 @@ extern "C" fn local_probe_seek(ctx: *mut c_void, offset: i64, whence: c_int) -> 
 pub struct LocalMedia {
     pub video: String,
     pub audio: String,
+    pub audio_channels: i64,
+    pub audio_rate: i64,
+    pub audio_depth: i64,
     pub width: u16,
     pub height: u16,
     pub fps: f64,
@@ -521,13 +524,19 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext) -> Result<LocalMedia, &'
     let codec = |cp: *const AVCodecParameters| std::ffi::CStr::from_ptr(avcodec_get_name((*cp).codec_id))
         .to_string_lossy().into_owned();
     let ai = best(AVMEDIA_TYPE_AUDIO);
-    let audio = if ai < 0 { String::new() } else { codec(stream_codecpar(*(*fmt).streams.add(ai as usize))) };
+    let (audio, audio_channels, audio_rate, audio_depth) = if ai < 0 {
+        (String::new(), 0, 0, 0)
+    } else {
+        let audio = stream_codecpar(*(*fmt).streams.add(ai as usize));
+        (codec(audio), i64::from((*audio).ch_layout.nb_channels), i64::from((*audio).sample_rate),
+            i64::from((*audio).bits_per_raw_sample))
+    };
     if !audio.is_empty() && crate::audio_payload_codec(&audio).is_none() {
         return Err("La pista de audio predeterminada usa un códec incompatible.");
     }
     let rate = (*video).framerate;
     Ok(LocalMedia {
-        video: codec(video), audio,
+        video: codec(video), audio, audio_channels, audio_rate, audio_depth,
         width: u16::try_from((*video).width).unwrap_or(0),
         height: u16::try_from((*video).height).unwrap_or(0),
         fps: if rate.den > 0 { f64::from(rate.num) / f64::from(rate.den) } else { 0.0 },
