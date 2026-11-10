@@ -71,6 +71,12 @@ SAME32(offsetof(AVStream, codecpar), 12, "OFF_STREAM_CODECPAR != 12");
 SAME64(offsetof(AVStream, codecpar), 16, "OFF_STREAM_CODECPAR != 12 [host]");
 SAME32(offsetof(AVStream, time_base), 20, "OFF_STREAM_TIME_BASE != 20");
 SAME64(offsetof(AVStream, time_base), 32, "OFF_STREAM_TIME_BASE != 20 [host]");
+/* ff.rs reads subtitle forced/default bits at these ABI-checked stream offsets. */
+SAME32(offsetof(AVStream, disposition), 56, "OFF_STREAM_DISPOSITION != 56");
+SAME64(offsetof(AVStream, disposition), 64, "OFF_STREAM_DISPOSITION != 64 [host]");
+SAME(AV_DISPOSITION_DEFAULT, 1, "FFmpeg default disposition bit changed");
+SAME(AV_DISPOSITION_FORCED, 64, "FFmpeg forced disposition bit changed");
+SAME(AV_DISPOSITION_HEARING_IMPAIRED, 128, "FFmpeg hearing-impaired bit changed");
 /* The container's per-track tags — where a track's NAME is, and the only place it is for an MP4
    (PMS sends Stream.title for Matroska and nothing at all for MP4; see play-feed/src/ff.rs's stream_name). The
    int64 start_time/duration/nb_frames ahead of it are 8-ALIGNED on ARM EABI, so there is a 4-byte
