@@ -2527,9 +2527,10 @@ pub fn every_surface_arg() -> Vec<AppArg> {
             | AppArg::PlayerOverlay(_)
             | AppArg::Settings(_)
             | AppArg::FirstRunConsent(_) => {}
-            // The eight PAGE variants. Named rather than swept into a `_`, so the exhaustiveness
+            // The PAGE variants. Named rather than swept into a `_`, so the exhaustiveness
             // above is real and a new SURFACE variant cannot land in a catch-all.
-            AppArg::Login
+            AppArg::LocalUsb
+            | AppArg::Login
             | AppArg::Profiles
             | AppArg::Onboard
             | AppArg::Home

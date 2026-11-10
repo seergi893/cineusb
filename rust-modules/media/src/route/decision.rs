@@ -2072,18 +2072,21 @@ pub fn clear_url(ps: &mut PlaybackSession) {
 }
 
 pub fn set_local_source(ps: &mut PlaybackSession, file: std::fs::File, title: &str,
-    audio: Option<CarriedAudio>, caps: std::sync::Arc<plx_platform::devcaps::Caps>) -> bool {
+    audio: Option<CarriedAudio>, forced: Option<(i64, i32)>,
+    caps: std::sync::Arc<plx_platform::devcaps::Caps>) -> bool {
     ps.begin_attempt(caps);
     if !ps.qualify_explicit_feed_source() { return false; }
     // A USB file is a new item, not a retry/seek of the previous one. Keep the
     // playback's subtitle mode, stream id and FFmpeg selection in sync, otherwise
     // a prior film's ordinal can select a different subtitle before the menu opens.
     crate::player::reset_subtitle();
-    ps.cur_sub_sid = 0;
-    ps.cur_sub_ordinal = -1;
+    let (subtitle_id, subtitle_ordinal) = forced.unwrap_or((0, -1));
+    ps.cur_sub_sid = subtitle_id;
+    ps.cur_sub_ordinal = subtitle_ordinal;
     ps.cur_sub_sidecar = false;
-    ps.cur_sub_client_drawable = false;
-    ps.sub_mode = SubMode::Off;
+    ps.cur_sub_client_drawable = subtitle_ordinal >= 0;
+    ps.sub_mode = if forced.is_some() { SubMode::ForcedOnly } else { SubMode::Off };
+    if subtitle_ordinal >= 0 { crate::player::request_subtitle(subtitle_ordinal); }
     ps.track_ctx = None;
     ps.local_file = Some(std::sync::Arc::new(file));
     ps.cur_audio = audio;

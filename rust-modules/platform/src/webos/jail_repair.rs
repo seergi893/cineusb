@@ -173,6 +173,22 @@ pub fn eject_usb_disk(path: &Path, mount_id: u64) -> Result<(), Failure> {
 }
 
 #[cfg(target_os = "linux")]
+pub fn usb_preferences() -> Result<String, Failure> {
+    run_usb_helper("--cineusb-preferences")
+}
+
+#[cfg(target_os = "linux")]
+pub fn save_usb_preferences(catalan: bool, forced: bool) -> Result<(), Failure> {
+    let language = if catalan { "ca" } else { "es" };
+    let value = format!("{language} {}", u8::from(forced));
+    if run_usb_helper(&format!("--cineusb-preferences {value}"))? == value {
+        Ok(())
+    } else {
+        Err(Failure::CommandFailed)
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn usb_mutation(operation: &str, path: &Path, mount_id: u64) -> Result<(), Failure> {
     let hex = usb_path_hex(path)?;
     if run_usb_helper(&format!("{operation} {mount_id} '{hex}'"))? == "CINEUSB_USB_OK" {
