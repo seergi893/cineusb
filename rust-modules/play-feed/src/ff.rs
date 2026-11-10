@@ -455,8 +455,6 @@ pub struct LocalSubtitle {
     pub codec: String,
     pub language: Option<String>,
     pub title: String,
-    pub forced: bool,
-    pub default: bool,
 }
 
 /// Each attempt exclusively owns the file cursor. FFmpeg duplicates the descriptor, so the
@@ -539,8 +537,6 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext) -> Result<LocalMedia, &'
             codec: codec(params),
             language: stream_language(stream),
             title: stream_name(stream),
-            forced: ((*stream).disposition & AV_DISPOSITION_FORCED) != 0,
-            default: ((*stream).disposition & AV_DISPOSITION_DEFAULT) != 0,
         });
     }
     let rate = (*video).framerate;
