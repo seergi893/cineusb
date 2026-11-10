@@ -378,7 +378,10 @@ pub fn launch_native_open(
         // The whole origin goes to the demuxer: its scheme chooses the byte transport, and
         // HTTPS certificate validation needs the original `plex.direct` hostname.
         let path = std::mem::take(&mut open.path);
-        plx_base::eventlog::log(&stream_open_log_line(&open.origin.log_form(), &path));
+        let local_file = open.local_file.take();
+        if local_file.is_none() {
+            plx_base::eventlog::log(&stream_open_log_line(&open.origin.log_form(), &path));
+        }
         let origin = open.origin.clone();
         // Two-lane feed: the demuxer routes es=1 video to aq_video and es=2 audio to
         // aq_audio, each with its own cap + feeder.
@@ -410,7 +413,7 @@ pub fn launch_native_open(
             // A clock-only reader (a sidecar) reads no subtitle: the demuxer keeps what it enumerates.
             shared.side_subs_owner.store(side_reader.embedded_owner(), Ordering::Release);
             stream_th = plx_base::task::spawn_off_frame_keeping("demux", move |off| {
-                crate::demux(off, origin, path, acodec, demux_transport, session, abr, auto_original, aqp, aqap, hsp)
+                crate::ff::demux_source(off, origin, path, local_file, acodec, demux_transport, session, abr, auto_original, aqp, aqap, hsp)
             });
             if stream_th.is_none() {
                 shared.side_subs_owner.store(false, Ordering::Release);

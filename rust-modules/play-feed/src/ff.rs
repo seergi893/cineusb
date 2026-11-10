@@ -13,6 +13,8 @@ use plx_net::net::origin::Origin;
 use plx_net::range_io::{self, RangeFactory, RangeReader};
 use plx_playback_contract::demux::DemuxFault;
 use std::ffi::CString;
+use std::fs::File;
+use std::os::unix::fs::FileExt;
 use std::os::raw::{c_int, c_long, c_uchar, c_uint, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -432,6 +434,107 @@ const SEEK_CUR: c_int = 1;
 pub const SEEK_END: c_int = 2;
 pub const AVSEEK_SIZE: c_int = 0x10000;
 
+unsafe fn local_read(file: &File, offset: &mut i64, dst: *mut u8, len: c_int) -> c_int {
+    if dst.is_null() || len <= 0 { return AVERROR_IO; }
+    let buffer = std::slice::from_raw_parts_mut(dst, len as usize);
+    match file.read_at(buffer, *offset as u64) {
+        Ok(0) => AVERROR_EOF,
+        Ok(n) => { *offset += n as i64; n as c_int }
+        Err(_) => AVERROR_IO,
+    }
+}
+
+struct LocalProbe<'a> { file: &'a File, offset: i64, size: i64 }
+
+extern "C" fn local_probe_read(ctx: *mut c_void, dst: *mut u8, len: c_int) -> c_int {
+    unsafe {
+        let probe = &mut *ctx.cast::<LocalProbe<'_>>();
+        local_read(probe.file, &mut probe.offset, dst, len)
+    }
+}
+
+extern "C" fn local_probe_seek(ctx: *mut c_void, offset: i64, whence: c_int) -> i64 {
+    let probe = unsafe { &mut *ctx.cast::<LocalProbe<'_>>() };
+    let base = match whence & !0x20000 {
+        AVSEEK_SIZE => return probe.size,
+        SEEK_SET => 0,
+        SEEK_CUR => probe.offset,
+        SEEK_END => probe.size,
+        _ => return -1,
+    };
+    let Some(target) = base.checked_add(offset).filter(|target| *target >= 0) else { return -1 };
+    probe.offset = target;
+    target
+}
+
+pub struct LocalMedia {
+    pub video: String,
+    pub audio: String,
+    pub width: u16,
+    pub height: u16,
+    pub fps: f64,
+    pub dovi: Option<AVDOVIDecoderConfigurationRecord>,
+}
+
+/// Probe the open descriptor with the same bundled demuxers the playback worker uses.
+pub fn probe_local(file: &File) -> Result<LocalMedia, &'static str> {
+    if !abi_ok() { return Err("El lector de vídeo no está disponible."); }
+    ensure_registered();
+    let size = file.metadata().ok().and_then(|m| i64::try_from(m.len()).ok())
+        .ok_or("No se pudo consultar el tamaño del vídeo.")?;
+    let mut input = LocalProbe { file, offset: 0, size };
+    unsafe {
+        let buffer = av_malloc(65536).cast::<u8>();
+        if buffer.is_null() { return Err("Memoria insuficiente para abrir el vídeo."); }
+        let avio = avio_alloc_context(buffer, 65536, 0,
+            (&mut input as *mut LocalProbe<'_>).cast(), Some(local_probe_read), None, Some(local_probe_seek));
+        if avio.is_null() {
+            free_ptr(buffer.cast());
+            return Err("Memoria insuficiente para abrir el vídeo.");
+        }
+        let mut fmt = avformat_alloc_context();
+        if fmt.is_null() {
+            free_avio(avio);
+            return Err("Memoria insuficiente para abrir el vídeo.");
+        }
+        (*fmt).pb = avio;
+        let result = if avformat_open_input(&mut fmt, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut()) < 0
+            || avformat_find_stream_info(fmt, std::ptr::null_mut()) < 0 {
+            Err("No se pudo reconocer el formato del vídeo.")
+        } else {
+            local_stream_facts(fmt)
+        };
+        avformat_close_input(&mut fmt);
+        free_avio(avio);
+        result
+    }
+}
+
+unsafe fn local_stream_facts(fmt: *mut AVFormatContext) -> Result<LocalMedia, &'static str> {
+    let best = |kind| av_find_best_stream(fmt, kind, -1, -1, std::ptr::null_mut(), 0);
+    let vi = best(AVMEDIA_TYPE_VIDEO);
+    if vi < 0 { return Err("El archivo no contiene una pista de vídeo."); }
+    let video = stream_codecpar(*(*fmt).streams.add(vi as usize));
+    if VideoFraming::of_codec_id((*video).codec_id).is_none() {
+        return Err("Este códec de vídeo no es compatible con CineUSB.");
+    }
+    let codec = |cp: *const AVCodecParameters| std::ffi::CStr::from_ptr(avcodec_get_name((*cp).codec_id))
+        .to_string_lossy().into_owned();
+    let ai = best(AVMEDIA_TYPE_AUDIO);
+    let audio = if ai < 0 { String::new() } else { codec(stream_codecpar(*(*fmt).streams.add(ai as usize))) };
+    if !audio.is_empty() && crate::audio_payload_codec(&audio).is_none() {
+        return Err("La pista de audio predeterminada usa un códec incompatible.");
+    }
+    let rate = (*video).framerate;
+    Ok(LocalMedia {
+        video: codec(video), audio,
+        width: u16::try_from((*video).width).unwrap_or(0),
+        height: u16::try_from((*video).height).unwrap_or(0),
+        fps: if rate.den > 0 { f64::from(rate.num) / f64::from(rate.den) } else { 0.0 },
+        dovi: dovi_conf(video),
+    })
+}
+
 /// **Which transport is under the AVIO.** The two are not interchangeable and the choice is made
 /// from the SCHEME of the URL actually served — the part URL's, unless a plaintext open was
 /// redirected to https (`stream::redirect`), in which case the socket open hands over to curl.
@@ -448,6 +551,7 @@ pub const AVSEEK_SIZE: c_int = 0x10000;
 ///   `avformat_close_input` may still invoke AVIO; this arm refuses I/O instead of dialing a
 ///   dummy socket.
 pub enum Src {
+    Local(Arc<File>),
     Socket {
         /// The Engine's stream — NOT owned here. `player::engine` allocates it, publishes it in
         /// `FEED_SHARED.hs_ptr`, `http_shutdown`s it at teardown and closes it after the join.
@@ -470,7 +574,7 @@ impl Src {
         match self {
             Src::Socket { hs, .. } => plx_net::stream::http_body_receipt(*hs),
             Src::Curl(cs) => cs.body_receipt(),
-            Src::Idle => plx_net::stream::BodyReceipt {
+            Src::Idle | Src::Local(_) => plx_net::stream::BodyReceipt {
                 ahead: 0,
                 finished: false,
                 stepped: false,
@@ -1275,7 +1379,7 @@ impl AvioState {
 
     fn transfer_finished(&self) -> bool {
         match &self.src {
-            Src::Idle => true,
+            Src::Idle | Src::Local(_) => true,
             Src::Socket { hs, .. } => plx_net::stream::http_body_done(*hs),
             Src::Curl(cs) => cs.body_complete(),
         }
@@ -1334,7 +1438,7 @@ impl AvioState {
                     plx_net::stream::http_drain_available(*hs, &mut self.bounce[start..])
                 }
                 Src::Curl(cs) => cs.drain_available(&mut self.bounce[start..]),
-                Src::Idle => 0,
+                Src::Idle | Src::Local(_) => 0,
             };
             if n > 0 {
                 self.bounce.truncate(start + n as usize);
@@ -1461,6 +1565,12 @@ fn heal_at_offset(s: &mut AvioState) -> bool {
 pub extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
     unsafe {
         let s = &mut *(op as *mut AvioState);
+        if let Src::Local(file) = &s.src {
+            if crate::aq::aq_is_aborted(s.aq) || s.parked_at_end { return AVERROR_EOF; }
+            let result = local_read(file, &mut s.off, dst, n);
+            s.io_failed = result == AVERROR_IO;
+            return result;
+        }
         loop {
             // interrupt: bail out of a blocked read on teardown (aborted) only. A seek does NOT
             // interrupt the read — the demux thread services it itself between two av_read_frame
@@ -1548,7 +1658,7 @@ pub extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
                     live_deadline,
                     checkpoint,
                 ),
-                Src::Idle => return AVERROR_EOF,
+                Src::Idle | Src::Local(_) => return AVERROR_EOF,
             };
             let wake =
                 if r == plx_net::stream::HTTP_READ_DEADLINE || r == range_io::READ_DEADLINE {
@@ -1808,6 +1918,7 @@ pub extern "C" fn seek_cb(op: *mut c_void, offset: i64, whence: c_int) -> i64 {
             // deliberate: bytes from the head of the file, delivered as though they were the bytes
             // at `target`, are corruption that looks like success.
             Src::Curl(cs) => cs.seek(target),
+            Src::Local(_) => true,
             Src::Idle => false,
         };
         if let Some(cs) = hopped_to_tls {
@@ -3466,7 +3577,7 @@ pub fn hls_source_read(
             &mut plx_base::checkpoint::NoCheckpoint,
         ),
         Src::Curl(cs) => cs.read_until(dst, deadline, &mut plx_base::checkpoint::NoCheckpoint),
-        Src::Idle => return Err(HlsExit::Failed("HLS source idle")),
+        Src::Idle | Src::Local(_) => return Err(HlsExit::Failed("HLS source idle")),
     };
     // The wake used to interrupt a blocked body read is deliberately transport-shaped (EOF for
     // shutdown(2), negative for curl). Re-read the lane flag before interpreting that shape so a
@@ -5918,6 +6029,23 @@ pub fn demux(
     path: String,
     acodec: String,
     transport: DemuxTransport,
+    session: Box<dyn DemuxSession>,
+    abr: Option<Box<dyn plx_playback_contract::adaptive::AdaptiveSession>>,
+    auto_original: Option<Box<dyn plx_playback_contract::adaptive::OriginalSession>>,
+    aq: SendPtr<AuQueue>,
+    aqa: SendPtr<AuQueue>,
+    hs: SendPtr<HttpStream>,
+) {
+    demux_source(off, origin, path, None, acodec, transport, session, abr, auto_original, aq, aqa, hs)
+}
+
+pub(crate) fn demux_source(
+    off: &plx_base::task::OffFrame,
+    origin: Origin,
+    path: String,
+    local_file: Option<Arc<File>>,
+    acodec: String,
+    transport: DemuxTransport,
     mut session: Box<dyn DemuxSession>,
     abr: Option<Box<dyn plx_playback_contract::adaptive::AdaptiveSession>>,
     auto_original: Option<Box<dyn plx_playback_contract::adaptive::OriginalSession>>,
@@ -5941,7 +6069,7 @@ pub fn demux(
     let aq_p = aq.0; // VIDEO lane (also the AVIO abort ptr + EOF marker)
     let aqa_p = aqa.0; // AUDIO lane (es=2) — always a distinct queue on the ff (two-lane) path
     let hs_p = hs.0;
-    if path
+    if local_file.is_none() && path
         .split_once('?')
         .map_or(path.as_str(), |(plain, _)| plain)
         .to_ascii_lowercase()
@@ -6044,7 +6172,7 @@ pub fn demux(
                 // aborts the lane first and this check refuses to start I/O. Creating/registering the
                 // source only after the check leaves a window where teardown's one wake sees nothing
                 // and the demuxer then opens a fresh connection under the main thread's join.
-                let mut curl_open = if origin.is_tls() {
+                let mut curl_open = if local_file.is_none() && origin.is_tls() {
                     match transport.range.reserve_open() {
                         Ok(r) => Some(r),
                         Err(e) => {
@@ -6068,7 +6196,14 @@ pub fn demux(
                 // before anything else can fail, because the read-out panel is the first thing anybody
                 // looks at when a part will not play and it must mean the same thing either way.
                 let open_began = std::time::Instant::now();
-                let (src, size) = if origin.is_tls() {
+                let (src, size) = if let Some(file) = local_file.as_ref() {
+                    let Some(size) = file.metadata().ok().and_then(|m| i64::try_from(m.len()).ok()) else {
+                        session.media().publish(DemuxEffect::FailFault(DemuxFault::OpenInputFailed));
+                        break;
+                    };
+                    session.media().publish(DemuxEffect::FileSize(size));
+                    (Src::Local(Arc::clone(file)), size)
+                } else if origin.is_tls() {
                     let reservation = curl_open
                         .take()
                         .expect("TLS reserved its abort handle above");

@@ -235,6 +235,8 @@ pub(crate) struct Adapters {
 /// helpers they still reach through `&mut App` need to be visible outside this module's subtree.
 /// Nothing here becomes `pub` — only as wide as the crate.
 pub(crate) struct App {
+    #[cfg(feature = "local-usb")]
+    usb: local_usb::Browser,
     last_input: u32,
     loop_t: u32,
     iters_ct: i32,
@@ -616,10 +618,6 @@ fn enter_application(pms_host: *const c_char, pms_port: c_int) -> Result<App,c_i
 
 /// The ten-line public skeleton: preflight/construction, then the ordinary loop and teardown.
 pub(crate) fn run_application(pms_host: *const c_char, pms_port: c_int) -> ! {
-    #[cfg(feature = "local-usb")]
-    if cfg!(feature = "local-usb") {
-        plx_base::process::exit_now(unsafe { local_usb::run() });
-    }
     // An early-boot refusal ends the same way: the workers it has already started (diagnostics,
     // capability probe, telemetry) are as live as after a played session.
     let mut app = match enter_application(pms_host,pms_port) { Ok(app) => app, Err(code) => plx_base::process::exit_now(code) };

@@ -4,6 +4,7 @@
 pub struct PhysicalOpen {
     pub origin: plx_net::net::origin::Origin,
     pub path: String,
+    pub local_file: Option<std::sync::Arc<std::fs::File>>,
     pub video_codec: String,
     pub audio_codec: String,
     pub pcm_is_lossy: bool,
@@ -27,6 +28,7 @@ impl From<plx_playback_contract::feed::OpenStream> for PhysicalOpen {
         Self {
             origin: Origin::new(scheme, &stream.origin.host, stream.origin.port),
             path: stream.path,
+            local_file: stream.local_file,
             video_codec: stream.video_codec,
             audio_codec: stream.audio_codec,
             pcm_is_lossy: stream.pcm_is_lossy,

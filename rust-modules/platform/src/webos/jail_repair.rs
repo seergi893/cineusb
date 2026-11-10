@@ -46,6 +46,22 @@ fn call_hbc(_payload: &str) -> Result<String, Failure> {
     Err(Failure::HbcUnavailable)
 }
 
+/// Reconcile read-only USB mounts in this app's jail. No file name supplied by a disk is
+/// interpolated into the shell program. The caller checks visibility in its own namespace.
+pub fn sync_usb_volumes() -> Result<(), Failure> {
+    let id = plx_base::paths::app_id();
+    if !valid_id(id) { return Err(Failure::Unsupported); }
+    let command = format!("app_id='{id}'\n{}", include_str!("usb_mounts.sh"));
+    let reply = call_hbc(&serde_json::json!({ "command": command }).to_string())?;
+    let reply: Value = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
+    if reply.get("returnValue").and_then(Value::as_bool) == Some(true)
+        && reply.get("stdoutString").and_then(Value::as_str) == Some("CINEUSB_MOUNTS_OK") {
+        Ok(())
+    } else {
+        Err(Failure::CommandFailed)
+    }
+}
+
 fn device_readable(path: &str) -> bool {
     std::ffi::CString::new(path)
         .map(|p| unsafe { libc::access(p.as_ptr(), libc::R_OK) } == 0)

@@ -202,6 +202,7 @@ pub struct PlaybackSession {
     requested_resume_ns: i64,
     /// The stream URL for this playback (empty = nothing resolved, or torn down).
     url: String,
+    local_file: Option<std::sync::Arc<std::fs::File>>,
     /// The server-side transcode session id, EMPTY on a direct play — that emptiness is the
     /// "is this a transcode?" test ([`is_transcoding`]) and the key the stop is sent with.
     tsession: String,
@@ -1683,6 +1684,7 @@ impl PlaybackSession {
         request: None,
         requested_resume_ns: 0,
         url: String::new(),
+        local_file: None,
         tsession: String::new(),
         play_verdict: None,
         pms_decline: None,
@@ -1790,6 +1792,7 @@ impl PlaybackSession {
             request,
             requested_resume_ns,
             url,
+            local_file: _,
             tsession,
             play_verdict,
             pms_decline,
@@ -1879,6 +1882,7 @@ impl PlaybackSession {
             request: request.clone(),
             requested_resume_ns: *requested_resume_ns,
             url: url.clone(),
+            local_file: None,
             tsession: tsession.clone(),
             play_verdict: play_verdict.clone(),
             pms_decline: *pms_decline,
@@ -2063,7 +2067,23 @@ pub fn set_url(ps: &mut PlaybackSession, s: &str) {
     ps.url = s.to_owned()
 }
 pub fn clear_url(ps: &mut PlaybackSession) {
-    ps.url.clear()
+    ps.url.clear();
+    ps.local_file = None;
+}
+
+pub fn set_local_source(ps: &mut PlaybackSession, file: std::fs::File, title: &str) -> bool {
+    if !ps.qualify_explicit_feed_source() { return false; }
+    ps.local_file = Some(std::sync::Arc::new(file));
+    ps.url = "file:///cineusb-video".into();
+    unsafe {
+        set_c(ps.title.as_mut_ptr(), ps.title.len(), title);
+        set_c(ps.ctxline.as_mut_ptr(), ps.ctxline.len(), "USB");
+    }
+    true
+}
+
+pub(crate) fn local_file(ps: &PlaybackSession) -> Option<std::sync::Arc<std::fs::File>> {
+    ps.local_file.clone()
 }
 /// A full stop retires the logical playback after capturing its final report. A late timeline
 /// reply can still name that old playback, but can no longer match the foreground session.
@@ -11309,6 +11329,7 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             request,
             requested_resume_ns,
             url: plan.url,
+            local_file: None,
             tsession: plan.tsession,
             // Installed on EVERY landing, not only a refusing one: a plan that resolved is itself
             // the statement that the last refusal is over, and assigning unconditionally is what

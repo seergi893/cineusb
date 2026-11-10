@@ -130,6 +130,7 @@ impl FeedOpenRequest {
                     port: source.origin.port(),
                 },
                 path: source.path,
+                local_file: route::local_file(ps),
                 video_codec: route::stream_vcodec(ps),
                 audio_codec,
                 pcm_is_lossy: route::stream_pcm_is_lossy(ps),
@@ -157,7 +158,8 @@ impl FeedOpenRequest {
 
     /// The common owner checks the credential policy before claiming the native attempt.
     pub fn credential_transport_allowed(&self) -> bool {
-        plx_plex::http::credential_transport_allowed(&self.origin, &self.stream.path, &[])
+        self.stream.local_file.is_some()
+            || plx_plex::http::credential_transport_allowed(&self.origin, &self.stream.path, &[])
     }
 
     /// The inbox of the open's adaptive worker (once).

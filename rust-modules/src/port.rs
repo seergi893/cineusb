@@ -92,3 +92,7 @@ mod tests {
         assert_eq!(std::ptr::from_ref(PORT.sink).cast::<()>(), host, "so is the video sink");
     }
 }
+#[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
+pub(crate) fn sync_usb_volumes() -> Result<(), plx_platform::tv::sandbox::Failure> {
+    plx_platform::webos::jail_repair::sync_usb_volumes()
+}

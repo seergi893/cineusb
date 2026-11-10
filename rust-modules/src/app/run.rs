@@ -162,6 +162,10 @@ pub(crate) unsafe fn run(app: &mut App) {
         // What the hold hint has taught since last frame, written once to the install's session.
         hint_taught.poll(app.boot_initial.is_some());
         ingest(app, fr);
+        #[cfg(feature = "local-usb")]
+        if app.route() == AppArg::LocalUsb && !super::bridge::player_arriving(&app.pages) {
+            super::local_usb::tick(app);
+        }
         app.instr.mark(plx_base::diag::heartbeat::Phase::Ingest); // ingest
 
         fr.now = clock::now();
@@ -1209,6 +1213,11 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // ones that forward them to a screen's own `move_focus`/`key`, and the modal
         // panels and the CH▲/CH▼ pager, which still spell their own key tests.
         let key = classify(sym, wcode);
+        #[cfg(feature = "local-usb")]
+        if app.route() == AppArg::LocalUsb {
+            if et == SDL_KEYDOWN { super::local_usb::key(app, key, state & 0x100 != 0); }
+            return;
+        }
         // LG can report its own pointer hide as a key-shaped SDL event. It is
         // a notification, so it must not wake the HUD or spend Back's exit latch.
         if key == Key::PointerHidden {
@@ -3127,6 +3136,11 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
             plx_ui::profile::phase("profile.empty", || {});
             plx_ui::profile::phase("frame.ui", || {
                 plx_ui::guard(|| {
+                    #[cfg(feature = "local-usb")]
+                    if app.route() == AppArg::LocalUsb {
+                        app.usb.draw();
+                        return;
+                    }
                     if fr.player {
                         // `plx_platform::tv::window::clear_opaque_region()` used to be called here. It is
                         // §3.3 step 10's privileged call and belongs at the container library's
@@ -3422,7 +3436,7 @@ pub(crate) unsafe fn report(app: &mut App, fr: &mut Frame) {
                     };
                     crate::focusprobe::Screen::Onboard { list, row }
                 }
-                AppArg::Home => crate::focusprobe::Screen::Home,
+                AppArg::Home | AppArg::LocalUsb => crate::focusprobe::Screen::Home,
                 // (`Route::ItemMenu`'s arm stood here, mapping the popover's `MenuHost` to the
                 // probe's own `Host` mirror and recursing into that screen's fields. The menu is a
                 // SURFACE since phase 10: the page under it is the top page, which this line
@@ -3932,6 +3946,8 @@ mod lifecycle_regression_tests {
     fn app() -> App {
         plx_play_feed::ff_test_support::reset_session_for_test(&mut plx_media::player::reset_common_for_test);
         let mut app = App {
+            #[cfg(feature = "local-usb")]
+            usb: super::super::local_usb::Browser::new(),
             last_input: Default::default(),
             loop_t: Default::default(),
             iters_ct: Default::default(),

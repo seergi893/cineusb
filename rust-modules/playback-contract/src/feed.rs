@@ -166,6 +166,7 @@ pub struct OpenOrigin {
 pub struct OpenStream {
     pub origin: OpenOrigin,
     pub path: String,
+    pub local_file: Option<std::sync::Arc<std::fs::File>>,
     pub video_codec: String,
     pub audio_codec: String,
     pub pcm_is_lossy: bool,
