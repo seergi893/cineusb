@@ -503,7 +503,7 @@ mod usb_subtitle_tests {
             audio_language: Some("eng".into()), audio_title: "English 5.1".into(),
             width: 3840, height: 2160, fps: 23.976, dovi: None,
             subtitles: vec![
-                plx_play_feed::ff::LocalSubtitle { stream_index: 3, codec: "subrip".into(),
+                plx_play_feed::LocalSubtitle { stream_index: 3, codec: "subrip".into(),
                     language: Some("spa".into()), title: "Full".into(),
                     forced: false, default: true, sdh: false },
                 plx_play_feed::ff::LocalSubtitle { stream_index: 5, codec: "ass".into(),
