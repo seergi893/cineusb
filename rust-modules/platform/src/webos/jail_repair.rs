@@ -62,6 +62,58 @@ pub fn sync_usb_volumes() -> Result<(), Failure> {
     }
 }
 
+/// Ask the root service for one read-only file descriptor. The socket remains private to this
+/// request, and the open file crosses the jail boundary without copying bytes or changing mounts.
+#[cfg(target_os = "linux")]
+pub fn open_usb_file(path: &Path) -> Result<std::fs::File, Failure> {
+    use std::fmt::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::{ffi::OsStrExt, net::UnixListener};
+
+    let id = plx_base::paths::app_id();
+    let dir = validated_install(plx_base::paths::app_dir(), id).ok_or(Failure::Unsupported)?;
+    let prefix = dir.strip_suffix(&format!("/applications/{id}")).ok_or(Failure::Unsupported)?;
+    let helper = format!("{prefix}/services/{id}.storage/plxnative-storage");
+    if !(path.starts_with("/tmp/usb") || path.starts_with("/tmp/cineusb-volumes")) {
+        return Err(Failure::Unsupported);
+    }
+    let mut path_hex = String::new();
+    for byte in path.as_os_str().as_bytes() { let _ = write!(path_hex, "{byte:02x}"); }
+    let mut template = *b"/tmp/cineusb-fd-XXXXXX\0";
+    if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
+        return Err(Failure::StartFailed);
+    }
+    let directory = Path::new(std::ffi::OsStr::from_bytes(&template[..template.len() - 1]));
+    let socket = directory.join("file.sock");
+    let result = (|| {
+        let listener = UnixListener::bind(&socket).map_err(|_| Failure::StartFailed)?;
+        listener.set_nonblocking(true).map_err(|_| Failure::StartFailed)?;
+        let slot = std::str::from_utf8(&template[template.len() - 7..template.len() - 1])
+            .map_err(|_| Failure::StartFailed)?;
+        if !slot.bytes().all(|byte| byte.is_ascii_alphanumeric()) { return Err(Failure::StartFailed); }
+        let command = format!("exec '{helper}' --cineusb-open {} '{slot}' '{path_hex}'", std::process::id());
+        let reply = call_hbc(&serde_json::json!({ "command": command }).to_string())?;
+        let reply: Value = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
+        if reply.get("returnValue").and_then(Value::as_bool) != Some(true)
+            || reply.get("stdoutString").and_then(Value::as_str) != Some("CINEUSB_FD_OK") {
+            return Err(Failure::CommandFailed);
+        }
+        let (stream, _) = listener.accept().map_err(|_| Failure::Unreadable)?;
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of_val(&cred) as libc::socklen_t;
+        let rc = unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(), &mut len) };
+        if rc != 0 || cred.uid != 0 { return Err(Failure::NotRoot); }
+        stream.set_nonblocking(true).map_err(|_| Failure::Unreadable)?;
+        let file = super::usb_fd::receive(&stream).map_err(|_| Failure::Unreadable)?;
+        if !file.metadata().is_ok_and(|meta| meta.is_file()) { return Err(Failure::Unreadable); }
+        Ok(file)
+    })();
+    let _ = std::fs::remove_file(socket);
+    let _ = std::fs::remove_dir(directory);
+    result
+}
+
 fn device_readable(path: &str) -> bool {
     std::ffi::CString::new(path)
         .map(|p| unsafe { libc::access(p.as_ptr(), libc::R_OK) } == 0)

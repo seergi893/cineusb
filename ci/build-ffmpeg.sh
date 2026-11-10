@@ -50,7 +50,7 @@
 #
 # **One script, and specifically ONE COMPONENT LIST.** Everything below `set --` is shared: same
 # version, same demuxers, parsers, bitstream filters and decoders, same `--disable-network` with
-# `file` as the only protocol, same `-plx` suffix, same LGPL flags. A second script would drift,
+# `file` and `fd` as local protocols, same `-plx` suffix, same LGPL flags. A second script would drift,
 # and the drift would be invisible — the host would demux something the television cannot, or
 # stop demuxing something it can, and the simulator would be answering about a different FFmpeg
 # while looking identical. The cross block is the only difference, and it is a handful of lines.
@@ -231,7 +231,7 @@ set -- "$@" \
   --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata \
   --enable-decoder=pgssub,dvdsub,dvbsub,ass,srt,subrip,text,mov_text,webvtt \
   --enable-decoder=aac,ac3,eac3,dca,mp3,mp2,flac,opus,vorbis,truehd,mlp,alac,pcm_s16le,pcm_s24le,pcm_s16be,pcm_s24be,pcm_s32le,pcm_s32be \
-  --enable-protocol=file
+  --enable-protocol=file,fd
 
 if [ "${RELEASE:-}" = "1" ]; then
   set -- "$@" --disable-swscale

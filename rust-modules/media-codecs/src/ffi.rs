@@ -438,6 +438,9 @@ plx_base::dynlib! {
     fn av_get_pix_fmt(name: *const c_char) -> c_int;
     // Container tags. Borrowed, never freed: the entry belongs to the dictionary, which belongs to
     // the AVStream, which `avformat_close_input` frees — so every read must copy before the close.
+    fn av_dict_set(dict: *mut *mut AVDictionary, key: *const c_char, value: *const c_char, flags: c_int) -> c_int;
+    fn av_dict_set_int(dict: *mut *mut AVDictionary, key: *const c_char, value: i64, flags: c_int) -> c_int;
+    fn av_dict_free(dict: *mut *mut AVDictionary);
     fn av_dict_get(
         m: *const AVDictionary,
         key: *const c_char,

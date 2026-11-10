@@ -1048,7 +1048,7 @@ STORAGE_TDIR = $(RUST_TDIR)-storage
 # (platform/src/storage_service/ and platform/src/storage/state.rs) and the install-identity
 # generator in build_support/; that is all it names here, so an edit to the UI no longer relinks it. `ci/test_storage_package_isolated.py` holds the
 # "no app library" line.
-STORAGE_INPUTS := $(shell find rust-modules/storage rust-modules/build_support rust-modules/platform/src/storage_service -type f 2>/dev/null) rust-modules/platform/src/storage/state.rs rust-modules/.cargo/config.toml
+STORAGE_INPUTS := $(shell find rust-modules/storage rust-modules/build_support rust-modules/platform/src/storage_service -type f 2>/dev/null) rust-modules/platform/src/storage/state.rs rust-modules/platform/src/webos/usb_fd.rs rust-modules/.cargo/config.toml
 STORAGE_BIN = rust-modules/$(STORAGE_TDIR)/$(RUST_TARGET)/$(ARM_PROFILE)/plxnative-storage
 pkg/plxnative-storage: LICENSE $(STORAGE_INPUTS) rust-modules/Cargo.toml rust-modules/Cargo.lock ci/install-identities.json Makefile ci/arm-cc.py ci/check-link-evidence.py
 	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" $(RUST_ENV) \

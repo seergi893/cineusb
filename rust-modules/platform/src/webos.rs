@@ -37,6 +37,8 @@
 use crate::tv::device::{Hardware, Info, NyxFile};
 
 pub mod jail_repair;
+#[cfg(target_os = "linux")]
+mod usb_fd;
 pub mod caps;
 pub mod toast;
 #[cfg(all(not(feature = "hostsim"), not(test)))]
