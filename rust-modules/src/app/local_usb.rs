@@ -473,7 +473,11 @@ pub(super) fn tick(app: &mut App) {
         ..plx_data::metadata::Dovi::NONE
     });
     let audio = (!info.audio.is_empty()).then(|| plx_media::route::CarriedAudio {
-        sid: 0, ordinal: -1, codec: info.audio.clone(), channels: info.audio_channels,
+        // Same local-only id as PlayingItem.audio: the existing subtitle menu
+        // matches this sid to determine the playing audio's language for Forced only.
+        // The demux ordinal stays -1, so FFmpeg still chooses its probed best audio.
+        sid: i64::from(info.audio_stream_index) + 1, ordinal: -1,
+        codec: info.audio.clone(), channels: info.audio_channels,
         can_normalize_loudness: false, immersive: false, sample_rate: info.audio_rate,
         bit_depth: info.audio_depth,
     });
