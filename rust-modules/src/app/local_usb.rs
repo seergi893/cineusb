@@ -29,11 +29,12 @@ fn tr(es: &'static str, ca: &'static str) -> &'static str {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Action { Settings, Delete, Eject }
+enum Action { Settings, Eject }
 
-const ACTIONS: [(Action, Rect); 3] = [
-    (Action::Settings, Rect::new(882.0, 46.0, 186.0, 56.0)),
-    (Action::Delete, Rect::new(1086.0, 46.0, 240.0, 56.0)),
+enum Mutation { Delete, Eject }
+
+const ACTIONS: [(Action, Rect); 2] = [
+    (Action::Settings, Rect::new(1140.0, 46.0, 186.0, 56.0)),
     (Action::Eject, Rect::new(1344.0, 46.0, 480.0, 56.0)),
 ];
 const PANEL: Rect = Rect::new(510.0, 324.0, 900.0, 376.0);
@@ -44,8 +45,22 @@ const OPTIONS: [Rect; 2] = [
 
 enum Dialog {
     Settings,
+    Language,
+    ForcedSubtitles,
+    Video { volume: Volume, path: PathBuf },
     Delete { volume: Volume, path: PathBuf },
     Eject(Volume),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Settings {
+    language: Preference,
+    forced_subtitles: bool,
+}
+
+enum SettingsJob {
+    Load(Receiver<Result<Option<Settings>, String>>),
+    Save(Receiver<Result<Settings, String>>),
 }
 
 struct Folder {
@@ -75,7 +90,9 @@ pub(super) struct Browser {
     dialog: Option<Dialog>,
     option: usize,
     mutating: bool,
-    language: Option<(Preference, Receiver<bool>)>,
+    settings: Settings,
+    settings_job: Option<SettingsJob>,
+    settings_started: bool,
     pending: Option<Receiver<DiskResult>>,
     scanning: Option<Receiver<Scan>>,
     next_scan: Instant,
@@ -88,7 +105,9 @@ impl Browser {
         Self {
             scan: Scan::default(), folders: Vec::new(), selected: 0,
             scroll: Spring::at(0.0), pop: GridPop::new(), status: String::new(),
-            hour: None, action: None, dialog: None, option: 0, mutating: false, language: None,
+            hour: None, action: None, dialog: None, option: 0, mutating: false,
+            settings: Settings { language: Preference::Es, forced_subtitles: false },
+            settings_job: None, settings_started: false,
             pending: None, scanning: None, next_scan: now, last_tick: now,
         }
     }
@@ -112,27 +131,7 @@ impl Browser {
         self.last_tick = now;
         let mut changed = false;
         let mut video = None;
-        if let Some((preference, result)) = self.language.as_ref() {
-            match result.try_recv() {
-                Ok(saved) => {
-                    if saved {
-                        i18n::apply_usb_language(*preference);
-                        self.dialog = None;
-                        self.status.clear();
-                    } else {
-                        self.status = tr("No se pudo guardar el idioma.", "No s’ha pogut desar l’idioma.").into();
-                    }
-                    self.language = None;
-                    changed = true;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    self.language = None;
-                    self.status = tr("No se pudo guardar el idioma.", "No s’ha pogut desar l’idioma.").into();
-                    changed = true;
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-        }
+        changed |= self.update_settings();
         match self.pending.as_ref().map(Receiver::try_recv) {
             Some(Ok(result)) => {
                 self.pending = None;
@@ -252,21 +251,66 @@ impl Browser {
         (row as f32 * GRID.pitch() + GRID.h - 570.0).max(0.0)
     }
 
+    fn update_settings(&mut self) -> bool {
+        if !self.settings_started {
+            self.settings_started = true;
+            self.settings.language = if i18n::current().language() == Language::Ca { Preference::Ca } else { Preference::Es };
+            let (reply, receive) = mpsc::sync_channel(1);
+            if plx_base::task::spawn_off_frame("cineusb-settings", move |_| { let _ = reply.send(load_settings()); }) {
+                self.settings_job = Some(SettingsJob::Load(receive));
+            }
+        }
+        let (saving, result) = match self.settings_job.as_ref() {
+            Some(SettingsJob::Load(reply)) => (false, reply.try_recv()),
+            Some(SettingsJob::Save(reply)) => (true, reply.try_recv().map(|result| result.map(Some))),
+            None => return false,
+        };
+        let result = match result {
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => Err("settings worker disconnected".into()),
+            Ok(result) => result,
+        };
+        self.settings_job = None;
+        match result {
+            Ok(Some(settings)) => {
+                self.settings = settings;
+                i18n::apply_usb_language(settings.language);
+                if saving {
+                    self.option = usize::from(matches!(self.dialog, Some(Dialog::ForcedSubtitles)));
+                    self.dialog = Some(Dialog::Settings);
+                    self.status.clear();
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                plx_base::eventlog::log(&format!("cineusb: USB preferences failed: {error}"));
+                if saving {
+                    self.status = tr("No se pudieron guardar los ajustes.", "No s’han pogut desar els ajustos.").into();
+                }
+            }
+        }
+        true
+    }
+
+    fn change_settings(&mut self, settings: Settings) {
+        let (reply, receive) = mpsc::sync_channel(1);
+        if plx_base::task::spawn_off_frame("cineusb-settings", move |_| {
+            let _ = reply.send(save_settings(settings).map(|()| settings));
+        }) {
+            self.settings_job = Some(SettingsJob::Save(receive));
+        } else {
+            self.status = tr("No se pudieron guardar los ajustes.", "No s’han pogut desar els ajustos.").into();
+        }
+    }
+
     fn volume(&self) -> Option<&Volume> {
         self.folders.last().map(|folder| &folder.volume)
             .or_else(|| self.scan.volumes.get(self.selected))
     }
 
-    fn selected_video(&self) -> Option<(&Volume, PathBuf)> {
-        let folder = self.folders.last()?;
-        let entry = folder.entries.get(self.selected)?;
-        (entry.kind == Kind::Video).then(|| (&folder.volume, folder.path.join(&entry.name)))
-    }
-
     fn action_available(&self, action: Action) -> bool {
         match action {
             Action::Settings => true,
-            Action::Delete => self.selected_video().is_some_and(|(volume, _)| system_mount(volume).is_some()),
             Action::Eject => self.volume().and_then(system_mount).is_some(),
         }
     }
@@ -276,39 +320,60 @@ impl Browser {
         self.option = 0;
         self.status.clear();
         self.dialog = match action {
-            Action::Settings => {
-                self.option = usize::from(i18n::current().language() == Language::Ca);
-                Some(Dialog::Settings)
-            }
-            Action::Delete => self.selected_video().map(|(volume, path)| Dialog::Delete { volume: volume.clone(), path }),
+            Action::Settings => Some(Dialog::Settings),
             Action::Eject => self.volume().cloned().map(Dialog::Eject),
         };
     }
 
     fn choose_option(&mut self) {
-        if self.language.is_some() { return; }
+        if self.settings_job.is_some() { return; }
         match self.dialog.take() {
             Some(Dialog::Settings) => {
-                let preference = if self.option == 0 { Preference::Es } else { Preference::Ca };
-                let (reply, receive) = mpsc::channel();
-                super::preferences::execute(plx_screens::registry::PreferenceCmd::Language { language: preference, reply });
-                self.language = Some((preference, receive));
-                self.dialog = Some(Dialog::Settings);
+                self.status.clear();
+                if self.option == 0 {
+                    self.option = usize::from(self.settings.language == Preference::Ca);
+                    self.dialog = Some(Dialog::Language);
+                } else {
+                    self.option = usize::from(self.settings.forced_subtitles);
+                    self.dialog = Some(Dialog::ForcedSubtitles);
+                }
+            }
+            Some(Dialog::Language) => {
+                let language = if self.option == 0 { Preference::Es } else { Preference::Ca };
+                self.dialog = Some(Dialog::Language);
+                self.change_settings(Settings { language, ..self.settings });
+            }
+            Some(Dialog::ForcedSubtitles) => {
+                self.dialog = Some(Dialog::ForcedSubtitles);
+                self.change_settings(Settings { forced_subtitles: self.option == 1, ..self.settings });
+            }
+            Some(Dialog::Video { volume, path }) => {
+                if !self.scan.volumes.contains(&volume) { return; }
+                if self.option == 0 {
+                    self.play_video(&volume, path);
+                } else if system_mount(&volume).is_some() {
+                    self.dialog = Some(Dialog::Delete { volume, path });
+                    self.option = 0;
+                }
             }
             Some(Dialog::Delete { volume, path }) if self.option == 1 => {
                 if !self.scan.volumes.contains(&volume) { return; }
                 self.status = tr("Eliminando archivo…", "Esborrant el fitxer…").into();
                 self.request(move || {
-                    let result = mutate_usb(Action::Delete, &volume, &path);
+                    let result = mutate_usb(Mutation::Delete, &volume, &path);
                     DiskResult::Delete(path, result)
                 });
                 self.mutating = self.pending.is_some();
+            }
+            Some(Dialog::Delete { volume, path }) => {
+                self.dialog = Some(Dialog::Video { volume, path });
+                self.option = 0;
             }
             Some(Dialog::Eject(volume)) if self.option == 1 => {
                 if !self.scan.volumes.contains(&volume) { return; }
                 self.status = tr("Expulsando disco…", "Expulsant el disc…").into();
                 self.request(move || {
-                    let result = mutate_usb(Action::Eject, &volume, &volume.path);
+                    let result = mutate_usb(Mutation::Eject, &volume, &volume.path);
                     DiskResult::Eject(volume, result)
                 });
                 self.mutating = self.pending.is_some();
@@ -348,13 +413,8 @@ impl Browser {
             match entry.kind {
                 Kind::Folder => self.open_folder(folder.volume.clone(), path),
                 Kind::Video => {
-                    let title = display_name(entry);
-                    let mount_id = system_mount(&folder.volume);
-                    self.status = tr("Abriendo vídeo…", "Obrint el vídeo…").into();
-                    self.request(move || {
-                        let result = inspect_video(&path, mount_id).map(|(file, info)| (file, info, title));
-                        DiskResult::Video(result)
-                    });
+                    self.dialog = Some(Dialog::Video { volume: folder.volume.clone(), path });
+                    self.option = 0;
                 }
             }
         } else if let Some(volume) = self.scan.volumes.get(self.selected).cloned() {
@@ -363,6 +423,16 @@ impl Browser {
             self.next_scan = Instant::now();
             self.status = tr("Buscando discos USB…", "Buscant discos USB…").into();
         }
+    }
+
+    fn play_video(&mut self, volume: &Volume, path: PathBuf) {
+        let title = path.file_stem().or_else(|| path.file_name()).unwrap_or_default().to_string_lossy().into_owned();
+        let mount_id = system_mount(volume);
+        self.status = tr("Abriendo vídeo…", "Obrint el vídeo…").into();
+        self.request(move || {
+            let result = inspect_video(&path, mount_id).map(|(file, info)| (file, info, title));
+            DiskResult::Video(result)
+        });
     }
 
     fn open_folder(&mut self, volume: Volume, path: PathBuf) {
@@ -374,8 +444,18 @@ impl Browser {
     }
 
     fn back(&mut self) {
-        if self.mutating || self.language.is_some() { return; }
-        if self.dialog.take().is_some() || self.action.take().is_some() { return; }
+        if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
+        if let Some(dialog) = self.dialog.take() {
+            self.dialog = match dialog {
+                Dialog::Language | Dialog::ForcedSubtitles => Some(Dialog::Settings),
+                Dialog::Delete { volume, path } => Some(Dialog::Video { volume, path }),
+                _ => None,
+            };
+            self.option = 0;
+            self.status.clear();
+            return;
+        }
+        if self.action.take().is_some() { return; }
         if self.pending.take().is_some() {
             self.status.clear();
             return;
@@ -391,9 +471,10 @@ impl Browser {
     }
 
     fn click(&mut self, x: f32, y: f32) {
-        if self.mutating || self.language.is_some() { return; }
+        if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if self.dialog.is_some() {
             if let Some(index) = OPTIONS.iter().position(|rect| hit(*rect, x, y)) {
+                if index == 1 && !self.second_option_available() { return; }
                 self.option = index;
                 self.choose_option();
             }
@@ -424,11 +505,11 @@ impl Browser {
     }
 
     fn key(&mut self, key: Key, repeat: bool) {
-        if self.mutating || self.language.is_some() { return; }
+        if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if self.dialog.is_some() {
             match key {
                 Key::Left { alt: false } => self.option = 0,
-                Key::Right { alt: false } => self.option = 1,
+                Key::Right { alt: false } if self.second_option_available() => self.option = 1,
                 Key::Ok if !repeat => self.choose_option(),
                 Key::Back if !repeat => self.back(),
                 _ => {}
@@ -467,6 +548,13 @@ impl Browser {
         }
     }
 
+    fn second_option_available(&self) -> bool {
+        match self.dialog.as_ref() {
+            Some(Dialog::Video { volume, .. }) => system_mount(volume).is_some(),
+            _ => true,
+        }
+    }
+
     fn item(&self, index: usize) -> Option<(String, &'static str, Cover)> {
         if let Some(folder) = self.folders.last() {
             let entry = folder.entries.get(index)?;
@@ -488,10 +576,9 @@ impl Browser {
             if self.action_available(action) {
                 let label = match action {
                     Action::Settings => tr("Ajustes", "Ajustos"),
-                    Action::Delete => tr("Eliminar archivo", "Esborra el fitxer"),
                     Action::Eject => tr("Desconectar USB de forma segura", "Expulsa l’USB amb seguretat"),
                 };
-                draw_button(p, rect, label, self.action == Some(action), action == Action::Delete);
+                draw_button(p, rect, label, self.action == Some(action), false);
             }
         }
         let breadcrumb = self.folders.last().map(|folder| {
@@ -536,8 +623,8 @@ impl Browser {
             p.clip_clear();
         }
         let hint = if self.status.is_empty() {
-            tr("↑ Acciones    ·    OK Abrir o reproducir    ·    Atrás Volver",
-                "↑ Accions    ·    OK Obre o reprodueix    ·    Enrere Torna")
+            tr("↑ Acciones    ·    OK Abrir    ·    Atrás Volver",
+                "↑ Accions    ·    OK Obre    ·    Enrere Torna")
         } else { &self.status };
         draw_line(p, hint, Rect::new(x, 990.0, width, 48.0), theme::size::CAPTION, false);
         if let Some(dialog) = &self.dialog { self.draw_dialog(p, dialog); }
@@ -545,11 +632,26 @@ impl Browser {
 
     fn draw_dialog(&self, p: Painter, dialog: &Dialog) {
         let cancel = tr("Cancelar", "Cancel·la");
+        let save_status = |description: &'static str| {
+            if matches!(self.settings_job, Some(SettingsJob::Save(_))) { tr("Guardando…", "Desant…") }
+            else if self.status.is_empty() { description }
+            else { self.status.as_str() }
+        };
         let (title, subject, detail, options) = match dialog {
-            Dialog::Settings => (tr("Idioma de CineUSB", "Idioma del CineUSB"), String::new(),
-                if self.language.is_some() { tr("Guardando…", "Desant…") }
-                else if self.status.is_empty() { tr("Elige el idioma de la app.", "Tria en quin idioma vols fer servir l’app.") }
-                else { &self.status }, ["Castellano", "Català"]),
+            Dialog::Settings => (tr("Ajustes", "Ajustos"), String::new(),
+                tr("Personaliza CineUSB.", "Fes-te el CineUSB a mida."),
+                [tr("Idioma", "Idioma"), tr("Subtítulos forzados", "Subtítols forçats")]),
+            Dialog::Language => (tr("Idioma de CineUSB", "Idioma del CineUSB"), String::new(),
+                save_status(tr("Elige el idioma de la app.", "Tria en quin idioma vols fer servir l’app.")),
+                ["Castellano", "Català"]),
+            Dialog::ForcedSubtitles => (tr("Subtítulos forzados", "Subtítols forçats"), String::new(),
+                save_status(tr("Se activan al reproducir si hay una pista compatible.",
+                    "S’activen quan poses un vídeo si hi ha una pista compatible.")),
+                [tr("Desactivados", "Desactivats"), tr("Activados", "Activats")]),
+            Dialog::Video { path, .. } => (tr("Opciones del vídeo", "Opcions del vídeo"),
+                path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                tr("Elige qué quieres hacer con este archivo.", "Què vols fer amb aquest fitxer?"),
+                [tr("Reproducir", "Reprodueix"), tr("Eliminar archivo", "Esborra el fitxer")]),
             Dialog::Delete { path, .. } => (tr("¿Eliminar este archivo?", "Vols esborrar aquest fitxer?"),
                 path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
                 tr("Se borrará del disco y no se podrá deshacer.", "S’esborrarà del disc i no el podràs recuperar."),
@@ -565,7 +667,9 @@ impl Browser {
         draw_line(p, &subject, Rect::new(x, 435.0, w, 48.0), theme::size::BODY, true);
         draw_line(p, detail, Rect::new(x, 495.0, w, 42.0), theme::size::CAPTION, false);
         for (index, (rect, label)) in OPTIONS.into_iter().zip(options).enumerate() {
-            draw_button(p, rect, label, self.option == index, index == 1 && matches!(dialog, Dialog::Delete { .. }));
+            if index == 1 && !self.second_option_available() { continue; }
+            let danger = index == 1 && matches!(dialog, Dialog::Video { .. } | Dialog::Delete { .. });
+            draw_button(p, rect, label, self.option == index, danger);
         }
     }
 
@@ -595,14 +699,46 @@ fn draw_button(p: Painter, rect: Rect, label: &str, focused: bool, danger: bool)
     Label::new(run.as_ptr(), theme::size::CAPTION, ink).h(HAlign::Center).bold().draw(p, rect);
 }
 
-fn mutate_usb(action: Action, volume: &Volume, path: &std::path::Path) -> Result<(), String> {
+fn load_settings() -> Result<Option<Settings>, String> {
+    #[cfg(not(feature = "hostsim"))]
+    let record = crate::port::usb_preferences().map_err(|error| format!("{error:?}"))?;
+    #[cfg(feature = "hostsim")]
+    let record = match std::fs::read_to_string(plx_base::paths::in_runtime_dir("cineusb-settings")) {
+        Ok(record) => record,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if record.is_empty() { return Ok(None); }
+    let (language, forced_subtitles) = match record.as_str() {
+        "es 0" => (Preference::Es, false),
+        "es 1" => (Preference::Es, true),
+        "ca 0" => (Preference::Ca, false),
+        "ca 1" => (Preference::Ca, true),
+        _ => return Err("invalid settings record".into()),
+    };
+    Ok(Some(Settings { language, forced_subtitles }))
+}
+
+fn save_settings(settings: Settings) -> Result<(), String> {
+    let catalan = settings.language == Preference::Ca;
+    #[cfg(not(feature = "hostsim"))]
+    return crate::port::save_usb_preferences(catalan, settings.forced_subtitles)
+        .map_err(|error| format!("{error:?}"));
+    #[cfg(feature = "hostsim")]
+    {
+        let record = format!("{} {}", if catalan { "ca" } else { "es" }, u8::from(settings.forced_subtitles));
+        plx_plex::plex::session::write_atomic(&plx_base::paths::in_runtime_dir("cineusb-settings"), record.as_bytes())
+            .map_err(|error| format!("{error:?}"))
+    }
+}
+
+fn mutate_usb(action: Mutation, volume: &Volume, path: &std::path::Path) -> Result<(), String> {
     #[cfg(not(feature = "hostsim"))]
     {
         let id = system_mount(volume).ok_or("missing live USB mount")?;
         let result = match action {
-            Action::Delete => crate::port::delete_usb_video(path, id),
-            Action::Eject => crate::port::eject_usb_disk(path, id),
-            Action::Settings => unreachable!(),
+            Mutation::Delete => crate::port::delete_usb_video(path, id),
+            Mutation::Eject => crate::port::eject_usb_disk(path, id),
         };
         result.map_err(|error| format!("{error:?}"))
     }
@@ -747,6 +883,16 @@ fn local_playing_item(info: &plx_play_feed::LocalMedia, dovi: plx_data::metadata
     }
 }
 
+fn initial_forced_subtitle(item: &plx_data::metadata::PlayingItem, enabled: bool) -> Option<(i64, i32)> {
+    if !enabled { return None; }
+    let audio_lang = item.audio.first().map_or("", |audio| audio.lang_code.as_str());
+    let names = plx_data::metadata::track_names::TrackNames::new();
+    let picked = plx_media::route::forced_only_pick(&item.subs, &names, audio_lang, "");
+    Some(picked.map_or((0, -1), |index| {
+        (item.subs[index].id, plx_data::metadata::sub_render_ordinal(&item.subs, index))
+    }))
+}
+
 pub(super) fn tick(app: &mut App) {
     let Some((file, info, title)) = app.usb.update() else { return };
     let ps = &mut app.player.session;
@@ -764,14 +910,16 @@ pub(super) fn tick(app: &mut App) {
         can_normalize_loudness: false, immersive: false, sample_rate: info.audio_rate,
         bit_depth: info.audio_depth,
     });
+    let item = local_playing_item(&info, dovi);
+    let forced = initial_forced_subtitle(&item, app.usb.settings.forced_subtitles);
     let ok = plx_media::route::set_stream_declaration(ps, &info.video, &info.audio, info.fps, dovi, false)
-        && plx_media::route::set_local_source(ps, file, &title, audio, playback::start_caps());
+        && plx_media::route::set_local_source(ps, file, &title, audio, forced, playback::start_caps());
     if ok {
         plx_media::route::set_stream_source_raster(ps, info.width, info.height);
         if playback::start_playback(ps, &mut app.adapters.player, 0, playback::Origin::Here,
             4500, None, &mut app.pages, &mut app.bridge) {
             app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(
-                Some(local_playing_item(&info, dovi))));
+                Some(item)));
             return;
         }
         plx_media::route::clear_url(ps);
@@ -780,8 +928,31 @@ pub(super) fn tick(app: &mut App) {
 }
 
 #[cfg(test)]
-mod usb_subtitle_tests {
+mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn delete_from_video_menu_defaults_to_cancel() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda/sda1".into(), mount_id: Some(42), system: true };
+        let path = volume.path.join("Pel·lícula.mkv");
+        browser.scan.volumes.push(volume.clone());
+        browser.folders.push(Folder {
+            path: volume.path.clone(), volume, collection: None, selected: 0,
+            entries: vec![Entry { kind: Kind::Video, name: "Pel·lícula.mkv".into() }],
+        });
+        browser.open();
+        assert!(matches!(browser.dialog.as_ref(), Some(Dialog::Video { path: selected, .. }) if *selected == path));
+        assert_eq!(browser.option, 0);
+        browser.option = 1;
+        browser.choose_option();
+        assert!(matches!(browser.dialog.as_ref(), Some(Dialog::Delete { path: selected, .. }) if *selected == path));
+        assert_eq!(browser.option, 0);
+        browser.choose_option();
+        assert!(matches!(browser.dialog, Some(Dialog::Video { .. })));
+        assert!(browser.pending.is_none());
+        assert_eq!(browser.len(), 1);
+    }
 
     fn media() -> plx_play_feed::LocalMedia {
         plx_play_feed::LocalMedia {
@@ -832,6 +1003,11 @@ mod usb_subtitle_tests {
         let names = plx_data::metadata::track_names::TrackNames::new();
         assert_eq!(plx_media::route::forced_only_pick(&item.subs, &names, "eng", ""), Some(1));
         assert_eq!(plx_media::route::forced_only_pick(&item.subs, &names, "spa", ""), None);
+        assert_eq!(initial_forced_subtitle(&item, false), None);
+        assert_eq!(initial_forced_subtitle(&item, true), Some((6, 1)));
+        let mut other = item;
+        other.audio[0].lang_code = "spa".into();
+        assert_eq!(initial_forced_subtitle(&other, true), Some((0, -1)));
     }
 
     #[test]
