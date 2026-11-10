@@ -1369,6 +1369,7 @@ pub(crate) fn direct_trigger_server() -> Result<plx_plex::plex::ServerId, String
 /// Which screen the boot gate landed on — see the gate itself in `plex_run`, which is where the
 /// order of its four cases is argued.
 pub(crate) enum BootTo {
+    LocalUsb,
     Home,
     Login,
     Profiles,
@@ -1743,6 +1744,7 @@ pub(crate) unsafe fn construct(
     let (graphics, session) = open_graphics(controlled, || {
         Some(match &initial {
             Some(initial) => initial.session.persisted.clone(),
+            None if cfg!(feature = "local-usb") => plx_plex::plex::session::Session::default(),
             None => plx_plex::plex::session::load(),
         })
     })?;
@@ -2053,7 +2055,11 @@ pub(crate) unsafe fn construct(
     }
     };
     // Controlled Home constructs its App before executing the same bootstrap command path.
-    let boot_to = if controlled { BootTo::Home } else {
+    let boot_to = if controlled {
+        BootTo::Home
+    } else if cfg!(feature = "local-usb") {
+        BootTo::LocalUsb
+    } else {
         activate_session(&mut bridge, &mut pages, &mut super::recorder::Recplay::Off)
     };
     if !controlled {
@@ -2389,6 +2395,7 @@ pub(crate) unsafe fn construct(
     // the loop's first frame either way, and the route below is a page underneath it.
     let mut owes_consent_question = false;
     let route = match boot_to {
+        BootTo::LocalUsb => AppArg::LocalUsb,
         // **Both Home arms ask, and the shared call is the point.** This is the one boot that
         // has no earlier hook — an install already signed in, either never asked or asked
         // against an older policy — and the sign-in's question has to come before every
@@ -2493,6 +2500,8 @@ pub(crate) unsafe fn construct(
     // a controlled run defers it to the first player frame).
     let hud = super::run::boot_hud(&mut bridge, controlled);
     let mut app = App {
+        #[cfg(feature = "local-usb")]
+        usb: super::local_usb::Browser::new(),
         last_input,
         loop_t,
         iters_ct,

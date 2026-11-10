@@ -82,7 +82,7 @@ pub mod page_header; // the page header row: one layout, paint, focus group and 
 pub mod page_regions; // the column NAV/HEADER/CONTENT/RAIL: one table for the pages' links, BACK and first seat
 pub mod caption_policy; // "Under posters": what a focused poster's caption band shows and how tall it is (CONTRACT FREEZE: P3 fills)
 pub mod pill; // THE CAPSULE OUTLINE — three blended arcs per corner, solved; not a stadium
-pub(crate) mod poster_grid; // uniform six-column portrait geometry for collection-like pages
+pub mod poster_grid; // shared six-column portrait geometry and focus motion
 pub mod scroll_chrome; // the chrome/capsule handoff state a page owns, plus the capsule text and predicate, owned by the Library (and its Collections page) and the Watchlist; Home shares only its spatial clearance rule
 pub mod scroll_capsule; // the scroll capsule + top fade a tucked long page leaves (live nav-pill glass)
 pub mod popover_glass; // the popover panel's glass: gradient face, rim, highlight, shadow (DS6)

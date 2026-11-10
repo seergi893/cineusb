@@ -37,6 +37,40 @@ use plx_machine::machine::{
 };
 use plx_ui::screen::{Mounter, ReturnState, Screen};
 
+// The USB browser owns its disk runner and renders in the application's local route. The
+// dispatcher still owns the root entry, so the shared player can return to that exact entry.
+struct LocalUsbRoot;
+
+mod local_usb_root {
+    use super::*;
+    use plx_machine::machine::{FocusKey, GroupId, Handled, Machine};
+    use plx_ui::{frame::Budget, screen::{At, Dir, DrawFrame, Focusable, GroupSpec,
+        Placed, RenderStrategy, ScreenEvent, Step}};
+
+    impl<H: Host> Machine<H> for LocalUsbRoot {
+        type Ev = ScreenEvent<H>;
+        fn step(&mut self, _: &Self::Ev, _: &Cx<'_, H>, _: &mut Effects<'_, H>) -> Handled { Handled::No }
+    }
+    impl<H: Host> Focusable<H> for LocalUsbRoot {
+        fn groups(&self, _: &Cx<'_, H>, _: &mut Vec<GroupSpec>) {}
+        fn group_of(&self, _: &H::Elem, _: &Cx<'_, H>) -> Option<GroupId> { None }
+        fn neighbour(&self, _: FocusKey<H::Elem>, _: Dir, _: &Cx<'_, H>) -> Step<H::Elem> { Step::Edge }
+        fn place(&self, _: &H::Elem, _: &Cx<'_, H>, _: At) -> Option<Placed> { None }
+        fn reconcile(&self, want: FocusKey<H::Elem>, _: &Cx<'_, H>) -> FocusKey<H::Elem> { want }
+        fn seat(&self, _: GroupId, _: Placed, _: &Cx<'_, H>) -> FocusKey<H::Elem> {
+            unreachable!("USB focus belongs to the local browser")
+        }
+    }
+    impl<H: Host> Screen<H> for LocalUsbRoot {
+        fn name(&self) -> &'static str { "usb" }
+        fn state(&self) -> &dyn LogicalState { &() }
+        fn crumb(&self, _: &Cx<'_, H>) -> Option<std::borrow::Cow<'_, str>> { None }
+        fn prepare(&mut self, _: &mut Budget, _: &Cx<'_, H>) {}
+        fn draw(&mut self, _: &mut DrawFrame<'_, '_, H>) {}
+        fn render(&self) -> RenderStrategy { RenderStrategy::Page }
+    }
+}
+
 /// The one conversion from a catalog row to the plain facts `ui` draws a tile from. It lives here
 /// because a screen may name `registry` but never a sibling screen, and `ui` cannot name the row.
 pub mod tile_facts;
@@ -1893,6 +1927,7 @@ pub mod page_id {
 /// `decision-alert`, `settings-*`) never press.
 #[derive(Clone, PartialEq, Eq)]
 pub enum AppArg {
+    LocalUsb,
     LibraryMenu(LibraryMenuArg),
     /// The profile menu (`screens::account_menu`), presented on the shared `ModalStack` over
     /// whichever bar-wearing page the chip was pressed on. **It carries nothing**, and that is the
@@ -1995,6 +2030,7 @@ impl AppArg {
     }
 }
 
+// The local USB route is a live-only boot route. Controlled recordings use the original shape.
 pub const ARG_SHAPE: &str = "AppArg{Login,Profiles,Onboard,Home,Library,LibraryCollections{section:u32},LibraryRecommended{section:u32},Search,Watchlist,Player,Content:{Detail{sid:u32,rk:str},Person{sid:u32,key:str,guid:str,name:str,thumb:str},Filmography{sid:u32,key:str},Collection{sid:u32,rk:str,sec:i64,tag:i64,name:str},Catalog{hex:str}},Settings:SettingsPage{Root,Playback,AudioSubtitles,Favourites,LibraryFavourites,Privacy,Legal,About,Document(u8),Preview(u8),ConsentStage(u8),Language,Contribute},FirstRunConsent(u8),LibraryMenu{host:u32,target:{epoch:u32,sid:u32,section:u64},kind:u32,anchor:[u32;4]},\
      PlayerOverlay{Tracks(tab:i32),Info,Chapters,More(page:u8)},\
      AltSources{host:u32,sid:u32,rk:str,anchor:[u32;4]},\
@@ -2007,6 +2043,7 @@ pub const ARG_SHAPE: &str = "AppArg{Login,Profiles,Onboard,Home,Library,LibraryC
 impl LogicalState for AppArg {
     fn write(&self, c: &mut Canon) {
         match self {
+            Self::LocalUsb => { c.u32(0).u32(14); }
             Self::LibraryMenu(arg) => { c.u32(4); arg.write(c); }
             Self::PlayerOverlay(arg) => { c.u32(5); arg.write(c); }
             Self::AltSources(arg) => { c.u32(6); arg.write(c); }
@@ -2063,6 +2100,7 @@ impl plx_ui::screen::ScreenArg for AppArg {
             // The two sub-pages of a library keep the bar, as the Library they are pushed over.
             AppArg::LibraryCollections { .. } | AppArg::LibraryRecommended { .. } => Chrome::TabBar,
             AppArg::Login
+            | AppArg::LocalUsb
             | AppArg::Profiles
             | AppArg::Onboard
             | AppArg::Player
@@ -2113,6 +2151,7 @@ impl plx_ui::screen::ScreenArg for AppArg {
             // forward and a fold may not renumber them. 5 and 6 are vacant (the two popover routes
             // phase 10 deleted); 8 and 9 belong to Detail and Person, which mount from `Content`.
             AppArg::Login => 1,
+            AppArg::LocalUsb => 31,
             AppArg::Profiles => 2,
             AppArg::Onboard => 3,
             AppArg::Home => page_id::HOME.0,
@@ -2244,6 +2283,7 @@ where
             _ => EntryId(0),
         };
         match arg {
+            AppArg::LocalUsb => Box::new(LocalUsbRoot),
             AppArg::LibraryMenu(arg) => Box::new(crate::library::menu::LibraryMenu::new(entry, arg.clone())),
             AppArg::AccountMenu => Box::new(crate::account_menu::AccountMenuScreen::new(entry)),
             AppArg::ItemMenu(arg) => Box::new(

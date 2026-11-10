@@ -25,6 +25,7 @@ use plx_screens::registry::AppArg;
 pub(crate) fn route_word(route: &AppArg) -> &'static str {
     use plx_screens::registry::ContentArg;
     match route {
+        AppArg::LocalUsb => "usb",
         AppArg::Login => "login",
         AppArg::Profiles => "profiles",
         AppArg::Onboard => "onboard",
