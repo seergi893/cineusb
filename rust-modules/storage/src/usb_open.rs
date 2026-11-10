@@ -104,7 +104,8 @@ fn open_under(usb: &Path, path: &Path, want_directory: bool) -> io::Result<File>
         let Component::Normal(name) = part else { return Err(invalid()) };
         let name = CString::new(name.as_bytes()).map_err(|_| invalid())?;
         let directory = parts.peek().is_some();
-        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+        // Plain openat does not opt into large files on 32-bit webOS.
+        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_LARGEFILE;
         let flags = if directory || want_directory { flags | libc::O_DIRECTORY } else { flags };
         let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
         if fd < 0 { return Err(io::Error::last_os_error()); }
@@ -155,14 +156,19 @@ pub fn run(pid: &str, slot: &str, mount_id: &str, path_hex: &str) -> io::Result<
         || slot.len() != 6 || !slot.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return Err(invalid());
     }
-    let path = system_path(&decode_path(path_hex)?)?;
+    let path = system_path(&decode_path(path_hex)?).map_err(|e| at_stage("resolve path", e))?;
     let mount_id = mount_id.parse::<u64>().map_err(|_| invalid())?;
-    if mount_id != 0 { require_mount(&path, mount_id)?; }
-    let file = open_under(Path::new("/tmp/usb"), &path, false)?;
-    if mount_id != 0 { require_mount(&path, mount_id)?; }
-    let socket = UnixStream::connect(format!("/proc/{pid}/root/tmp/cineusb-fd-{slot}/file.sock"))?;
-    crate::usb_fd::send(&socket, &file)?;
+    if mount_id != 0 { require_mount(&path, mount_id).map_err(|e| at_stage("check mount before open", e))?; }
+    let file = open_under(Path::new("/tmp/usb"), &path, false).map_err(|e| at_stage("open file", e))?;
+    if mount_id != 0 { require_mount(&path, mount_id).map_err(|e| at_stage("check mount after open", e))?; }
+    let socket = UnixStream::connect(format!("/proc/{pid}/root/tmp/cineusb-fd-{slot}/file.sock"))
+        .map_err(|e| at_stage("connect to app socket", e))?;
+    crate::usb_fd::send(&socket, &file).map_err(|e| at_stage("send descriptor", e))?;
     io::stdout().write_all(b"CINEUSB_FD_OK")
+}
+
+fn at_stage(stage: &str, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{stage}: {error}"))
 }
 
 #[cfg(test)]
@@ -193,5 +199,26 @@ mod tests {
     fn system_mount_list_ignores_the_stale_sda1_placeholder() {
         let table = b"45 54 0:20 / /tmp/usb/sda/sda1 rw - tmpfs tmpfs rw\n365 54 8:17 / /tmp/usb/sdb/sdb1 rw,relatime - tntfs /dev/sdb1 rw\n";
         assert_eq!(live_mounts(table), [(365, PathBuf::from("/tmp/usb/sdb/sdb1"))]);
+    }
+
+    #[test]
+    fn usb_open_transfers_a_descriptor_for_a_video_over_four_gib() {
+        use std::os::unix::fs::FileExt;
+
+        let root = std::env::temp_dir().join(format!("cineusb-large-video-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("large.mkv");
+        let offset = 4 * 1024 * 1024 * 1024;
+        File::create(&path).unwrap().write_all_at(b"video", offset).unwrap();
+
+        let original = open_under(&root, &path, false).unwrap();
+        let (app, helper) = UnixStream::pair().unwrap();
+        crate::usb_fd::send(&helper, &original).unwrap();
+        let file = crate::usb_fd::receive(&app).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), offset + 5);
+        let mut bytes = [0; 5];
+        file.read_exact_at(&mut bytes, offset).unwrap();
+        assert_eq!(&bytes, b"video");
+        fs::remove_dir_all(root).unwrap();
     }
 }
