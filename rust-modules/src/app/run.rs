@@ -1595,7 +1595,8 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // otherwise the selected USB volume looks clickable but never opens.
         #[cfg(feature = "local-usb")]
         if app.route() == AppArg::LocalUsb && !super::bridge::player_arriving(&app.pages) {
-            super::local_usb::click(app);
+            let (cx, cy) = ptr_xy(&app.ev);
+            super::local_usb::click(app, cx, cy);
             return;
         }
         // OK on a set whose pointer the app can only make transparent: see `click_is_ok`. Pushed
@@ -1683,6 +1684,12 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // its clicks. The menu's panel in particular is why the container answers a click off a
         // surface by construction: a click cannot fall through onto the shelf under it.)
     } else if et == SDL_MOUSEBUTTONUP {
+        // The USB browser handles activation on button-down. Do not pass the
+        // matching release into the shared UI's press/drag state.
+        #[cfg(feature = "local-usb")]
+        if app.route() == AppArg::LocalUsb && !super::bridge::player_arriving(&app.pages) {
+            return;
+        }
         if std::mem::take(&mut app.ptr.ok_from_click) {
             super::events::remote_synth_key_edge(SDLK_RETURN, 0, false);
             return;
