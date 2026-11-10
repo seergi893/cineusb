@@ -68,6 +68,7 @@ pub fn open_usb_file(path: &Path, mount_id: Option<u64>) -> Result<std::fs::File
         if !slot.bytes().all(|byte| byte.is_ascii_alphanumeric()) { return Err(Failure::StartFailed); }
         let command = format!("--cineusb-open {} '{slot}' {} '{path_hex}'", std::process::id(), mount_id.unwrap_or(0));
         if run_usb_helper(&command)? != "CINEUSB_FD_OK" {
+            plx_base::eventlog::log("cineusb: Homebrew USB open returned no descriptor confirmation");
             return Err(Failure::CommandFailed);
         }
         let (stream, _) = listener.accept().map_err(|_| Failure::Unreadable)?;
@@ -94,11 +95,23 @@ fn run_usb_helper(args: &str) -> Result<String, Failure> {
     let helper = format!("{prefix}/services/{id}.storage/plxnative-storage");
     let command = format!("exec '{helper}' {args}");
     let reply = call_hbc(&serde_json::json!({ "command": command }).to_string())?;
-    let reply: Value = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
+    let operation = args.split_ascii_whitespace().next().unwrap_or_default();
+    let reply: Value = serde_json::from_str(&reply).map_err(|_| {
+        plx_base::eventlog::log(&format!("cineusb: Homebrew {operation} returned invalid JSON"));
+        Failure::CommandFailed
+    })?;
     if reply.get("returnValue").and_then(Value::as_bool) != Some(true) {
+        let detail = reply.get("stderrString").and_then(Value::as_str)
+            .and_then(|stderr| stderr.lines().find(|line| line.starts_with("CineUSB USB request failed: ")));
+        let code = reply.get("errorCode").and_then(Value::as_i64);
+        plx_base::eventlog::log(&format!("cineusb: Homebrew {operation} failed code={code:?} {}",
+            detail.unwrap_or("helper failure detail unavailable")));
         return Err(Failure::CommandFailed);
     }
-    reply.get("stdoutString").and_then(Value::as_str).map(str::to_owned).ok_or(Failure::CommandFailed)
+    reply.get("stdoutString").and_then(Value::as_str).map(str::to_owned).ok_or_else(|| {
+        plx_base::eventlog::log(&format!("cineusb: Homebrew {operation} returned no stdout"));
+        Failure::CommandFailed
+    })
 }
 
 #[cfg(target_os = "linux")]
