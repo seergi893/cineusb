@@ -413,6 +413,57 @@ pub(super) fn key(app: &mut App, key: Key, repeat: bool) {
     plx_machine::idle::invalidate();
 }
 
+/// Build the same track inventory that the Plex path installs for its in-player menu,
+/// directly from the already-probed USB file. In particular, subtitle order here MUST
+/// equal FFmpeg's SubTracks::inspect file-order enumeration (not an alphabetic sort).
+fn local_playing_item(info: &plx_play_feed::LocalMedia, dovi: plx_data::metadata::Dovi)
+    -> plx_data::metadata::PlayingItem {
+    use plx_data::metadata::{PlayingItem, Stream};
+
+    let language = |raw: Option<&str>| -> (String, String) {
+        let code = raw.unwrap_or("").trim().to_ascii_lowercase();
+        if code.is_empty() || code == "und" { return (String::new(), String::new()); }
+        let label = plx_data::metadata::lang_key(&code)
+            .map(|key| plx_plex::plex::languages::label(&key).to_owned())
+            .unwrap_or_default();
+        (code, label)
+    };
+    // Only advertise the audio stream that the current local playback actually uses.
+    // Presenting every audio stream would offer switches that the USB route has not wired.
+    let audio = if info.audio_stream_index >= 0 {
+        let (lang_code, lang) = language(info.audio_language.as_deref());
+        vec![Stream {
+            id: i64::from(info.audio_stream_index) + 1,
+            index: i64::from(info.audio_stream_index),
+            lang, lang_code, codec: info.audio.clone(), title: info.audio_title.clone(),
+            channels: info.audio_channels, bit_depth: info.audio_depth,
+            sampling_rate: info.audio_rate, default: true, selected: true,
+            ..Stream::default()
+        }]
+    } else { Vec::new() };
+    let subs = info.subtitles.iter().map(|track| {
+        let (lang_code, lang) = language(track.language.as_deref());
+        Stream {
+            // Stream.id==0 denotes Off in the existing menu. Preserve an unambiguous
+            // nonzero id for every real track, even when its FFmpeg stream index is zero.
+            id: i64::from(track.stream_index) + 1,
+            index: i64::from(track.stream_index),
+            lang, lang_code, codec: track.codec.clone(), title: track.title.clone(),
+            forced: track.forced, default: track.default, sdh: track.sdh,
+            ..Stream::default()
+        }
+    }).collect();
+    PlayingItem {
+        // A local file has no Plex server or rating key. Empty rk and part-id 0 prevent
+        // the ordinary subtitle-selection path from issuing Plex PUT requests.
+        sid: plx_plex::plex::ServerId::from_raw(0),
+        rk: String::new(), show_rk: String::new(), kind: String::new(),
+        duration_ms: None, audio, subs, video_fps: info.fps,
+        width: i64::from(info.width), height: i64::from(info.height), bitrate: 0,
+        dovi, markers: Vec::new(), chapters: Vec::new(), hdr: dovi.present,
+    }
+}
+
 pub(super) fn tick(app: &mut App) {
     let Some((file, info, title)) = app.usb.update() else { return };
     let ps = &mut app.player.session;
@@ -431,8 +482,71 @@ pub(super) fn tick(app: &mut App) {
     if ok {
         plx_media::route::set_stream_source_raster(ps, info.width, info.height);
         if playback::start_playback(ps, &mut app.adapters.player, 0, playback::Origin::Here,
-            4500, None, &mut app.pages, &mut app.bridge) { return; }
+            4500, None, &mut app.pages, &mut app.bridge) {
+            app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(
+                Some(local_playing_item(&info, dovi))));
+            return;
+        }
         plx_media::route::clear_url(ps);
     }
     app.usb.status = "No se pudo iniciar el reproductor con este vídeo.".into();
+}
+
+#[cfg(test)]
+mod usb_subtitle_tests {
+    use super::*;
+
+    fn media() -> plx_play_feed::LocalMedia {
+        plx_play_feed::LocalMedia {
+            video: "hevc".into(), audio: "eac3".into(), audio_channels: 6,
+            audio_rate: 48_000, audio_depth: 16, audio_stream_index: 1,
+            audio_language: Some("eng".into()), audio_title: "English 5.1".into(),
+            width: 3840, height: 2160, fps: 23.976, dovi: None,
+            subtitles: vec![
+                plx_play_feed::ff::LocalSubtitle { stream_index: 3, codec: "subrip".into(),
+                    language: Some("spa".into()), title: "Full".into(),
+                    forced: false, default: true, sdh: false },
+                plx_play_feed::ff::LocalSubtitle { stream_index: 5, codec: "ass".into(),
+                    language: Some("eng".into()), title: "Signs".into(),
+                    forced: true, default: false, sdh: false },
+                plx_play_feed::ff::LocalSubtitle { stream_index: 7, codec: "hdmv_pgs_subtitle".into(),
+                    language: Some("eng".into()), title: "SDH".into(),
+                    forced: false, default: false, sdh: true },
+            ],
+        }
+    }
+
+    #[test]
+    fn embedded_usb_subtitle_rows_preserve_file_order_language_and_flags() {
+        let item = local_playing_item(&media(), plx_data::metadata::Dovi::NONE);
+        assert_eq!(item.subs.len(), 3);
+        assert_eq!(item.audio.len(), 1);
+        assert_eq!(item.audio[0].lang_code, "eng");
+        assert_eq!(item.subs.iter().map(|s| s.index).collect::<Vec<_>>(), [3, 5, 7]);
+        assert_eq!(item.subs[0].lang_code, "spa");
+        assert!(item.subs[0].default);
+        assert!(item.subs[1].forced);
+        assert!(item.subs[2].sdh);
+        for index in 0..item.subs.len() {
+            assert_eq!(plx_data::metadata::sub_render_ordinal(&item.subs, index), index as i32);
+        }
+    }
+
+    #[test]
+    fn forced_only_uses_the_playing_audio_language_and_never_picks_full() {
+        let item = local_playing_item(&media(), plx_data::metadata::Dovi::NONE);
+        let names = plx_data::metadata::track_names::TrackNames::new();
+        assert_eq!(plx_media::route::forced_only_pick(&item.subs, &names, "eng", ""), Some(1));
+        assert_eq!(plx_media::route::forced_only_pick(&item.subs, &names, "spa", ""), None);
+    }
+
+    #[test]
+    fn a_video_without_subtitles_does_not_invent_tracks() {
+        let mut input = media();
+        input.audio_stream_index = -1;
+        input.subtitles.clear();
+        let item = local_playing_item(&input, plx_data::metadata::Dovi::NONE);
+        assert!(item.audio.is_empty());
+        assert!(item.subs.is_empty());
+    }
 }
