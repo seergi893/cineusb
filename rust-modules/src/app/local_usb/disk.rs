@@ -76,7 +76,13 @@ fn scan(usb: &Path, bridge: &Path, table: io::Result<Vec<u8>>) -> Scan {
             hidden_mounts = true;
         }
     }
-    mounts.sort_by(|a, b| a.path.cmp(&b.path));
+    // Prefer the explicit, root-created read-only bridge over a jail-visible
+    // directory that might list names but fail EIO on the actual file bytes.
+    // Keep unbridged volumes as a fallback if the root service is unavailable.
+    mounts.sort_by(|a, b| {
+        b.path.starts_with(bridge).cmp(&a.path.starts_with(bridge))
+            .then_with(|| a.path.cmp(&b.path))
+    });
     mounts.dedup_by(|a, b| a.path == b.path);
     Scan { volumes: mounts, hidden_mounts }
 }
