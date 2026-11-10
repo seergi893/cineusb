@@ -8,7 +8,7 @@ use plx_machine::machine::Measure;
 use plx_ui::{
     icons::{self, Icon},
     label::{HAlign, Label},
-    poster_grid::{self, Card, GridPop, STYLE},
+    poster_grid::{self, Card, Geom, GridPop, STYLE},
     screen::Dir,
     theme, widgets::{self, Art}, Painter, Rect, Spring,
 };
@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 const TOP: f32 = 338.0;
 const COLS: usize = poster_grid::COLS;
+const GRID: Geom = Geom::of(COLS, plx_ui::consts::MARGIN_X, &STYLE);
 
 struct Folder {
     volume: Volume,
@@ -158,8 +159,7 @@ impl Browser {
 
     fn scroll_target(&self) -> f32 {
         let row = self.selected / COLS;
-        let pitch = poster_grid::Geom::DEFAULT.pitch();
-        (row as f32 * pitch + poster_grid::Geom::DEFAULT.h - 570.0).max(0.0)
+        (row as f32 * GRID.pitch() + GRID.h - 570.0).max(0.0)
     }
 
     fn select(&mut self, index: usize, snap: bool) {
@@ -282,7 +282,7 @@ impl Browser {
             draw_line(p, message, Rect::new(x, 380.0, width, 70.0), theme::size::BODY, false);
         } else {
             p.clip(Rect::new(0.0, TOP - 18.0, 1920.0, 626.0));
-            let cells = poster_grid::visible_in(&poster_grid::Geom::DEFAULT, self.len(), TOP, self.scroll.pos, &[]);
+            let cells = poster_grid::visible_in(&GRID, self.len(), TOP, self.scroll.pos);
             for i in cells.filter(|index| *index != self.selected) { self.draw_tile(p, i, false); }
             self.draw_tile(p, self.selected, true);
             p.clip_clear();
@@ -293,7 +293,7 @@ impl Browser {
 
     fn draw_tile(&self, p: Painter, index: usize, focused: bool) {
         let Some((title, _, icon)) = self.item(index) else { return };
-        let frame = poster_grid::cell(index, TOP, self.scroll.pos, &[]);
+        let frame = poster_grid::cell_in(&GRID, index, TOP, self.scroll.pos, &[]);
         let scale = self.pop.scale(index, focused, &STYLE);
         let card = frame.scaled(scale);
         let radius = STYLE.tile_radius(card, scale);

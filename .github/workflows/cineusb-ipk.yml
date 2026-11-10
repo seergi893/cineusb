@@ -14,8 +14,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: cineusb-release
-  cancel-in-progress: false
+  group: cineusb-${{ github.event.pull_request.number || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   package:
