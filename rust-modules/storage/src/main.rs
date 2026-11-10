@@ -31,15 +31,23 @@ fn main() {
     #[cfg(all(target_os = "linux", any(target_arch = "arm", test)))]
     {
         let args: Vec<_> = std::env::args().collect();
-        if args.get(1).is_some_and(|arg| arg == "--cineusb-open") {
-            match args.as_slice() {
-                [_, _, pid, slot, path] => match usb_open::run(pid, slot, path) {
+        if let [_, mode, parameters @ ..] = args.as_slice() {
+            let result = match (mode.as_str(), parameters) {
+                ("--cineusb-open", [pid, slot, id, path]) => Some(usb_open::run(pid, slot, id, path)),
+                ("--cineusb-volumes", []) => Some(usb_open::list_volumes()),
+                ("--cineusb-list", [id, path]) => Some(usb_open::list_folder(id, path)),
+                ("--cineusb-open" | "--cineusb-volumes" | "--cineusb-list", _) => {
+                    Some(Err(std::io::Error::other("invalid CineUSB USB request")))
+                }
+                _ => None,
+            };
+            if let Some(result) = result {
+                match result {
                     Ok(()) => return,
-                    Err(error) => eprintln!("CineUSB USB open failed: {error}"),
-                },
-                _ => eprintln!("Invalid CineUSB USB open request"),
+                    Err(error) => eprintln!("CineUSB USB request failed: {error}"),
+                }
+                std::process::exit(1);
             }
-            std::process::exit(1);
         }
     }
     #[cfg(all(target_os = "linux", target_arch = "arm"))]

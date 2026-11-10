@@ -12,11 +12,10 @@ Los vídeos MKV, MP4, M4V, MOV, WebM, TS, M2TS y MTS se abren en el motor Feed c
 HUD clásico integrado. La compatibilidad de cada pista depende del códec y el
 decodificador de la televisión.
 
-Si el disco aparece en la carpeta de webOS pero el aislamiento oculta su
-montaje, CineUSB solicita al servicio local de Homebrew Channel con root un
-montaje de solo lectura en su propio entorno. La aplicación comprueba el
-resultado antes de mostrar el volumen. El servicio vuelve a comprobar los
-montajes al conectar o retirar discos mientras se navega por la biblioteca.
+Con Homebrew Channel y root, CineUSB consulta los montajes activos del sistema
+y lee las carpetas desde esa misma vista. Al abrir un vídeo, el servicio pasa
+un descriptor de solo lectura al reproductor. El identificador de montaje se
+comprueba antes de listar o abrir un archivo, incluso tras reconectar un disco.
 
 ## Compilar para webOS
 
@@ -41,8 +40,9 @@ H.264/AAC y un MKV. Comprueba pausa, avance y vuelta a la misma carpeta con
 Atrás. Luego retira el disco, espera a que desaparezca de la cuadrícula y
 vuelve a conectarlo con la app abierta.
 
-Si ves el aviso de montaje, pulsa OK para reintentar. Para diagnosticarlo,
-compara los montajes que ve el proceso de CineUSB con `/tmp/usb` en el sistema.
+Si el disco cambia de nombre al reconectarlo, espera a que el selector se
+actualice. Para diagnosticarlo, compara los montajes activos bajo `/tmp/usb` con
+las entradas del selector y consulta el registro de CineUSB.
 
 ## Código y licencia
 
