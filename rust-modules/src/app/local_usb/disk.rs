@@ -12,13 +12,6 @@ pub(super) struct Volume {
     pub mount_id: Option<u64>,
 }
 
-impl Volume {
-    #[cfg(not(feature = "hostsim"))]
-    pub fn bridged(&self) -> bool {
-        self.path.starts_with("/tmp/cineusb-volumes")
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Kind {
     Folder,
