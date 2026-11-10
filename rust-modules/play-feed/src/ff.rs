@@ -441,6 +441,10 @@ pub struct LocalMedia {
     pub audio_channels: i64,
     pub audio_rate: i64,
     pub audio_depth: i64,
+    /// FFmpeg stream index of the selected (best) audio, or -1 for silent files.
+    pub audio_stream_index: i32,
+    pub audio_language: Option<String>,
+    pub audio_title: String,
     pub width: u16,
     pub height: u16,
     pub fps: f64,
@@ -455,6 +459,9 @@ pub struct LocalSubtitle {
     pub codec: String,
     pub language: Option<String>,
     pub title: String,
+    pub forced: bool,
+    pub default: bool,
+    pub sdh: bool,
 }
 
 /// Each attempt exclusively owns the file cursor. FFmpeg duplicates the descriptor, so the
@@ -524,6 +531,12 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext) -> Result<LocalMedia, &'
         (codec(audio), i64::from((*audio).ch_layout.nb_channels), i64::from((*audio).sample_rate),
             i64::from((*audio).bits_per_raw_sample))
     };
+    let (audio_language, audio_title) = if ai < 0 {
+        (None, String::new())
+    } else {
+        let stream = *(*fmt).streams.add(ai as usize);
+        (stream_language(stream), stream_name(stream))
+    };
     if !audio.is_empty() && crate::audio_payload_codec(&audio).is_none() {
         return Err("La pista de audio predeterminada usa un códec incompatible.");
     }
@@ -532,16 +545,21 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext) -> Result<LocalMedia, &'
         let stream = *(*fmt).streams.add(i as usize);
         let params = stream_codecpar(stream);
         if (*params).codec_type != AVMEDIA_TYPE_SUBTITLE { continue; }
+        let disposition = stream_disposition(stream);
         subtitles.push(LocalSubtitle {
             stream_index: i as i32,
             codec: codec(params),
             language: stream_language(stream),
             title: stream_name(stream),
+            forced: disposition & AV_DISPOSITION_FORCED != 0,
+            default: disposition & AV_DISPOSITION_DEFAULT != 0,
+            sdh: disposition & AV_DISPOSITION_HEARING_IMPAIRED != 0,
         });
     }
     let rate = (*video).framerate;
     Ok(LocalMedia {
         video: codec(video), audio, audio_channels, audio_rate, audio_depth,
+        audio_stream_index: ai, audio_language, audio_title,
         width: u16::try_from((*video).width).unwrap_or(0),
         height: u16::try_from((*video).height).unwrap_or(0),
         fps: if rate.den > 0 { f64::from(rate.num) / f64::from(rate.den) } else { 0.0 },
