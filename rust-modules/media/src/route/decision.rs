@@ -2075,6 +2075,16 @@ pub fn set_local_source(ps: &mut PlaybackSession, file: std::fs::File, title: &s
     audio: Option<CarriedAudio>, caps: std::sync::Arc<plx_platform::devcaps::Caps>) -> bool {
     ps.begin_attempt(caps);
     if !ps.qualify_explicit_feed_source() { return false; }
+    // A USB file is a new item, not a retry/seek of the previous one. Keep the
+    // playback's subtitle mode, stream id and FFmpeg selection in sync, otherwise
+    // a prior film's ordinal can select a different subtitle before the menu opens.
+    crate::player::reset_subtitle();
+    ps.cur_sub_sid = 0;
+    ps.cur_sub_ordinal = -1;
+    ps.cur_sub_sidecar = false;
+    ps.cur_sub_client_drawable = false;
+    ps.sub_mode = SubMode::Off;
+    ps.track_ctx = None;
     ps.local_file = Some(std::sync::Arc::new(file));
     ps.cur_audio = audio;
     ps.url = "file:///cineusb-video".into();

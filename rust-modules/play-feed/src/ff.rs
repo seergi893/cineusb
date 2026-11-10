@@ -441,10 +441,27 @@ pub struct LocalMedia {
     pub audio_channels: i64,
     pub audio_rate: i64,
     pub audio_depth: i64,
+    /// FFmpeg stream index of the selected (best) audio, or -1 for silent files.
+    pub audio_stream_index: i32,
+    pub audio_language: Option<String>,
+    pub audio_title: String,
     pub width: u16,
     pub height: u16,
     pub fps: f64,
     pub dovi: Option<AVDOVIDecoderConfigurationRecord>,
+    /// Embedded subtitle streams in file order, including normal and forced tracks.
+    pub subtitles: Vec<LocalSubtitle>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalSubtitle {
+    pub stream_index: i32,
+    pub codec: String,
+    pub language: Option<String>,
+    pub title: String,
+    pub forced: bool,
+    pub default: bool,
+    pub sdh: bool,
 }
 
 /// Each attempt exclusively owns the file cursor. FFmpeg duplicates the descriptor, so the
@@ -514,16 +531,39 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext) -> Result<LocalMedia, &'
         (codec(audio), i64::from((*audio).ch_layout.nb_channels), i64::from((*audio).sample_rate),
             i64::from((*audio).bits_per_raw_sample))
     };
+    let (audio_language, audio_title) = if ai < 0 {
+        (None, String::new())
+    } else {
+        let stream = *(*fmt).streams.add(ai as usize);
+        (stream_language(stream), stream_name(stream))
+    };
     if !audio.is_empty() && crate::audio_payload_codec(&audio).is_none() {
         return Err("La pista de audio predeterminada usa un códec incompatible.");
+    }
+    let mut subtitles = Vec::new();
+    for i in 0..(*fmt).nb_streams {
+        let stream = *(*fmt).streams.add(i as usize);
+        let params = stream_codecpar(stream);
+        if (*params).codec_type != AVMEDIA_TYPE_SUBTITLE { continue; }
+        let disposition = stream_disposition(stream);
+        subtitles.push(LocalSubtitle {
+            stream_index: i as i32,
+            codec: codec(params),
+            language: stream_language(stream),
+            title: stream_name(stream),
+            forced: disposition & AV_DISPOSITION_FORCED != 0,
+            default: disposition & AV_DISPOSITION_DEFAULT != 0,
+            sdh: disposition & AV_DISPOSITION_HEARING_IMPAIRED != 0,
+        });
     }
     let rate = (*video).framerate;
     Ok(LocalMedia {
         video: codec(video), audio, audio_channels, audio_rate, audio_depth,
+        audio_stream_index: ai, audio_language, audio_title,
         width: u16::try_from((*video).width).unwrap_or(0),
         height: u16::try_from((*video).height).unwrap_or(0),
         fps: if rate.den > 0 { f64::from(rate.num) / f64::from(rate.den) } else { 0.0 },
-        dovi: dovi_conf(video),
+        dovi: dovi_conf(video), subtitles,
     })
 }
 
@@ -7213,6 +7253,26 @@ mod cineusb_descriptor_tests {
     use super::*;
 
     // The packaging workflow supplies fixtures and the host build of the shipping FFmpeg.
+    #[test]
+    fn cineusb_reads_normal_forced_and_sdh_tracks_from_real_mkv() {
+        let Some(fixtures) = std::env::var_os("CINEUSB_FD_FIXTURES") else { return };
+        plx_media_codecs::ffi::boot();
+        assert!(abi_ok(), "bundled FFmpeg is required to inspect the file");
+        let file = File::open(std::path::PathBuf::from(fixtures).join("subtitled.mkv")).unwrap();
+        let info = probe_local(&file).expect("probe local MKV with two subtitle streams");
+        assert_eq!(info.subtitles.len(), 2);
+        assert_eq!(info.subtitles[0].stream_index, 2);
+        assert_eq!(info.subtitles[0].language.as_deref(), Some("spa"));
+        assert_eq!(info.subtitles[0].title, "Full");
+        assert!(info.subtitles[0].default);
+        assert!(!info.subtitles[0].forced);
+        assert_eq!(info.subtitles[1].stream_index, 3);
+        assert_eq!(info.subtitles[1].language.as_deref(), Some("eng"));
+        assert_eq!(info.subtitles[1].title, "Signs");
+        assert!(info.subtitles[1].forced);
+        assert!(!info.subtitles[1].default);
+    }
+
     #[test]
     fn cineusb_opens_and_reopens_mkv_and_mp4_by_descriptor() {
         let Some(fixtures) = std::env::var_os("CINEUSB_FD_FIXTURES") else { return };
