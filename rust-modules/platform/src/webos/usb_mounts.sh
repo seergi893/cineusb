@@ -14,7 +14,11 @@ mkdir -p -m 755 "$bridge" || exit 1
 # Keep the Linux mount ID in each directory name. An unplugged partition must not survive
 # under its old name, even if webOS gives a replacement disk the same /tmp/usb path.
 table=$(cat /proc/self/mountinfo) || exit 1
-live=$(printf '%s\n' "$table" | awk '$5 ~ /^\/tmp\/usb\/[^/]+\// && $0 !~ / - (tmpfs|ramfs) / { print $1, $5 }')
+live=$(printf '%s\n' "$table" | awk '
+    # webOS can mount a partition directly at /tmp/usb/<label> or at
+    # /tmp/usb/<device>/<partition>. Neither path needs a trailing slash.
+    $5 ~ /^\/tmp\/usb\/[^/]+(\/[^/]+)?$/ && $0 !~ / - (tmpfs|ramfs) / { print $1, $5 }
+')
 bridge_is_readonly() {
     awk -v p="$1" '$5 == p && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' /proc/self/mountinfo
 }
