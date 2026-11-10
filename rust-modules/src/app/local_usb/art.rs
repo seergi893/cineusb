@@ -1,4 +1,4 @@
-use super::disk::{Entry, Kind};
+use super::{disk::{Entry, Kind}, tr};
 use plx_gfx::{gfx, svg};
 use plx_ui::{Painter, Rect, theme, widgets};
 use std::cell::Cell;
@@ -51,8 +51,8 @@ pub(super) fn collection(path: &Path) -> Option<Cover> {
         let name = component.as_os_str().to_str()?.to_lowercase();
         let name = name.trim();
         match name {
-            "películas" | "peliculas" | "pelis" | "cine" | "movies" | "films" => Some(Cover::Movie),
-            "series" | "tv" | "tv shows" | "tv_shows" | "shows" | "episodios" => Some(Cover::Series),
+            "películas" | "peliculas" | "pel·lícules" | "pelicules" | "pelis" | "cine" | "cinema" | "movies" | "films" => Some(Cover::Movie),
+            "series" | "sèries" | "tv" | "tv shows" | "tv_shows" | "shows" | "episodios" | "episodis" => Some(Cover::Series),
             _ if is_season(name) => Some(Cover::Series),
             _ => None,
         }
@@ -63,14 +63,14 @@ pub(super) fn entry_cover(entry: &Entry, parent: Option<Cover>) -> (Cover, &'sta
     let path = Path::new(&entry.name);
     match entry.kind {
         Kind::Folder => match collection(path).or(parent) {
-            Some(Cover::Movie) => (Cover::Movie, "Películas"),
-            Some(Cover::Series) => (Cover::Series, "Series"),
+            Some(Cover::Movie) => (Cover::Movie, tr("Películas", "Pel·lícules")),
+            Some(Cover::Series) => (Cover::Series, tr("Series", "Sèries")),
             _ => (Cover::Folder, "Carpeta"),
         },
         Kind::Video => {
             let episodic = path.file_stem().and_then(|stem| stem.to_str()).is_some_and(has_episode_number);
             if episodic || parent == Some(Cover::Series) {
-                (Cover::Series, "Episodio")
+                (Cover::Series, tr("Episodio", "Episodi"))
             } else if parent == Some(Cover::Movie) {
                 (Cover::Movie, "Película")
             } else {

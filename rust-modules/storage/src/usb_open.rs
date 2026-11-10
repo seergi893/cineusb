@@ -135,6 +135,102 @@ pub fn list_folder(mount_id: &str, path_hex: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn fd_mount_id(file: &File) -> io::Result<u64> {
+    let info = fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd()))?;
+    info.lines().find_map(|line| line.strip_prefix("mnt_id:")?.trim().parse().ok())
+        .ok_or_else(|| io::Error::other("cannot verify USB mount for the opened file"))
+}
+
+fn delete_under(root: &Path, path: &Path, mount_id: u64) -> io::Result<()> {
+    let parent = open_under(root, path.parent().ok_or_else(invalid)?, true)?;
+    let name = CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|_| invalid())?;
+    if fd_mount_id(&parent)? != mount_id { return Err(invalid()); }
+    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    let file = unsafe { File::from_raw_fd(fd) };
+    if !file.metadata()?.is_file() || fd_mount_id(&file)? != mount_id { return Err(invalid()); }
+    // Unlink relative to the verified parent. Even a last-moment symlink replacement cannot
+    // follow its target, and flags=0 cannot unlink a directory.
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn delete(mount_id: &str, path_hex: &str) -> io::Result<()> {
+    if unsafe { libc::geteuid() } != 0 { return Err(invalid()); }
+    let path = decode_path(path_hex)?;
+    let id = mount_id.parse().map_err(|_| invalid())?;
+    require_mount(&path, id)?;
+    let is_video = path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
+        ["mkv", "mp4", "m4v", "mov", "webm", "ts", "m2ts", "mts"]
+            .iter().any(|video| ext.eq_ignore_ascii_case(video))
+    });
+    if !is_video { return Err(invalid()); }
+    delete_under(Path::new("/tmp/usb"), &path, id)?;
+    io::stdout().write_all(b"CINEUSB_USB_OK")
+}
+
+fn pdm(method: &str, payload: &serde_json::Value) -> io::Result<serde_json::Value> {
+    let uri = format!("luna://com.webos.service.pdm/{method}");
+    let output = std::process::Command::new("/usr/bin/luna-send")
+        .args(["-n", "1", "-w", "4000", &uri, &payload.to_string()]).output()?;
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| io::Error::other("webOS did not return USB device status"))?;
+    if !output.status.success() || response["returnValue"].as_bool() != Some(true) {
+        return Err(io::Error::other(format!("webOS rejected {method} (code {})", response["errorCode"])));
+    }
+    Ok(response)
+}
+
+fn pdm_device<'a>(status: &'a serde_json::Value, partition: &str) -> io::Result<(u64, Vec<&'a str>)> {
+    let devices = status["deviceStatusList"].as_array().ok_or_else(invalid)?;
+    let mut matches = devices.iter().filter_map(|device| {
+        // Retail LG firmware can omit deviceType. The partition comes from a verified USB mount.
+        if device["deviceType"].as_str().is_some_and(|kind| kind != "USB_STORAGE") { return None; }
+        let drives: Vec<_> = device["driveStatusList"].as_array()?.iter()
+            .filter_map(|drive| drive["driveName"].as_str()).collect();
+        drives.contains(&partition).then(|| (device["deviceNum"].as_u64().filter(|n| *n > 0), drives))
+    });
+    let (Some(number), drives) = matches.next().ok_or_else(|| io::Error::other("USB disk not found in webOS"))?
+        else { return Err(invalid()); };
+    if matches.next().is_some() { return Err(invalid()); }
+    Ok((number, drives))
+}
+
+fn mount_source(line: &[u8]) -> Option<&[u8]> {
+    line.split(|byte| *byte == b' ').skip_while(|field| *field != b"-").nth(2)
+}
+
+pub fn eject(mount_id: &str, path_hex: &str) -> io::Result<()> {
+    if unsafe { libc::geteuid() } != 0 { return Err(invalid()); }
+    let path = decode_path(path_hex)?;
+    let id = mount_id.parse().map_err(|_| invalid())?;
+    let table = fs::read("/proc/self/mountinfo")?;
+    if !live_mounts(&table).iter().any(|(mount, root)| *mount == id && *root == path) {
+        return Err(invalid());
+    }
+    let source = table.split(|byte| *byte == b'\n').find_map(|line| {
+        let field = line.split(|byte| *byte == b' ').next()?;
+        (std::str::from_utf8(field).ok()?.parse::<u64>().ok()? == id)
+            .then(|| mount_source(line))?
+    }).and_then(|source| source.strip_prefix(b"/dev/"))
+        .and_then(|source| std::str::from_utf8(source).ok()).ok_or_else(invalid)?;
+    let status = pdm("getAttachedDeviceStatus", &serde_json::json!({"subscribe": true}))?;
+    let (device, drives) = pdm_device(&status, source)?;
+    require_mount(&path, id)?;
+    pdm("eject", &serde_json::json!({"deviceNum": device}))?;
+    for _ in 0..5 {
+        let table = fs::read("/proc/self/mountinfo")?;
+        let mounted = table.split(|byte| *byte == b'\n').filter_map(mount_source)
+            .filter_map(|device| device.strip_prefix(b"/dev/"))
+            .any(|device| drives.iter().any(|drive| device == drive.as_bytes()));
+        if !mounted { return io::stdout().write_all(b"CINEUSB_USB_OK"); }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    Err(io::Error::other("webOS still shows partitions mounted after eject"))
+}
+
 fn folder_entries(folder: &File) -> io::Result<Vec<(String, bool)>> {
     let mut entries = Vec::new();
     let mut bytes = 0;
@@ -174,6 +270,43 @@ fn at_stage(stage: &str, error: io::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usb_delete_confines_the_unlink_to_the_selected_mount_and_regular_file() {
+        let root = std::env::temp_dir().join(format!("cineusb-delete-{}", std::process::id()));
+        let folder = root.join("Pel·lícules");
+        fs::create_dir_all(&folder).unwrap();
+        let video = folder.join("Pel·lícula.mkv");
+        let neighbour = folder.join("Altres.mkv");
+        fs::write(&video, b"video").unwrap();
+        fs::write(&neighbour, b"keep").unwrap();
+        let link = folder.join("Enllaç.mkv");
+        std::os::unix::fs::symlink(&neighbour, &link).unwrap();
+        let mount = fd_mount_id(&File::open(&folder).unwrap()).unwrap();
+        assert!(delete_under(&root, &video, mount + 1).is_err());
+        assert!(delete_under(&root, &link, mount).is_err());
+        assert!(delete_under(&root, &folder.join("..").join("other.mkv"), mount).is_err());
+        delete_under(&root, &video, mount).unwrap();
+        assert!(!video.exists());
+        assert!(link.is_symlink());
+        assert_eq!(fs::read(neighbour).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usb_eject_maps_retail_lg_partitions_to_the_same_device() {
+        let status = serde_json::json!({"deviceStatusList":[
+            {"deviceNum":0,"driveStatusList":[{"driveName":"apps"}]},
+            {"deviceNum":1,"deviceStatus":"NOTHING"},
+            {"deviceNum":2,"driveStatusList":[{"driveName":"sda1"},{"driveName":"sda2"}]},
+            {"deviceNum":3,"deviceType":"USB_STORAGE","driveStatusList":[{"driveName":"sdb1"}]}
+        ],"returnValue":true});
+        assert_eq!(pdm_device(&status, "sda1").unwrap(), (2, vec!["sda1", "sda2"]));
+        assert_eq!(pdm_device(&status, "sdb1").unwrap(), (3, vec!["sdb1"]));
+        assert!(pdm_device(&status, "apps").is_err());
+        assert!(pdm_device(&status, "sdc1").is_err());
+        assert_eq!(mount_source(b"365 54 8:17 / /tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw"), Some(&b"/dev/sdb1"[..]));
+    }
 
     #[test]
     fn confines_the_root_open_and_preserves_non_ascii_names() {

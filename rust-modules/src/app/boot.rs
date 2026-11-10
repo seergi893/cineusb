@@ -2058,6 +2058,7 @@ pub(crate) unsafe fn construct(
     let boot_to = if controlled {
         BootTo::Home
     } else if cfg!(feature = "local-usb") {
+        plx_platform::i18n::apply_usb_language(plx_platform::i18n::saved_preference());
         BootTo::LocalUsb
     } else {
         activate_session(&mut bridge, &mut pages, &mut super::recorder::Recplay::Off)
