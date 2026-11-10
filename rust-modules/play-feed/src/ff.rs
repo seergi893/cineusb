@@ -14,6 +14,7 @@ use plx_net::range_io::{self, RangeFactory, RangeReader};
 use plx_playback_contract::demux::DemuxFault;
 use std::ffi::CString;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::os::raw::{c_int, c_long, c_uchar, c_uint, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -434,10 +435,40 @@ const SEEK_CUR: c_int = 1;
 pub const SEEK_END: c_int = 2;
 pub const AVSEEK_SIZE: c_int = 0x10000;
 
+// LG's tntfs filesystem has been observed to fail on some large-file reads.
+// Positional pread is preferred so the original descriptor's cursor is untouched.
+// If pread fails, retry with a normal seek+read before concluding the USB
+// filesystem returned a genuine I/O error. These operations run on the demux
+// worker's single local descriptor; the fallback is not for concurrent readers.
+fn local_read_bytes(file: &File, offset: u64, buffer: &mut [u8]) -> std::io::Result<usize> {
+    match file.read_at(buffer, offset) {
+        Ok(n) => Ok(n),
+        Err(pread_error) => {
+            let mut borrowed = file;
+            match borrowed.seek(SeekFrom::Start(offset)).and_then(|_| borrowed.read(buffer)) {
+                Ok(n) => {
+                    plx_base::eventlog::log(&format!(
+                        "cineusb: positional USB read failed (errno={:?}) but seek+read succeeded at offset={offset}",
+                        pread_error.raw_os_error()
+                    ));
+                    Ok(n)
+                }
+                Err(fallback_error) => {
+                    plx_base::eventlog::log(&format!(
+                        "cineusb: USB read failed at offset={offset}, pread_errno={:?}, seek_read_errno={:?}",
+                        pread_error.raw_os_error(), fallback_error.raw_os_error()
+                    ));
+                    Err(fallback_error)
+                }
+            }
+        }
+    }
+}
+
 unsafe fn local_read(file: &File, offset: &mut i64, dst: *mut u8, len: c_int) -> c_int {
-    if dst.is_null() || len <= 0 { return AVERROR_IO; }
+    if dst.is_null() || len <= 0 || *offset < 0 { return AVERROR_IO; }
     let buffer = std::slice::from_raw_parts_mut(dst, len as usize);
-    match file.read_at(buffer, *offset as u64) {
+    match local_read_bytes(file, *offset as u64, buffer) {
         Ok(0) => AVERROR_EOF,
         Ok(n) => { *offset += n as i64; n as c_int }
         Err(_) => AVERROR_IO,
@@ -501,11 +532,26 @@ pub fn probe_local(file: &File) -> Result<LocalMedia, &'static str> {
             return Err("Memoria insuficiente para abrir el vídeo.");
         }
         (*fmt).pb = avio;
-        let result = if avformat_open_input(&mut fmt, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut()) < 0
-            || avformat_find_stream_info(fmt, std::ptr::null_mut()) < 0 {
-            Err("No se pudo reconocer el formato del vídeo.")
+        // Keep the two failure stages distinct: a read problem, an unrecognised
+        // container and missing stream metadata must not all look identical.
+        let open_code = avformat_open_input(
+            &mut fmt, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut()
+        );
+        let result = if open_code < 0 {
+            plx_base::eventlog::log(&format!(
+                "cineusb: FFmpeg local avformat_open_input failed code={open_code}"
+            ));
+            Err("No se pudo abrir o identificar el contenedor del vídeo (consulta el registro).")
         } else {
-            local_stream_facts(fmt)
+            let stream_code = avformat_find_stream_info(fmt, std::ptr::null_mut());
+            if stream_code < 0 {
+                plx_base::eventlog::log(&format!(
+                    "cineusb: FFmpeg local avformat_find_stream_info failed code={stream_code}"
+                ));
+                Err("No se pudieron analizar las pistas del vídeo (consulta el registro).")
+            } else {
+                local_stream_facts(fmt)
+            }
         };
         avformat_close_input(&mut fmt);
         free_avio(avio);
