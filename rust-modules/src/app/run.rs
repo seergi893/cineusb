@@ -1589,6 +1589,15 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // 6/7/10): all three are owned screens or surfaces now, so their hover was already taken
         // by `owns_input()` above.
     } else if et == SDL_MOUSEBUTTONDOWN {
+        // CineUSB is a standalone UI, not a mounted screen in the shared hit map.
+        // LG Magic Remote's centre button may arrive as SDL_MOUSEBUTTONDOWN instead
+        // of SDL_KEYDOWN/Return. Forward it before the generic pointer ladder,
+        // otherwise the selected USB volume looks clickable but never opens.
+        #[cfg(feature = "local-usb")]
+        if app.route() == AppArg::LocalUsb && !super::bridge::player_arriving(&app.pages) {
+            super::local_usb::click(app);
+            return;
+        }
         // OK on a set whose pointer the app can only make transparent: see `click_is_ok`. Pushed
         // as an OK key-down, so it reaches the focused control by the key path.
         let on_control = {
