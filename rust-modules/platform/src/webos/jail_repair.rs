@@ -46,39 +46,14 @@ fn call_hbc(_payload: &str) -> Result<String, Failure> {
     Err(Failure::HbcUnavailable)
 }
 
-/// Reconcile read-only USB mounts in this app's jail. No file name supplied by a disk is
-/// interpolated into the shell program. The caller checks visibility in its own namespace.
-pub fn sync_usb_volumes() -> Result<(), Failure> {
-    let id = plx_base::paths::app_id();
-    if !valid_id(id) { return Err(Failure::Unsupported); }
-    let command = format!("app_id='{id}'\n{}", include_str!("usb_mounts.sh"));
-    let reply = call_hbc(&serde_json::json!({ "command": command }).to_string())?;
-    let reply: Value = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
-    if reply.get("returnValue").and_then(Value::as_bool) == Some(true)
-        && reply.get("stdoutString").and_then(Value::as_str) == Some("CINEUSB_MOUNTS_OK") {
-        Ok(())
-    } else {
-        Err(Failure::CommandFailed)
-    }
-}
-
 /// Ask the root service for one read-only file descriptor. The socket remains private to this
 /// request, and the open file crosses the jail boundary without copying bytes or changing mounts.
 #[cfg(target_os = "linux")]
-pub fn open_usb_file(path: &Path) -> Result<std::fs::File, Failure> {
-    use std::fmt::Write;
+pub fn open_usb_file(path: &Path, mount_id: Option<u64>) -> Result<std::fs::File, Failure> {
     use std::os::fd::AsRawFd;
     use std::os::unix::{ffi::OsStrExt, net::UnixListener};
 
-    let id = plx_base::paths::app_id();
-    let dir = validated_install(plx_base::paths::app_dir(), id).ok_or(Failure::Unsupported)?;
-    let prefix = dir.strip_suffix(&format!("/applications/{id}")).ok_or(Failure::Unsupported)?;
-    let helper = format!("{prefix}/services/{id}.storage/plxnative-storage");
-    if !(path.starts_with("/tmp/usb") || path.starts_with("/tmp/cineusb-volumes")) {
-        return Err(Failure::Unsupported);
-    }
-    let mut path_hex = String::new();
-    for byte in path.as_os_str().as_bytes() { let _ = write!(path_hex, "{byte:02x}"); }
+    let path_hex = usb_path_hex(path)?;
     let mut template = *b"/tmp/cineusb-fd-XXXXXX\0";
     if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
         return Err(Failure::StartFailed);
@@ -91,11 +66,8 @@ pub fn open_usb_file(path: &Path) -> Result<std::fs::File, Failure> {
         let slot = std::str::from_utf8(&template[template.len() - 7..template.len() - 1])
             .map_err(|_| Failure::StartFailed)?;
         if !slot.bytes().all(|byte| byte.is_ascii_alphanumeric()) { return Err(Failure::StartFailed); }
-        let command = format!("exec '{helper}' --cineusb-open {} '{slot}' '{path_hex}'", std::process::id());
-        let reply = call_hbc(&serde_json::json!({ "command": command }).to_string())?;
-        let reply: Value = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
-        if reply.get("returnValue").and_then(Value::as_bool) != Some(true)
-            || reply.get("stdoutString").and_then(Value::as_str) != Some("CINEUSB_FD_OK") {
+        let command = format!("--cineusb-open {} '{slot}' {} '{path_hex}'", std::process::id(), mount_id.unwrap_or(0));
+        if run_usb_helper(&command)? != "CINEUSB_FD_OK" {
             return Err(Failure::CommandFailed);
         }
         let (stream, _) = listener.accept().map_err(|_| Failure::Unreadable)?;
@@ -112,6 +84,69 @@ pub fn open_usb_file(path: &Path) -> Result<std::fs::File, Failure> {
     let _ = std::fs::remove_file(socket);
     let _ = std::fs::remove_dir(directory);
     result
+}
+
+#[cfg(target_os = "linux")]
+fn run_usb_helper(args: &str) -> Result<String, Failure> {
+    let id = plx_base::paths::app_id();
+    let dir = validated_install(plx_base::paths::app_dir(), id).ok_or(Failure::Unsupported)?;
+    let prefix = dir.strip_suffix(&format!("/applications/{id}")).ok_or(Failure::Unsupported)?;
+    let helper = format!("{prefix}/services/{id}.storage/plxnative-storage");
+    let command = format!("exec '{helper}' {args}");
+    let reply = call_hbc(&serde_json::json!({ "command": command }).to_string())?;
+    let reply: Value = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
+    if reply.get("returnValue").and_then(Value::as_bool) != Some(true) {
+        return Err(Failure::CommandFailed);
+    }
+    reply.get("stdoutString").and_then(Value::as_str).map(str::to_owned).ok_or(Failure::CommandFailed)
+}
+
+#[cfg(target_os = "linux")]
+fn usb_path_hex(path: &Path) -> Result<String, Failure> {
+    use std::fmt::Write as _;
+    use std::os::unix::ffi::OsStrExt;
+    if !(path.starts_with("/tmp/usb") || path.starts_with("/tmp/cineusb-volumes")) {
+        return Err(Failure::Unsupported);
+    }
+    let mut hex = String::new();
+    for byte in path.as_os_str().as_bytes() { let _ = write!(hex, "{byte:02x}"); }
+    Ok(hex)
+}
+
+#[cfg(target_os = "linux")]
+fn usb_unhex(encoded: &str) -> Result<std::ffi::OsString, Failure> {
+    use std::os::unix::ffi::OsStringExt;
+    if encoded.len() % 2 != 0 || encoded.len() > 8192 { return Err(Failure::CommandFailed); }
+    let bytes = encoded.as_bytes().chunks_exact(2).map(|pair| {
+        let digits = std::str::from_utf8(pair).map_err(|_| Failure::CommandFailed)?;
+        u8::from_str_radix(digits, 16).map_err(|_| Failure::CommandFailed)
+    }).collect::<Result<Vec<_>, _>>()?;
+    Ok(std::ffi::OsString::from_vec(bytes))
+}
+
+#[cfg(target_os = "linux")]
+pub fn list_usb_volumes() -> Result<Vec<(u64, std::path::PathBuf)>, Failure> {
+    let reply = run_usb_helper("--cineusb-volumes")?;
+    let volumes: Vec<(u64, String)> = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
+    volumes.into_iter().map(|(id, encoded)| {
+        let path = std::path::PathBuf::from(usb_unhex(&encoded)?);
+        if id == 0 || path == Path::new("/tmp/usb") || !path.starts_with("/tmp/usb") {
+            return Err(Failure::CommandFailed);
+        }
+        Ok((id, path))
+    }).collect()
+}
+
+#[cfg(target_os = "linux")]
+pub fn list_usb_folder(path: &Path, mount_id: u64) -> Result<Vec<(std::ffi::OsString, bool)>, Failure> {
+    let hex = usb_path_hex(path)?;
+    let reply = run_usb_helper(&format!("--cineusb-list {mount_id} '{hex}'"))?;
+    let entries: Vec<(String, bool)> = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
+    entries.into_iter().map(|(encoded, dir)| {
+        let name = usb_unhex(&encoded)?;
+        if Path::new(&name).file_name() != Some(name.as_os_str()) { return Err(Failure::CommandFailed); }
+        Ok((name, dir))
+    }).collect()
 }
 
 fn device_readable(path: &str) -> bool {

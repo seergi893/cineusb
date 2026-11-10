@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 pub(super) struct Volume {
     pub path: PathBuf,
     pub mount_id: Option<u64>,
+    pub system: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -29,16 +30,18 @@ pub(super) struct Entry {
 pub(super) struct Scan {
     pub volumes: Vec<Volume>,
     pub hidden_mounts: bool,
+    pub system: bool,
 }
 
 pub(super) fn volumes() -> Scan {
     #[cfg(feature = "hostsim")]
     if let Some(path) = std::env::var_os("CINEUSB_SIM_ROOT").map(PathBuf::from) {
-        return Scan { hidden_mounts: false, volumes: path
+        return Scan { hidden_mounts: false, system: false, volumes: path
             .is_dir()
             .then_some(Volume {
                 path,
                 mount_id: None,
+                system: false,
             })
             .into_iter()
             .collect() };
@@ -65,7 +68,7 @@ fn scan(usb: &Path, bridge: &Path, table: io::Result<Vec<u8>>) -> Scan {
             continue;
         }
         if on_different_device(&path) && fs::read_dir(&path).is_ok() {
-            mounts.push(Volume { path, mount_id: None });
+            mounts.push(Volume { path, mount_id: None, system: false });
         } else if path.starts_with(usb) {
             hidden_mounts = true;
         }
@@ -78,7 +81,7 @@ fn scan(usb: &Path, bridge: &Path, table: io::Result<Vec<u8>>) -> Scan {
             .then_with(|| a.path.cmp(&b.path))
     });
     mounts.dedup_by(|a, b| a.path == b.path);
-    Scan { volumes: mounts, hidden_mounts }
+    Scan { volumes: mounts, hidden_mounts, system: false }
 }
 
 fn on_different_device(path: &Path) -> bool {
@@ -111,6 +114,7 @@ fn mounted_volumes(bytes: &[u8], usb: &Path, bridge: &Path) -> Vec<Volume> {
                 .then_some(Volume {
                 path,
                 mount_id: Some(mount_id),
+                    system: false,
             })
         })
         .collect()
@@ -136,23 +140,27 @@ pub(super) fn listing(path: &Path) -> io::Result<Vec<Entry>> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
-        let name = entry.file_name();
-        // Only the three known Windows/LG maintenance directories are hidden.
-        // Keep user folders (including dot-folders) otherwise untouched.
-        if file_type.is_dir() && is_system_folder(&name) {
-            continue;
+        if file_type.is_dir() || file_type.is_file() {
+            entries.extend(media_entry(entry.file_name(), file_type.is_dir()));
         }
-        let kind = if file_type.is_dir() {
-            Kind::Folder
-        } else if file_type.is_file() && is_video(Path::new(&name).extension()) {
-            Kind::Video
-        } else {
-            continue;
-        };
-        entries.push(Entry { name, kind });
     }
-    entries.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
+    sort_entries(&mut entries);
     Ok(entries)
+}
+
+pub(super) fn media_entry(name: OsString, directory: bool) -> Option<Entry> {
+    let kind = if directory && !is_system_folder(&name) {
+        Kind::Folder
+    } else if !directory && is_video(Path::new(&name).extension()) {
+        Kind::Video
+    } else {
+        return None;
+    };
+    Some(Entry { name, kind })
+}
+
+pub(super) fn sort_entries(entries: &mut [Entry]) {
+    entries.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
 }
 
 fn is_system_folder(name: &OsStr) -> bool {
@@ -219,11 +227,13 @@ mod tests {
             [
                 Volume {
                     path: "/tmp/usb/sda/Mis pelis".into(),
-                    mount_id: Some(12)
+                    mount_id: Some(12),
+                    system: false,
                 },
                 Volume {
                     path: "/tmp/cineusb-volumes/sda1".into(),
-                    mount_id: Some(14)
+                    mount_id: Some(14),
+                    system: false,
                 },
             ]
         );

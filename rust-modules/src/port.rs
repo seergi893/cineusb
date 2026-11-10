@@ -93,11 +93,16 @@ mod tests {
     }
 }
 #[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
-pub(crate) fn sync_usb_volumes() -> Result<(), plx_platform::tv::sandbox::Failure> {
-    plx_platform::webos::jail_repair::sync_usb_volumes()
+pub(crate) fn open_usb_file(path: &std::path::Path, mount_id: Option<u64>) -> Result<std::fs::File, plx_platform::tv::sandbox::Failure> {
+    plx_platform::webos::jail_repair::open_usb_file(path, mount_id)
 }
 
 #[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
-pub(crate) fn open_usb_file(path: &std::path::Path) -> Result<std::fs::File, plx_platform::tv::sandbox::Failure> {
-    plx_platform::webos::jail_repair::open_usb_file(path)
+pub(crate) fn list_usb_volumes() -> Result<Vec<(u64, std::path::PathBuf)>, plx_platform::tv::sandbox::Failure> {
+    plx_platform::webos::jail_repair::list_usb_volumes()
+}
+
+#[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
+pub(crate) fn list_usb_folder(path: &std::path::Path, mount_id: u64) -> Result<Vec<(std::ffi::OsString, bool)>, plx_platform::tv::sandbox::Failure> {
+    plx_platform::webos::jail_repair::list_usb_folder(path, mount_id)
 }

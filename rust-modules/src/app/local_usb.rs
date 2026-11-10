@@ -108,7 +108,9 @@ impl Browser {
             match self.scanning.as_ref().map(Receiver::try_recv) {
                 Some(Ok(scan)) => {
                     self.scanning = None;
-                    if self.scan != scan || self.status == "Buscando discos USB…" {
+                    // A temporary Homebrew failure must not bring back an old mount from the jail.
+                    if (!self.scan.system || scan.system)
+                        && (self.scan != scan || self.status == "Buscando discos USB…") {
                         let selected = self.scan.volumes.get(self.selected).cloned();
                         self.scan = scan;
                         if self.folders.last().is_some_and(|folder| !self.scan.volumes.contains(&folder.volume)) {
@@ -128,20 +130,10 @@ impl Browser {
                 _ => {}
             }
             if self.scanning.is_none() && now >= self.next_scan {
-                // Keep the root-service request off the render thread. Native jail views
-                // can enumerate a USB tree while still returning EIO on its file bytes:
-                // an apparently healthy directory listing must not suppress the bind.
-                self.next_scan = now + Duration::from_secs(15);
+                self.next_scan = now + Duration::from_secs(5);
                 let (send, receive) = mpsc::sync_channel(1);
                 if plx_base::task::spawn_off_frame("cineusb-volumes", move |_| {
-                    #[cfg(not(feature = "hostsim"))]
-                    if let Err(error) = crate::port::sync_usb_volumes() {
-                        plx_base::eventlog::log(&format!(
-                            "cineusb: read-only jail USB bind failed: {error:?}"
-                        ));
-                    }
-                    let scan = disk::volumes();
-                    let _ = send.send(scan);
+                    let _ = send.send(scan_volumes());
                 }) {
                     self.scanning = Some(receive);
                 }
@@ -186,9 +178,10 @@ impl Browser {
                 Kind::Folder => self.open_folder(folder.volume.clone(), path),
                 Kind::Video => {
                     let title = display_name(entry);
+                    let mount_id = system_mount(&folder.volume);
                     self.status = "Abriendo vídeo…".into();
                     self.request(move || {
-                        let result = inspect_video(&path).map(|(file, info)| (file, info, title));
+                        let result = inspect_video(&path, mount_id).map(|(file, info)| (file, info, title));
                         DiskResult::Video(result)
                     });
                 }
@@ -204,7 +197,10 @@ impl Browser {
     fn open_folder(&mut self, volume: Volume, path: PathBuf) {
         self.status = "Abriendo carpeta…".into();
         self.request(move || {
-            let entries = disk::listing(&path);
+            let entries = list_folder(&path, system_mount(&volume));
+            if let Err(error) = &entries {
+                plx_base::eventlog::log(&format!("cineusb: USB folder listing failed: {error}"));
+            }
             DiskResult::Folder(volume, path, entries)
         });
     }
@@ -321,13 +317,50 @@ impl Browser {
     }
 }
 
-fn inspect_video(path: &std::path::Path) -> Result<(File, plx_play_feed::LocalMedia), String> {
+fn system_mount(volume: &Volume) -> Option<u64> {
+    volume.mount_id.filter(|_| volume.system)
+}
+
+fn scan_volumes() -> Scan {
+    #[cfg(not(feature = "hostsim"))]
+    match crate::port::list_usb_volumes() {
+        Ok(mounts) => return Scan {
+            volumes: mounts.into_iter().map(|(id, path)| Volume {
+                path, mount_id: Some(id), system: true,
+            }).collect(),
+            hidden_mounts: false,
+            system: true,
+        },
+        Err(error) => plx_base::eventlog::log(&format!("cineusb: system USB inventory failed: {error:?}")),
+    }
+    disk::volumes()
+}
+
+fn list_folder(path: &std::path::Path, _mount_id: Option<u64>) -> io::Result<Vec<Entry>> {
+    #[cfg(not(feature = "hostsim"))]
+    if let Some(id) = _mount_id {
+        let entries = crate::port::list_usb_folder(path, id)
+            .map_err(|error| io::Error::other(format!("Homebrew USB ({error:?})")))?;
+        let mut entries: Vec<_> = entries.into_iter().filter_map(|(name, dir)| disk::media_entry(name, dir)).collect();
+        disk::sort_entries(&mut entries);
+        return Ok(entries);
+    }
+    disk::listing(path)
+}
+
+fn inspect_video(path: &std::path::Path, _mount_id: Option<u64>) -> Result<(File, plx_play_feed::LocalMedia), String> {
     let inspect = |file: File| plx_play_feed::probe_local(&file).map(|info| (file, info));
+    #[cfg(not(feature = "hostsim"))]
+    if _mount_id.is_some() {
+        let file = crate::port::open_usb_file(path, _mount_id)
+            .map_err(|error| format!("No se pudo abrir el vídeo desde Homebrew USB ({error:?})."))?;
+        return inspect(file);
+    }
     let direct = disk::open_video(path).map_err(|error| format!("No se pudo abrir el vídeo · {error}"))
         .and_then(inspect);
     #[cfg(not(feature = "hostsim"))]
     if direct.is_err() {
-        match crate::port::open_usb_file(path) {
+        match crate::port::open_usb_file(path, None) {
             Ok(file) => return inspect(file),
             Err(error) => plx_base::eventlog::log(&format!("cineusb: Homebrew USB descriptor failed: {error:?}")),
         }
