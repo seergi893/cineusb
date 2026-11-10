@@ -530,6 +530,13 @@ mod usb_subtitle_tests {
         for index in 0..item.subs.len() {
             assert_eq!(plx_data::metadata::sub_render_ordinal(&item.subs, index), index as i32);
         }
+        // The existing track menu reads only MetadataView::playing(): test the
+        // same store command used by the actual USB playback landing.
+        let mut store = plx_data::stores::metadata::MetadataStore::default();
+        assert!(store.run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(Some(item))));
+        let published = store.view().playing().expect("USB tracks must reach the menu store");
+        assert_eq!(published.subs.len(), 3);
+        assert!(published.subs[1].forced);
     }
 
     #[test]
