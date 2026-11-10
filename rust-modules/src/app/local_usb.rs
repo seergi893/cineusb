@@ -128,15 +128,19 @@ impl Browser {
                 _ => {}
             }
             if self.scanning.is_none() && now >= self.next_scan {
-                self.next_scan = now + Duration::from_secs(4);
+                // Keep the root-service request off the render thread. Native jail views
+                // can enumerate a USB tree while still returning EIO on its file bytes:
+                // an apparently healthy directory listing must not suppress the bind.
+                self.next_scan = now + Duration::from_secs(15);
                 let (send, receive) = mpsc::sync_channel(1);
                 if plx_base::task::spawn_off_frame("cineusb-volumes", move |_| {
-                    let scan = disk::volumes();
                     #[cfg(not(feature = "hostsim"))]
-                    let scan = if scan.hidden_mounts || scan.volumes.is_empty() || scan.volumes.iter().any(Volume::bridged) {
-                        let _ = crate::port::sync_usb_volumes();
-                        disk::volumes()
-                    } else { scan };
+                    if let Err(error) = crate::port::sync_usb_volumes() {
+                        plx_base::eventlog::log(&format!(
+                            "cineusb: read-only jail USB bind failed: {error:?}"
+                        ));
+                    }
+                    let scan = disk::volumes();
                     let _ = send.send(scan);
                 }) {
                     self.scanning = Some(receive);
