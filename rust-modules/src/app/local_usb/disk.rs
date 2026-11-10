@@ -1,7 +1,7 @@
 //! Read-only access to mounts visible to the application process.
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -137,6 +137,11 @@ pub(super) fn listing(path: &Path) -> io::Result<Vec<Entry>> {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let name = entry.file_name();
+        // Only the three known Windows/LG maintenance directories are hidden.
+        // Keep user folders (including dot-folders) otherwise untouched.
+        if file_type.is_dir() && is_system_folder(&name) {
+            continue;
+        }
         let kind = if file_type.is_dir() {
             Kind::Folder
         } else if file_type.is_file() && is_video(Path::new(&name).extension()) {
@@ -150,6 +155,14 @@ pub(super) fn listing(path: &Path) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
+fn is_system_folder(name: &OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        ["$RECYCLE.BIN", "SYSTEM VOLUME INFORMATION", "LG SMART TV"]
+            .iter()
+            .any(|system| name.eq_ignore_ascii_case(system))
+    })
+}
+
 fn is_video(extension: Option<&OsStr>) -> bool {
     extension.and_then(OsStr::to_str).is_some_and(|extension| {
         ["mkv", "mp4", "m4v", "mov", "webm", "ts", "m2ts", "mts"]
@@ -158,24 +171,22 @@ fn is_video(extension: Option<&OsStr>) -> bool {
     })
 }
 
-/// Check that the app can open, read and seek on the selected file under its own permissions.
+/// Open a regular file read-only without probing the final byte first.
+/// In particular, webOS's NTFS driver can return EIO on a tail read of a large
+/// sparse/mapped MKV even though the demuxer can access the actual media ranges.
+/// FFmpeg's normal probe and playback reads remain responsible for reporting
+/// genuine I/O errors: do not mask them here.
 pub(super) fn open_video(path: &Path) -> io::Result<fs::File> {
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
+    if !file.metadata()?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "expected a regular file",
         ));
     }
-    let mut byte = [0];
-    file.read_exact(&mut byte)?;
-    file.seek(SeekFrom::End(-1))?;
-    file.read_exact(&mut byte)?;
-    file.rewind()?;
     Ok(file)
 }
 
@@ -225,12 +236,26 @@ mod tests {
     fn listing_keeps_real_names_and_ignores_links_and_other_formats() {
         let path = plx_base::testscratch::process_dir("cineusb-listing");
         fs::create_dir(path.join("Sèries")).unwrap();
+        for name in ["$RECYCLE.BIN", "System Volume Information", "LG Smart TV"] {
+            fs::create_dir(path.join(name)).unwrap();
+        }
+        // Do not hide unrelated hidden or similarly named user folders.
+        fs::create_dir(path.join(".personal")).unwrap();
+        fs::create_dir(path.join("LG Smart TV Films")).unwrap();
         fs::write(path.join("Película 01.MKV"), b"media").unwrap();
         fs::write(path.join("Película 01.srt"), b"caption").unwrap();
         std::os::unix::fs::symlink("Película 01.MKV", path.join("alias.mp4")).unwrap();
         assert_eq!(
             listing(&path).unwrap(),
             [
+                Entry {
+                    name: ".personal".into(),
+                    kind: Kind::Folder
+                },
+                Entry {
+                    name: "LG Smart TV Films".into(),
+                    kind: Kind::Folder
+                },
                 Entry {
                     name: "Sèries".into(),
                     kind: Kind::Folder
