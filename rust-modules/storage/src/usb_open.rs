@@ -239,7 +239,8 @@ pub fn delete_folder(mount_id: &str, path_hex: &str) -> io::Result<()> {
         (mount == id && path != root && path.starts_with(&root)).then_some(root)
     }).ok_or_else(invalid)?;
     // Traverse the full path from /tmp/usb so no parent component can be a symlink.
-    if !path.strip_prefix(&root).map_err(|_| invalid())?.components().all(|c| matches!(c, Component::Normal(_))) {
+    let relative = path.strip_prefix(&root).map_err(|_| invalid())?;
+    if relative.components().count() < 2 || !relative.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(invalid());
     }
     let result = remove_folder_under(Path::new("/tmp/usb"), &path, id);

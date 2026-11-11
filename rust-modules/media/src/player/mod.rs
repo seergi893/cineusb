@@ -711,6 +711,13 @@ pub(crate) fn feed_ended(ps: &crate::route::PlaybackSession) -> bool {
 /// The Feed's end of stream is the session's readout (`readout::PlayerReadout::ended`: the pump's
 /// `Presented` event sets it, a seek or a `SessionReset` clears it); the URI backend's is the
 /// `AttemptFacts` value its driver writes.
+/// Physical end-of-stream for the explicit local Feed. The general HUD also has a tail heuristic.
+pub fn local_eos_confirmed(ps: &crate::route::PlaybackSession) -> bool {
+    ps.attempt_view().backend() == Some(attempt_view::Backend::Feed)
+        && ps.readout().raw().pipeline_eos
+        && seek_pending(ps).is_none()
+}
+
 pub fn ended(ps: &crate::route::PlaybackSession) -> Option<bool> {
     match ps.attempt_view().backend() {
         Some(attempt_view::Backend::Feed) => Some(ps.readout().ended()),

@@ -21,6 +21,7 @@ use crate::{Rect, Spring};
 pub const COLS: usize = 6;
 pub const GAP: f32 = (SCR_W - 2.0 * MARGIN_X - COLS as f32 * CARD_W) / (COLS as f32 - 1.0);
 pub const STYLE: RowStyle = RowStyle { gap: GAP, ..RowStyle::HOME };
+pub const USB_STYLE: RowStyle = RowStyle { focus_scale: 1.045, ..STYLE };
 /// A COLLAPSED row's pitch; a row whose band is open adds its share of `card_row::BAND_OPEN`.
 #[cfg(test)]
 pub const ROW_PITCH: f32 = CARD_H + LABEL_BAND_COLLAPSED + UNDER_LABEL_AIR;

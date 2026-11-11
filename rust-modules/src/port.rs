@@ -108,4 +108,4 @@ pub(crate) fn list_usb_folder(path: &std::path::Path, mount_id: u64) -> Result<V
 }
 
 #[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
-pub(crate) use plx_platform::webos::jail_repair::{delete_usb_folder, delete_usb_video, eject_usb_disk, save_usb_preferences, usb_preferences, usb_resume, usb_volume_details};
+pub(crate) use plx_platform::webos::jail_repair::{clear_usb_history, delete_usb_folder, delete_usb_video, eject_usb_disk, save_usb_preferences, usb_preferences, usb_history, usb_resume, usb_volume_details};
