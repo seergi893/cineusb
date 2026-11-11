@@ -2464,10 +2464,11 @@ mod usb_browser_tests {
     }
 
     #[test]
-    fn favorites_are_partition_scoped_and_exclude_structural_folders() {
+    fn favorites_allow_usb_root_folders_and_remain_partition_scoped() {
         let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: Some(42), system: true };
         let structural = volume.path.join("Vídeos");
         let nested = structural.join("Sèrie");
+        assert_eq!(favorite_key("uuid:disk-a", &volume, &volume.path), None);
         assert!(favorite_key("uuid:disk-a", &volume, &structural).is_some());
         let key = favorite_key("uuid:disk-a", &volume, &nested).unwrap();
         assert_ne!(favorite_key("uuid:disk-b", &volume, &nested), Some(key.clone()));
