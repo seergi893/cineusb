@@ -79,7 +79,7 @@ use plx_ui::widgets::{ControlGround, TabPill, TransportButton, TransportFocus, T
 use plx_ui::{Painter, Rect, View};
 
 use super::classic::{
-    draw_player_title_at, draw_playbar_look, draw_scrim_at, draw_scrub_preview, hud_env, hud_tab_state, tab_labels,
+    draw_player_title_at, draw_playbar_with_finish, draw_scrim_at, draw_scrub_preview, hud_env, hud_tab_state, tab_labels,
     tab_of_section, Kicker, Playbar, PlaybarLook, TitleLook,
 };
 use super::geometry::{GROUP_ROW, GROUP_SECTION};
@@ -642,7 +642,7 @@ fn walk<H: Host>(
                         clocks: *clocks,
                         mark: *mark,
                     };
-                    draw_playbar_look(q, live, look, f.measure);
+                    draw_playbar_with_finish(q, live, look, f.measure, f.model.finish_clock);
                     bar = Some((live, *track));
                 }
                 DrawOp::Ground { rect, ink, radius } => sections::ground(q, *rect, *radius, ink, f),

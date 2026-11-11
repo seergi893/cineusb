@@ -584,7 +584,32 @@ pub fn draw_playbar(p: Painter, bar: Playbar, measure: &dyn plx_machine::machine
 }
 
 /// [`draw_playbar`] over a [`PlaybarLook`]: the compiled package's bar (`DrawOp::Playbar`).
+fn finish_label(clock: super::model::FinishClock, remaining_ns: i64) -> String {
+    let minutes = remaining_ns.max(0).cast_unsigned().div_ceil(60_000_000_000);
+    let time = if clock.twelve_hour {
+        format!("{}:{:02} {}", (clock.hour + 11) % 12 + 1, clock.minute,
+            if clock.hour < 12 { "a. m." } else { "p. m." })
+    } else {
+        format!("{:02}:{:02}", clock.hour, clock.minute)
+    };
+    format!("{} {minutes} min · {} {time}", clock.remaining, clock.prefix)
+}
+
+#[cfg(test)]
+#[test]
+fn cineusb_finish_label_combines_remaining_time_and_local_clock() {
+    let clock = super::model::FinishClock { hour: 23, minute: 42, twelve_hour: false, prefix: "Acaba a les", remaining: "Queden" };
+    assert_eq!(finish_label(clock, 35 * 60_000_000_000), "Queden 35 min · Acaba a les 23:42");
+    assert_eq!(finish_label(super::model::FinishClock { twelve_hour: true, ..clock }, 35 * 60_000_000_000),
+        "Queden 35 min · Acaba a les 11:42 p. m.");
+}
+
 pub fn draw_playbar_look(p: Painter, bar: Playbar, look: PlaybarLook, measure: &dyn plx_machine::machine::Measure) {
+    draw_playbar_with_finish(p, bar, look, measure, None);
+}
+
+pub(super) fn draw_playbar_with_finish(p: Painter, bar: Playbar, look: PlaybarLook,
+    measure: &dyn plx_machine::machine::Measure, finish: Option<super::model::FinishClock>) {
     let e = hud_env();
     let white = look.fill;
     let dim = theme::TEXT_SECONDARY;
@@ -658,7 +683,10 @@ pub fn draw_playbar_look(p: Painter, bar: Playbar, look: PlaybarLook, measure: &
         el_l = el_l.min(l);
         el_r = el_r.max(r);
     }
-    let rem = fmt_time(dur - dispos, true);
+    let plain_remaining = fmt_time(dur - dispos, true);
+    let combined = finish.map(|clock| finish_label(clock, dur - dispos));
+    let rem = combined.as_deref().filter(|label| el_r + 20.0 + measure.width_str(label, look.clock_size, false) < sx + sw)
+        .unwrap_or(&plain_remaining);
     // MEASURE the label, never estimate it. `chars * CAPTION * 0.52` was an Arial-calibrated
     // constant guarding a real behaviour — the remaining clock hides before the moving elapsed
     // clock can reach it — and it only ever worked because it over-estimated: under Arial it
@@ -676,7 +704,7 @@ pub fn draw_playbar_look(p: Painter, bar: Playbar, look: PlaybarLook, measure: &
     let rem_l = sx + sw - rem_w;
     let rem_shown = el_r + 20.0 < rem_l;
     if rem_shown {
-        if let Ok(cs) = CString::new(rem.as_str()) {
+        if let Ok(cs) = CString::new(rem) {
             p.text(cs.as_ptr(), sx + sw, ty, look.clock_size, dim, 2, 0);
         }
     }

@@ -1514,3 +1514,7 @@ pub fn usb_accent(index: usize) -> [f32; 4] {
 pub const USB_WATCHED_TOP: [f32; 4] = rgb8(0x16, 0x3b, 0x2c);
 pub const USB_WATCHED_BOTTOM: [f32; 4] = rgb8(0x20, 0x54, 0x3d);
 pub const USB_WATCHED_EDGE: [f32; 4] = rgb8(0x42, 0xc9, 0x85);
+
+/// Independent active treatment for the USB favorites section.
+pub const USB_FAVORITES: [f32; 4] = rgb8(0xf5, 0xc8, 0x4c);
+pub const USB_FAVORITES_GROUND: [f32; 4] = rgb8(0x3d, 0x31, 0x1a);

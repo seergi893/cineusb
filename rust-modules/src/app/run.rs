@@ -661,6 +661,7 @@ fn hud_model(
 ) -> plx_appkit::player_hud::model::HudModel {
     let playpos_ns = plx_media::player::playpos_ns(ps).unwrap_or(0);
     plx_appkit::player_hud::model::HudModel {
+        finish_clock: None,
         paused: viewer_paused,
         marker_prefs: Default::default(),
         playback_id: plx_media::route::playback_trace_generation(),
@@ -712,6 +713,8 @@ fn publish_player_model(app: &mut App) {
         app.adapters.player.backend_viewer_paused().unwrap_or(false));
     model.marker_prefs = app.bridge.marker_preferences();
     model.covered = app.pages.surface_up();
+    #[cfg(feature = "local-usb")]
+    { model.finish_clock = super::local_usb::finish_clock(app); }
     if let Some(screen) = super::bridge::player_mut(&mut app.pages) { screen.set_model(model); }
 }
 
@@ -3239,13 +3242,7 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                         // only, alpha untouched). 1.0 for SDR, a re-encode, or the 100% default.
                         let source_hdr = app.bridge.metadata_view().playing().is_some_and(|p| p.hdr);
                         let gain = plx_media::route::overlay_gain(&app.player.session, source_hdr);
-                        plx_ui::output_gain(gain, || {
-                            app.pages.draw(&mut app.bridge, true);
-                            #[cfg(feature = "local-usb")]
-                            if matches!(hud_policy, plx_screens::player::HudPolicy::Normal) {
-                                super::local_usb::draw_finish_estimate(app, fr.now);
-                            }
-                        });
+                        plx_ui::output_gain(gain, || app.pages.draw(&mut app.bridge, true));
                         // Skipped rather than drawn while one of the player's own panels is
                         // up — `More` carries this very panel's own toggle, and the panel's
                         // content routinely spans wide enough to reach any of their bottom-right

@@ -21,6 +21,15 @@ use plx_plex::plex::session::{SubtitlePosition, SubtitleSize, SubtitleTone};
 /// rects of the selected track's display set with this `start_ns` key.
 pub type BitmapLookup = fn(i64) -> Option<(i32, i32, Vec<plx_media::player::SubRect>)>;
 
+#[derive(Clone, Copy, Debug)]
+pub struct FinishClock {
+    pub hour: i32,
+    pub minute: i32,
+    pub twelve_hour: bool,
+    pub prefix: &'static str,
+    pub remaining: &'static str,
+}
+
 /// The HUD's presentation and automatic-skip inputs, sampled once for the frame from the owned
 /// attempt readout and viewer controls. The doc comment of each field names its source in
 /// `src/app/run.rs`.
@@ -29,6 +38,7 @@ pub struct HudModel {
     /// `plx_play_feed::shared::FEED_TX.paused.load(Relaxed)`: the viewer is logically paused. Drives the
     /// title's reveal and the playbar's state mark.
     pub paused: bool,
+    pub finish_clock: Option<FinishClock>,
     pub marker_prefs: crate::skip_policy::MarkerPrefsView,
     pub playback_id: u32,
     pub advancing: bool,
@@ -91,6 +101,7 @@ impl Default for HudModel {
     fn default() -> Self {
         Self {
             paused: false,
+            finish_clock: None,
             marker_prefs: Default::default(), playback_id: 0, advancing: false, seeking: false, covered: false, skip_progress: None,
             is_episode: false,
             scrub_ns: -1,
