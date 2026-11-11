@@ -25,14 +25,24 @@ concurrency:
 jobs:
   usb-smoke:
     if: github.repository == 'seergi893/cineusb'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/rust-toolchain
+      - name: Install USB test dependencies
+        run: |
+          if ! command -v ffmpeg || ! command -v nasm || ! pkg-config --exists sdl2 SDL2_ttf gl; then
+            sources="$RUNNER_TEMP/cineusb-ubuntu.list"
+            for suite in noble noble-updates noble-security; do
+              printf 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu/ %s main universe\n' "$suite"
+            done > "$sources"
+            apt_options=(-o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sourceparts=- -o Acquire::ForceIPv4=true -o Acquire::Retries=1 -o Acquire::https::Timeout=10 -o Acquire::https::Proxy=DIRECT)
+            sudo timeout 120s apt-get "${apt_options[@]}" update
+            sudo timeout 150s apt-get "${apt_options[@]}" install --no-install-recommends -y ffmpeg nasm libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev
+          fi
       - name: Test local MKV and MP4 with the bundled FFmpeg configuration
         run: |
-          command -v ffmpeg || sudo apt-get install -y ffmpeg
           HOST=1 RELEASE=1 ci/build-ffmpeg.sh
           export PLXNATIVE_APP_DIR="$PWD/vendor/ffmpeg-prefix-host/lib"
           export CINEUSB_FD_FIXTURES="$RUNNER_TEMP/cineusb-fd-fixtures"
@@ -61,10 +71,11 @@ jobs:
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-storage --bin plxnative-storage usb_
       - name: Test USB video menu and startup subtitles
         run: |
-          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev
           cd rust-modules
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-modules --lib \
             --features hostsim,local-usb usb_browser_tests::
+          CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-modules -p plx_appkit --lib \
+            --features hostsim,local-usb cineusb_finish_label
       - name: Lint the USB storage helper
         working-directory: rust-modules
         run: |
@@ -72,7 +83,7 @@ jobs:
             -A clippy::all \
             -D clippy::ifs_same_cond -D clippy::same_functions_in_if_condition -D clippy::if_same_then_else
   package:
-    if: github.repository == 'seergi893/cineusb'
+    if: ${{ !cancelled() && github.repository == 'seergi893/cineusb' && (github.event_name == 'pull_request' || needs.usb-smoke.result == 'success') }}
     needs: usb-smoke
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 55
