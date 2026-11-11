@@ -851,6 +851,7 @@ pub fn poster_title(
     card: Rect,
     radius: f32,
     title: &str,
+    at_top: bool,
     measure: &dyn plx_machine::machine::Measure,
 ) -> Rect {
     let width = card.w - 24.0;
@@ -863,8 +864,15 @@ pub fn poster_title(
         else if !compact.truncates(width) { &compact }
         else { &small };
     let height = title.measure_h(width);
-    let frame = Rect::new(card.x + 12.0, card.y + card.h - height - 8.0, width, height);
-    art_scrim(p, card, radius, height + 68.0, STILL_SCRIM_A);
+    let y = if at_top { card.y + 18.0 } else { card.y + card.h - height - 8.0 };
+    let frame = Rect::new(card.x + 12.0, y, width, height);
+    if at_top {
+        let panel = Rect::new(card.x + 6.0, card.y + 6.0, card.w - 12.0, height + 16.0);
+        let ink = theme::scrim_black(STILL_SCRIM_A);
+        p.rect(panel, radius.min(10.0), ink, ink, 0.0);
+    } else {
+        art_scrim(p, card, radius, height + 68.0, STILL_SCRIM_A);
+    }
     title.draw(p, frame);
     frame
 }
