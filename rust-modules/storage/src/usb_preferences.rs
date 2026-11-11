@@ -10,11 +10,11 @@ fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid CineUSB preferences")
 }
 
-fn record(language: &str, forced: &str) -> io::Result<String> {
-    if !matches!(language, "es" | "ca") || !matches!(forced, "0" | "1") {
+fn record(language: &str, forced: &str, audio: &str) -> io::Result<String> {
+    if !matches!(language, "es" | "ca") || !matches!(forced, "0" | "1") || !matches!(audio, "0" | "1") {
         return Err(invalid());
     }
-    Ok(format!("{language} {forced}"))
+    Ok(format!("{language} {forced} {audio}"))
 }
 
 fn preference_file() -> io::Result<PathBuf> {
@@ -53,9 +53,10 @@ fn load(path: &Path) -> io::Result<Option<String>> {
     };
     if !file.metadata()?.is_file() { return Err(invalid()); }
     let mut text = String::new();
-    file.take(5).read_to_string(&mut text)?;
-    let (lang, forced) = text.split_once(' ').ok_or_else(invalid)?;
-    record(lang, forced).map(Some)
+    file.take(7).read_to_string(&mut text)?;
+    let (lang, options) = text.split_once(' ').ok_or_else(invalid)?;
+    let (forced, audio) = options.split_once(' ').unwrap_or((options, "0"));
+    record(lang, forced, audio).map(Some)
 }
 
 fn save(path: &Path, text: &str) -> io::Result<()> {
@@ -80,8 +81,8 @@ pub fn read() -> io::Result<()> {
     Ok(())
 }
 
-pub fn write(language: &str, forced: &str) -> io::Result<()> {
-    let text = record(language, forced)?;
+pub fn write(language: &str, forced: &str, audio: &str) -> io::Result<()> {
+    let text = record(language, forced, audio)?;
     save(&preference_file()?, &text)?;
     io::stdout().write_all(text.as_bytes())
 }
@@ -95,12 +96,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("cineusb-preferences-{}", std::process::id()));
         let path = root.join("settings");
         assert_eq!(load(&path).unwrap(), None);
-        save(&path, &record("ca", "1").unwrap()).unwrap();
-        assert_eq!(load(&path).unwrap().as_deref(), Some("ca 1"));
-        save(&path, &record("es", "1").unwrap()).unwrap();
-        assert_eq!(load(&path).unwrap().as_deref(), Some("es 1"));
-        assert!(record("ca", "yes").is_err());
-        assert!(record("../es", "0").is_err());
+        save(&path, "ca 1").unwrap();
+        assert_eq!(load(&path).unwrap().as_deref(), Some("ca 1 0"));
+        save(&path, &record("es", "1", "1").unwrap()).unwrap();
+        assert_eq!(load(&path).unwrap().as_deref(), Some("es 1 1"));
+        assert!(record("ca", "yes", "0").is_err());
+        assert!(record("../es", "0", "0").is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

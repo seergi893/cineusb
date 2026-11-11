@@ -445,12 +445,66 @@ pub struct LocalMedia {
     pub audio_stream_index: i32,
     pub audio_language: Option<String>,
     pub audio_title: String,
+    pub audio_tracks: Vec<LocalAudio>,
     pub width: u16,
     pub height: u16,
     pub fps: f64,
     pub dovi: Option<AVDOVIDecoderConfigurationRecord>,
     /// Embedded subtitle streams in file order, including normal and forced tracks.
     pub subtitles: Vec<LocalSubtitle>,
+}
+
+pub struct LocalAudio {
+    pub index: i32,
+    pub codec: String,
+    pub language: Option<String>,
+    pub title: String,
+    pub channels: i64,
+    pub rate: i64,
+    pub depth: i64,
+    pub default: bool,
+}
+
+fn spanish_rank(track: &LocalAudio) -> u8 {
+    let tag = track.language.as_deref().unwrap_or_default().trim().to_ascii_lowercase().replace('_', "-");
+    let title = track.title.to_lowercase();
+    let spanish_base = matches!(tag.split('-').next(), Some("es" | "spa"));
+    if spanish_base && tag.split('-').skip(1).any(|region| matches!(region, "es" | "esp"))
+        || (!tag.contains('-') && !title.contains("latin")
+            && ["castellano", "castilian", "español de españa", "spanish (spain)", "español (españa)"]
+                .iter().any(|label| title.contains(label))) { return 2; }
+    u8::from(spanish_base
+        || ["español", "spanish"].iter().any(|label| title.contains(label)))
+}
+
+#[test]
+fn cineusb_prefers_spain_then_other_spanish_then_default_audio() {
+    let audio = |index, lang: &str, codec: &str, default| LocalAudio {
+        index, codec: codec.into(), language: Some(lang.into()), title: String::new(),
+        channels: 2, rate: 48000, depth: 16, default,
+    };
+    let mut tracks = vec![audio(1, "eng", "aac", true), audio(2, "spa", "aac", false),
+        audio(3, "es_ES", "aac", false)];
+    assert_eq!(pick_local_audio(&tracks, 1, false).unwrap().index, 1);
+    assert_eq!(pick_local_audio(&tracks, 1, true).unwrap().index, 3);
+    tracks[2].codec = "unsupported".into();
+    assert_eq!(pick_local_audio(&tracks, 1, true).unwrap().index, 2);
+    assert_eq!(pick_local_audio(&tracks[..1], 1, true).unwrap().index, 1);
+    let unmarked = [audio(4, "eng", "aac", false), audio(5, "fra", "aac", false)];
+    assert_eq!(pick_local_audio(&unmarked, 5, true).unwrap().index, 4);
+}
+
+fn pick_local_audio(tracks: &[LocalAudio], best: i32, spanish: bool) -> Option<&LocalAudio> {
+    let valid = || tracks.iter().filter(|track| crate::audio_payload_codec(&track.codec).is_some());
+    if spanish {
+        for rank in [2, 1] {
+            if let Some(track) = valid().find(|track| spanish_rank(track) == rank) { return Some(track); }
+        }
+        return valid().find(|track| track.default).or_else(|| valid().next());
+    }
+    valid().find(|track| track.index == best)
+        .or_else(|| valid().find(|track| track.default))
+        .or_else(|| valid().next())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -484,6 +538,10 @@ unsafe fn open_local_format(file: &File, fmt: &mut *mut AVFormatContext) -> c_in
 
 /// Probe the same open descriptor and native FFmpeg input that Feed will use.
 pub fn probe_local(file: &File) -> Result<LocalMedia, String> {
+    probe_local_with_audio(file, false)
+}
+
+pub fn probe_local_with_audio(file: &File, spanish: bool) -> Result<LocalMedia, String> {
     if !abi_ok() { return Err("El lector de vídeo no está disponible.".into()); }
     if file.metadata().map_err(|error| format!("No se pudo consultar el vídeo · {error}"))?.len() == 0 {
         return Err("El archivo de vídeo está vacío.".into());
@@ -505,7 +563,7 @@ pub fn probe_local(file: &File) -> Result<LocalMedia, String> {
                 plx_base::eventlog::log(&format!("cineusb: avformat_find_stream_info(fd) failed code={code}"));
                 Err(format!("No se pudieron analizar las pistas del vídeo ({code})."))
             } else {
-                local_stream_facts(fmt).map_err(str::to_owned)
+                local_stream_facts(fmt, spanish).map_err(str::to_owned)
             }
         };
         avformat_close_input(&mut fmt);
@@ -513,7 +571,7 @@ pub fn probe_local(file: &File) -> Result<LocalMedia, String> {
     }
 }
 
-unsafe fn local_stream_facts(fmt: *mut AVFormatContext) -> Result<LocalMedia, &'static str> {
+unsafe fn local_stream_facts(fmt: *mut AVFormatContext, spanish: bool) -> Result<LocalMedia, &'static str> {
     let best = |kind| av_find_best_stream(fmt, kind, -1, -1, std::ptr::null_mut(), 0);
     let vi = best(AVMEDIA_TYPE_VIDEO);
     if vi < 0 { return Err("El archivo no contiene una pista de vídeo."); }
@@ -523,27 +581,20 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext) -> Result<LocalMedia, &'
     }
     let codec = |cp: *const AVCodecParameters| std::ffi::CStr::from_ptr(avcodec_get_name((*cp).codec_id))
         .to_string_lossy().into_owned();
-    let ai = best(AVMEDIA_TYPE_AUDIO);
-    let (audio, audio_channels, audio_rate, audio_depth) = if ai < 0 {
-        (String::new(), 0, 0, 0)
-    } else {
-        let audio = stream_codecpar(*(*fmt).streams.add(ai as usize));
-        (codec(audio), i64::from((*audio).ch_layout.nb_channels), i64::from((*audio).sample_rate),
-            i64::from((*audio).bits_per_raw_sample))
-    };
-    let (audio_language, audio_title) = if ai < 0 {
-        (None, String::new())
-    } else {
-        let stream = *(*fmt).streams.add(ai as usize);
-        (stream_language(stream), stream_name(stream))
-    };
-    if !audio.is_empty() && crate::audio_payload_codec(&audio).is_none() {
-        return Err("La pista de audio predeterminada usa un códec incompatible.");
-    }
+    let mut audio_tracks = Vec::new();
     let mut subtitles = Vec::new();
     for i in 0..(*fmt).nb_streams {
         let stream = *(*fmt).streams.add(i as usize);
         let params = stream_codecpar(stream);
+        if (*params).codec_type == AVMEDIA_TYPE_AUDIO {
+            audio_tracks.push(LocalAudio {
+                index: i as i32, codec: codec(params), language: stream_language(stream),
+                title: stream_name(stream), channels: i64::from((*params).ch_layout.nb_channels),
+                rate: i64::from((*params).sample_rate), depth: i64::from((*params).bits_per_raw_sample),
+                default: stream_disposition(stream) & AV_DISPOSITION_DEFAULT != 0,
+            });
+            continue;
+        }
         if (*params).codec_type != AVMEDIA_TYPE_SUBTITLE { continue; }
         let disposition = stream_disposition(stream);
         subtitles.push(LocalSubtitle {
@@ -556,10 +607,18 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext) -> Result<LocalMedia, &'
             sdh: disposition & AV_DISPOSITION_HEARING_IMPAIRED != 0,
         });
     }
+    let picked = pick_local_audio(&audio_tracks, best(AVMEDIA_TYPE_AUDIO), spanish);
+    if picked.is_none() && !audio_tracks.is_empty() {
+        return Err("No hay una pista de audio compatible.");
+    }
+    let (ai, audio, audio_channels, audio_rate, audio_depth, audio_language, audio_title) =
+        picked.map_or((-1, String::new(), 0, 0, 0, None, String::new()), |track| {
+            (track.index, track.codec.clone(), track.channels, track.rate, track.depth, track.language.clone(), track.title.clone())
+        });
     let rate = (*video).framerate;
     Ok(LocalMedia {
         video: codec(video), audio, audio_channels, audio_rate, audio_depth,
-        audio_stream_index: ai, audio_language, audio_title,
+        audio_stream_index: ai, audio_language, audio_title, audio_tracks,
         width: u16::try_from((*video).width).unwrap_or(0),
         height: u16::try_from((*video).height).unwrap_or(0),
         fps: if rate.den > 0 { f64::from(rate.num) / f64::from(rate.den) } else { 0.0 },

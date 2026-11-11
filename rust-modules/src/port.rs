@@ -98,7 +98,7 @@ pub(crate) fn open_usb_file(path: &std::path::Path, mount_id: Option<u64>) -> Re
 }
 
 #[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
-pub(crate) fn list_usb_volumes() -> Result<Vec<(u64, std::path::PathBuf)>, plx_platform::tv::sandbox::Failure> {
+pub(crate) fn list_usb_volumes() -> Result<Vec<plx_platform::webos::jail_repair::UsbVolume>, plx_platform::tv::sandbox::Failure> {
     plx_platform::webos::jail_repair::list_usb_volumes()
 }
 
@@ -108,4 +108,4 @@ pub(crate) fn list_usb_folder(path: &std::path::Path, mount_id: u64) -> Result<V
 }
 
 #[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
-pub(crate) use plx_platform::webos::jail_repair::{delete_usb_video, eject_usb_disk, save_usb_preferences, usb_preferences};
+pub(crate) use plx_platform::webos::jail_repair::{delete_usb_folder, delete_usb_video, eject_usb_disk, save_usb_preferences, usb_preferences};
