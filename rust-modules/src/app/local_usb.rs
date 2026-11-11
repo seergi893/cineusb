@@ -243,7 +243,8 @@ impl Browser {
                             self.folders.clear();
                             self.dialog = None;
                             self.selection = None;
-                            self.status = tr("Se ha retirado el disco USB.", "S’ha retirat el disc USB.").into();
+                            if !self.status.is_empty() { self.status.push_str(" · "); }
+                            self.status.push_str(tr("Se ha retirado el disco USB.", "S’ha retirat el disc USB."));
                             video = None;
                         }
                         if self.folders.is_empty() {
@@ -602,11 +603,12 @@ impl Browser {
     fn key(&mut self, key: Key, repeat: bool) {
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if self.dialog.is_some() {
+            let settings = matches!(self.dialog, Some(Dialog::Settings));
             match key {
-                Key::Up if matches!(self.dialog, Some(Dialog::Settings)) => self.option = self.option.saturating_sub(1),
-                Key::Down if matches!(self.dialog, Some(Dialog::Settings)) => self.option = (self.option + 1).min(2),
-                Key::Left { alt: false } => self.option = 0,
-                Key::Right { alt: false } if self.second_option_available() => self.option = 1,
+                Key::Up if settings => self.option = self.option.saturating_sub(1),
+                Key::Down if settings => self.option = (self.option + 1).min(2),
+                Key::Left { alt: false } if !settings => self.option = 0,
+                Key::Right { alt: false } if !settings && self.second_option_available() => self.option = 1,
                 Key::Ok if !repeat => self.choose_option(),
                 Key::Back if !repeat => self.back(),
                 _ => {}

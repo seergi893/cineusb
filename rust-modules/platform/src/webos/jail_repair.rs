@@ -33,7 +33,7 @@ const RTKMEM: &str = "/dev/rtkmem";
 #[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
 fn call_hbc(payload: &str) -> Result<String, Failure> {
     let registration = super::ls2::register().map_err(|_| Failure::HbcUnavailable)?;
-    let budget = if payload.contains("--cineusb-delete-folder ") { Duration::from_secs(60) } else { BUDGET };
+    let budget = if payload.contains("--cineusb-delete-folder ") { Duration::from_secs(310) } else { BUDGET };
     registration
         .call(EXEC_URI, payload, budget)
         .map_err(|failure| match failure {

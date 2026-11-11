@@ -184,7 +184,7 @@ fn remove_folder_under(root: &Path, path: &Path, mount: u64) -> io::Result<()> {
             OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(root)
         })?;
     if fd_mount_id(&parent)? != mount { return Err(invalid()); }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(50);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     remove_tree(&parent, path.file_name().ok_or_else(invalid)?, mount, 0, deadline)
 }
 
