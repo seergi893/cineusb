@@ -758,7 +758,7 @@ impl Browser {
                 let label = match action {
                     Action::Library => tr("Biblioteca", "Biblioteca"),
                     Action::Settings => tr("Ajustes", "Ajustos"),
-                    Action::Select if self.selection.is_some() => tr("Cancelar selección", "Cancel·la la selecció"),
+                    Action::Select if self.selection.is_some() => tr("Cancelar", "Cancel·la"),
                     Action::Select => tr("Seleccionar", "Selecciona"),
                     Action::DeleteFolders => tr("Eliminar", "Esborra"),
                     Action::Eject => tr("Expulsar USB", "Expulsa l’USB"),
@@ -769,7 +769,7 @@ impl Browser {
                     Action::Settings => Some(Glyph::Settings),
                     Action::Eject => Some(Glyph::Eject),
                     Action::DeleteFolders => Some(Glyph::Trash),
-                    _ => None,
+
                 };
                 draw_button(p, rect, label, self.action == Some(action), action == Action::DeleteFolders, glyph);
             }
