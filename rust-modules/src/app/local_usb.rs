@@ -211,6 +211,9 @@ pub(super) struct Browser {
     countdown_display: u64,
     history: BTreeMap<String, BTreeMap<String, u64>>,
     history_job: Option<(String, Receiver<Option<BTreeMap<String, u64>>>)>,
+    history_loaded: BTreeSet<String>,
+    queued_history_clears: BTreeSet<String>,
+    loading_favorites: bool,
     favorite_return: Option<PathBuf>,
     dialog_started: Option<Instant>,
     button_motion: Option<(Rect, Instant)>,
@@ -235,7 +238,8 @@ impl Browser {
             details_job: None, details: None,
             facts: None, facts_job: None, prepared: None, ready: None, playing: None,
             progress_job: None, queued_progress: Default::default(), countdown_display: 0,
-            history: BTreeMap::new(), history_job: None, favorite_return: None,
+            history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
+            queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_return: None,
             dialog_started: None, button_motion: None, favorite_motion: None, estimate: None, next_estimate: None,
         }
     }
@@ -395,6 +399,7 @@ impl Browser {
                             self.dialog = None;
                             self.prepared = None;
                             self.ready = None;
+                            self.loading_favorites = false;
                             self.selection = None;
                             if !self.status.is_empty() { self.status.push_str(" · "); }
                             self.status.push_str(tr("Se ha retirado el disco USB.", "S’ha retirat el disc USB."));
@@ -426,6 +431,11 @@ impl Browser {
         }
         changed |= self.update_volume_facts();
         changed |= self.update_history();
+        if self.loading_favorites && self.facts.as_ref().is_some_and(|(disk, (_, identity))|
+            self.volume() == Some(disk) && identity.as_ref().is_none_or(|identity| self.history_loaded.contains(&history_prefix(identity)))) {
+            self.loading_favorites = false;
+            self.show_favorites();
+        }
         if self.dialog.is_some() {
             let started = *self.dialog_started.get_or_insert(now);
             changed |= now.duration_since(started) < MOTION;
@@ -496,9 +506,15 @@ impl Browser {
         if self.progress_job.as_ref().is_some_and(|job| closing || job.is_finished()) {
             if let Some(job) = self.progress_job.take() { let _ = job.join(); }
         }
-        if self.progress_job.is_some() || self.queued_progress.is_empty() { return; }
+        if self.progress_job.is_some() || (self.queued_progress.is_empty() && self.queued_history_clears.is_empty()) { return; }
         let updates = std::mem::take(&mut self.queued_progress);
+        let clears = std::mem::take(&mut self.queued_history_clears);
         let job = plx_base::task::spawn_off_frame_keeping("cineusb-playhead", move |_| {
+            for base in clears {
+                if let Err(error) = clear_history(&base) {
+                    plx_base::eventlog::log(&format!("cineusb: could not clear local history: {error}"));
+                }
+            }
             for (key, position) in updates {
                 if let Err(error) = resume_record(&key, Some(position)) {
                     plx_base::eventlog::log(&format!("cineusb: could not save local playhead: {error}"));
@@ -555,14 +571,18 @@ impl Browser {
             match job.try_recv() {
                 Err(TryRecvError::Empty) => return false,
                 result => {
-                    self.history.entry(prefix.clone()).or_default().extend(result.ok().flatten().unwrap_or_default());
+                    let records = self.history.entry(prefix.clone()).or_default();
+                    for (key, value) in result.ok().flatten().unwrap_or_default() {
+                        records.entry(key).or_insert(value);
+                    }
+                    self.history_loaded.insert(prefix.clone());
                     self.history_job = None;
                     changed = true;
                 }
             }
         }
         let Some(prefix) = self.volume().and_then(|volume| self.identity(volume)).map(history_prefix) else { return changed };
-        if self.history.contains_key(&prefix) { return changed; }
+        if self.history_loaded.contains(&prefix) { return changed; }
         let key = prefix.clone();
         let (send, receive) = mpsc::sync_channel(1);
         if plx_base::task::spawn_off_frame("cineusb-history", move |_| { let _ = send.send(read_history(&key)); }) {
@@ -590,11 +610,12 @@ impl Browser {
     fn remove_history_under(&mut self, volume: &Volume, path: &std::path::Path) {
         let Some(identity) = self.identity(volume) else { return };
         let Some(base) = path_key(identity, volume, path) else { return };
-        let exact = format!("{base}00");
-        let children = format!("{base}2f");
-        let keys: Vec<_> = self.history.get(&history_prefix(identity)).into_iter().flatten()
-            .filter(|(key, _)| key.starts_with(&exact) || key.starts_with(&children)).map(|(key, _)| key.clone()).collect();
-        for key in keys { self.change_history(key, 0); }
+        if let Some(records) = self.history.get_mut(&history_prefix(identity)) {
+            records.retain(|key, _| !history_matches(key, &base));
+        }
+        self.queued_progress.retain(|key, _| !history_matches(key, &base));
+        self.queued_history_clears.insert(base);
+        self.flush_progress(false);
     }
 
     fn favorites(&self, volume: &Volume) -> Vec<PathBuf> {
@@ -621,6 +642,17 @@ impl Browser {
 
     fn show_favorites(&mut self) {
         let Some(volume) = self.volume().cloned() else { return };
+        if let Some(identity) = self.identity(&volume) {
+            if !self.history_loaded.contains(&history_prefix(identity)) {
+                self.status = tr("Cargando favoritos…", "Carregant preferides…").into();
+                self.loading_favorites = true;
+                return;
+            }
+        } else if self.facts.as_ref().is_none_or(|(disk, _)| disk != &volume) {
+            self.status = tr("Cargando favoritos…", "Carregant preferides…").into();
+            self.loading_favorites = true;
+            return;
+        }
         let favorites = self.favorites(&volume);
         self.request(move || {
             let mut paths = Vec::new();
@@ -652,7 +684,7 @@ impl Browser {
     fn jump_to_favorite(&mut self, volume: Volume, path: PathBuf) {
         let root_cached = self.folders.first().is_some_and(|folder| folder.path == volume.path);
         if root_cached { self.folders.truncate(1); } else { self.folders.clear(); }
-        self.favorite_return = Some(volume.path.clone());
+        self.favorite_return = (!root_cached).then(|| volume.path.clone());
         self.action = None;
         self.open_folder(volume, path);
     }
@@ -782,6 +814,7 @@ impl Browser {
         if self.pending.is_some() || !self.action_available(action) { return; }
         self.option = 0;
         self.status.clear();
+        self.loading_favorites = false;
         self.dialog = match action {
             Action::Library => {
                 self.open_library_root();
@@ -869,6 +902,15 @@ impl Browser {
             }
             Some(Dialog::FolderActions { volume, path }) => {
                 if self.option == 0 { self.open_folder(volume, path); }
+                else if self.option == 2 {
+                    if system_mount(&volume).is_some() && path.strip_prefix(&volume.path).is_ok_and(|relative| relative.components().count() >= 2) {
+                        if let Some(name) = path.file_name() {
+                            self.selection = Some(BTreeSet::from([name.to_os_string()]));
+                            self.dialog = Some(Dialog::DeleteFolders);
+                            self.option = 0;
+                        }
+                    }
+                }
                 else if let Some(key) = self.identity(&volume).and_then(|identity| favorite_key(identity, &volume, &path)) {
                     let marked = self.history_value(&key) == Some(FAVORITE);
                     self.change_history(key, if marked { 0 } else { FAVORITE });
@@ -1031,7 +1073,8 @@ impl Browser {
                     resume_record(key, None).ok().flatten()
                 }).unwrap_or(0);
                 let (position, _) = unpack_progress(saved);
-                let resume = if offer_resume { position } else { 0 };
+                let resume = if offer_resume && info.duration_secs.is_none_or(|seconds|
+                    position / 1_000_000_000 <= seconds) { position } else { 0 };
                 PreparedVideo { file, info, volume, path, title, key, resume, saved }
             });
             DiskResult::Video(result)
@@ -1048,6 +1091,7 @@ impl Browser {
 
     fn back(&mut self) {
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
+        self.loading_favorites = false;
         if let Some(dialog) = self.dialog.take() {
             self.prepared = None;
             self.dialog = match dialog {
@@ -1084,6 +1128,7 @@ impl Browser {
         match self.dialog {
             Some(Dialog::Settings) => 6,
             Some(Dialog::Favorites(ref paths)) => paths.len(),
+            Some(Dialog::FolderActions { ref volume, .. }) => if system_mount(volume).is_some() { 3 } else { 2 },
             Some(Dialog::Appearance) => 3,
             Some(Dialog::Accent | Dialog::Cards | Dialog::Sort) => 3,
             _ => 0,
@@ -1099,7 +1144,8 @@ impl Browser {
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
             let offset = self.option.saturating_sub(5);
-            let options = if vertical > 0 { &SETTINGS_OPTIONS[..vertical.min(6)] } else { &OPTIONS[..] };
+            let options = if matches!(self.dialog, Some(Dialog::FolderActions { .. })) { &SETTINGS_OPTIONS[1..1 + vertical] }
+                else if vertical > 0 { &SETTINGS_OPTIONS[..vertical.min(6)] } else { &OPTIONS[..] };
             if let Some(index) = options.iter().position(|rect| hit(*rect, x, y)) {
                 if index == 1 && !self.second_option_available() { return; }
                 self.press_button(options[index]);
@@ -1144,7 +1190,9 @@ impl Browser {
                 Key::Left { alt: false } if !settings => self.option = 0,
                 Key::Right { alt: false } if !settings && self.second_option_available() => self.option = 1,
                 Key::Ok if !repeat => {
-                    let rect = if settings { SETTINGS_OPTIONS[self.option.min(5)] } else { OPTIONS[self.option] };
+                    if self.option == 1 && !self.second_option_available() { return; }
+                    let rect = if matches!(self.dialog, Some(Dialog::FolderActions { .. })) { SETTINGS_OPTIONS[self.option + 1] }
+                        else if settings { SETTINGS_OPTIONS[self.option.min(5)] } else { OPTIONS[self.option] };
                     self.press_button(rect);
                     self.choose_option();
                 }
@@ -1191,7 +1239,7 @@ impl Browser {
     fn second_option_available(&self) -> bool {
         match self.dialog.as_ref() {
             Some(Dialog::Video { volume, .. }) => system_mount(volume).is_some(),
-            Some(Dialog::FolderActions { volume, .. }) => self.identity(volume).is_some_and(|identity| self.history.contains_key(&history_prefix(identity))),
+            Some(Dialog::FolderActions { volume, .. }) => self.identity(volume).is_some_and(|identity| self.history_loaded.contains(&history_prefix(identity))),
             _ => true,
         }
     }
@@ -1214,7 +1262,7 @@ impl Browser {
         let width = 1920.0 - 2.0 * x;
         p.rect_sheened(TOOLBAR, 24.0, theme::MENU_GLASS_TOP, theme::MENU_GLASS_BOT);
         p.rring(TOOLBAR, 24.0, 1.0, theme::CONTROL_IDLE_FILL);
-        draw_line(p, "CineUSB", Rect::new(x, 45.0, 460.0, 50.0), theme::size::HEADLINE, true);
+        draw_line(p, "CineUSB", Rect::new(x, 45.0, 345.0, 50.0), theme::size::HEADLINE, true);
         for (action, rect) in ACTIONS {
             if self.action_available(action) {
                 let label = match action {
@@ -1268,7 +1316,7 @@ impl Browser {
             .filter(|(disk, _)| self.volume() == Some(disk)) {
             let rect = Rect::new(1070.0, 118.0, 754.0, 139.0);
             p.rect_sheened(rect, 22.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
-            icons::draw(p, Icon::Collection, Rect::new(rect.x + 22.0, rect.y + 19.0, 25.0, 25.0), theme::TEXT_PRIMARY);
+            draw_glyph(p, Glyph::Drive, Rect::new(rect.x + 22.0, rect.y + 19.0, 25.0, 25.0), theme::TEXT_PRIMARY);
             draw_line(p, &volume_name(volume), Rect::new(rect.x + 61.0, rect.y + 9.0, 390.0, 44.0), theme::size::LABEL, true);
             let capacity = format!("{} · {}", video_size(*total), if *readonly {
                 tr("Solo lectura", "Només lectura").to_owned()
@@ -1403,6 +1451,16 @@ impl Browser {
         if eject { draw_glyph(p, Glyph::Eject, glyph_rect, theme::TEXT_PRIMARY); }
         let title_y = if destructive || eject { 414.0 } else { 343.0 };
         draw_line(p, title, Rect::new(x, title_y, w, 60.0), theme::size::HEADLINE, true);
+        if let Dialog::FolderActions { volume, .. } = dialog {
+            draw_line(p, &subject, Rect::new(x, 400.0, w, 46.0), theme::size::BODY, true);
+            let rows = [Rect::new(550.0, 458.0, 820.0, 49.0), Rect::new(550.0, 515.0, 820.0, 49.0), Rect::new(550.0, 572.0, 820.0, 49.0)];
+            self.draw_button(p, rows[0], options[0], self.option == 0, false, None);
+            if self.second_option_available() { self.draw_button(p, rows[1], options[1], self.option == 1, false, Some(Glyph::Star(false))); }
+            if system_mount(volume).is_some() {
+                self.draw_button(p, rows[2], tr("Eliminar carpeta", "Esborra la carpeta"), self.option == 2, true, Some(Glyph::Trash));
+            }
+            return;
+        }
         if let Dialog::Favorites(paths) = dialog {
             let offset = self.option.saturating_sub(5);
             for (row, (rect, path)) in SETTINGS_OPTIONS.into_iter().zip(paths.iter().skip(offset)).enumerate() {
@@ -1486,6 +1544,9 @@ impl Browser {
             self.history_value(&key)
         }).unwrap_or_default();
         if record == WATCHED {
+            if lift > 0.0 {
+                p.shadow_outside(card, radius, 14.0, 5.0, theme::scrim_black(lift * 0.24));
+            }
             p.rect_sheened(card, radius, theme::USB_WATCHED_TOP, theme::USB_WATCHED_BOTTOM);
             p.rring(card, radius, 2.0, theme::USB_WATCHED_EDGE);
         } else { cover.draw(p, card, radius, lift); }
@@ -1507,7 +1568,9 @@ impl Browser {
             p.rect_sheened(fill, 2.5, self.accent(), self.accent());
         }
         if focused && self.action.is_none() {
-            p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, if self.settings.accent == 0 { theme::CONTROL_FOCUS_RING } else { self.accent() });
+            let focus = if self.settings.accent == 0 { theme::CONTROL_FOCUS_RING } else { self.accent() };
+            if record == WATCHED { p.rring(card.scaled(0.96), radius, 1.5, focus); }
+            else { p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, focus); }
         }
         if let Some(marked) = &self.selection {
             if let Some(entry) = self.folders.last().and_then(|folder| folder.entries.get(index)).filter(|entry| entry.kind == Kind::Folder) {
@@ -1605,7 +1668,7 @@ fn resolution_label(width: u32, height: u32) -> String {
     }
 }
 
-fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, mut x: f32, y: f32) {
+fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, start: f32, mut y: f32) {
     use plx_play_feed::VideoRange;
     let dolby = matches!(details.range, Some(VideoRange::DolbyVision | VideoRange::DolbyVisionHdr10));
     let formats = [
@@ -1620,10 +1683,16 @@ fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, mut
     let labels = resolution.as_deref().into_iter().map(|text| (text, false)).chain(
         formats.into_iter().flatten().map(|text| (text, true))).chain(
         [size.as_deref(), duration.as_deref()].into_iter().flatten().map(|text| (text, false)));
+    let mut x = start;
     for (text, format) in labels {
         let (run, width) = TtfMeasure.fit_line_measured(text, 360.0, theme::size::MICRO, true);
         let icon = if format { 24.0 } else { 0.0 };
-        let rect = Rect::new(x, y, width + icon + 25.0, 43.0);
+        let chip_width = width + icon + 25.0;
+        if x + chip_width > PANEL.x + PANEL.w - 45.0 {
+            x = start;
+            y += 52.0;
+        }
+        let rect = Rect::new(x, y, chip_width, 43.0);
         p.rect_sheened(rect, 10.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
         if format {
             p.rring(rect, 10.0, 1.0, theme::TEXT_SECONDARY);
@@ -1637,7 +1706,7 @@ fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, mut
 }
 
 #[derive(Clone, Copy)]
-enum Glyph { Play, Trash, Eject, Settings, Star(bool), Shared(Icon) }
+enum Glyph { Play, Trash, Eject, Drive, Settings, Star(bool), Shared(Icon) }
 
 fn draw_glyph(p: Painter, glyph: Glyph, rect: Rect, ink: [f32; 4]) {
     let asset = match glyph {
@@ -1645,6 +1714,7 @@ fn draw_glyph(p: Painter, glyph: Glyph, rect: Rect, ink: [f32; 4]) {
         Glyph::Shared(icon) => return icons::draw(p, icon, rect, ink),
         Glyph::Star(false) => include_str!("../../../assets/icons/cineusb-star.svg"),
         Glyph::Star(true) => include_str!("../../../assets/icons/cineusb-star-fill.svg"),
+        Glyph::Drive => include_str!("../../../assets/icons/cineusb-drive-outline.svg"),
         Glyph::Trash => include_str!("../../../assets/icons/cineusb-trash.svg"),
         Glyph::Eject => include_str!("../../../assets/icons/cineusb-eject.svg"),
         Glyph::Settings => include_str!("../../../assets/icons/cineusb-settings.svg"),
@@ -1784,7 +1854,9 @@ fn path_key(identity: &str, volume: &Volume, path: &std::path::Path) -> Option<S
 }
 
 fn favorite_key(identity: &str, volume: &Volume, path: &std::path::Path) -> Option<String> {
-    (path.strip_prefix(&volume.path).ok()?.components().count() >= 2).then(|| format!("{}00", path_key(identity, volume, path).unwrap()))
+    let relative = path.strip_prefix(&volume.path).ok()?;
+    if relative.components().count() < 2 { return None; }
+    Some(format!("{}00", path_key(identity, volume, path)?))
 }
 
 fn entry_key(identity: &str, volume: &Volume, path: &std::path::Path, size: u64, mtime: i64) -> Option<String> {
@@ -1805,6 +1877,23 @@ fn decode_relative(encoded: &str) -> Option<PathBuf> {
     if bytes.contains(&0) { return None; }
     let path = PathBuf::from(OsString::from_vec(bytes));
     path.components().all(|component| matches!(component, std::path::Component::Normal(_))).then_some(path)
+}
+
+fn history_matches(key: &str, base: &str) -> bool {
+    key.strip_prefix(base).is_some_and(|suffix| suffix.starts_with("00") || suffix.starts_with("2f"))
+}
+
+fn clear_history(base: &str) -> Result<(), String> {
+    #[cfg(not(feature = "hostsim"))]
+    return crate::port::clear_usb_history(base).map_err(|error| format!("{error:?}"));
+    #[cfg(feature = "hostsim")]
+    {
+        let Some(end) = base.as_bytes().chunks_exact(2).position(|pair| pair == b"00") else { return Ok(()) };
+        if let Some(records) = read_history(&base[..2 * (end + 1)]) {
+            for key in records.keys().filter(|key| history_matches(key, base)) { resume_record(key, Some(0))?; }
+        }
+        Ok(())
+    }
 }
 
 fn read_history(prefix: &str) -> Option<BTreeMap<String, u64>> {
@@ -2108,6 +2197,20 @@ pub(super) fn flush_playback(app: &mut App) {
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn favorites_are_partition_scoped_and_exclude_structural_folders() {
+        let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: Some(42), system: true };
+        let structural = volume.path.join("Vídeos");
+        let nested = structural.join("Sèrie");
+        assert_eq!(favorite_key("uuid:disk-a", &volume, &structural), None);
+        let key = favorite_key("uuid:disk-a", &volume, &nested).unwrap();
+        assert_ne!(favorite_key("uuid:disk-b", &volume, &nested), Some(key.clone()));
+        assert!(history_matches(&key, &path_key("uuid:disk-a", &volume, &nested).unwrap()));
+        assert!(!history_matches(&key, &path_key("uuid:disk-b", &volume, &nested).unwrap()));
+        assert!(!history_matches(&key, &path_key("uuid:disk-a", &volume, &structural.join("Sèri")).unwrap()));
+        assert!(decode_relative("2e2e2f736563726574").is_none());
+    }
 
     #[test]
     fn progress_preserves_microseconds_and_watched_is_not_a_resume_point() {

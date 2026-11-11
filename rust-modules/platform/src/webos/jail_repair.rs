@@ -205,6 +205,12 @@ fn usb_report(operation: &str, path: &Path, mount_id: u64) -> Result<(), String>
 }
 
 #[cfg(target_os = "linux")]
+pub fn clear_usb_history(base: &str) -> Result<(), Failure> {
+    if base.is_empty() || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err(Failure::CommandFailed); }
+    run_usb_helper(&format!("--cineusb-clear-history {base}")).map(|_| ())
+}
+
+#[cfg(target_os = "linux")]
 pub fn usb_history(prefix: &str) -> Result<std::collections::BTreeMap<String, u64>, Failure> {
     if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err(Failure::CommandFailed); }
     let reply = run_usb_helper(&format!("--cineusb-history {prefix}"))?;

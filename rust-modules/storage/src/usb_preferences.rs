@@ -94,6 +94,33 @@ pub fn write_extended(fields: &[String]) -> io::Result<()> {
 }
 
 /// Store a separate atomic record per video. Keep the full key to verify the index on read.
+/// Remove records for a deleted item and its descendants from this install's history.
+pub fn clear_history(base: &str) -> io::Result<()> {
+    if base.len() > 16_384 || base.is_empty() || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    let prefs = preference_file()?;
+    let root = prefs.parent().ok_or_else(invalid)?;
+    let install = prefs.file_name().ok_or_else(invalid)?.to_string_lossy();
+    let file_prefix = format!("{install}.resume-");
+    let dir = match open_directory(root, false) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        result => result?,
+    };
+    for entry in fs::read_dir(root)?.filter_map(Result::ok) {
+        if !entry.file_name().to_string_lossy().starts_with(&file_prefix) { continue; }
+        let path = entry.path();
+        let Some((key, _)) = read_resume(&path).ok().flatten() else { continue };
+        if key.strip_prefix(base).is_some_and(|suffix| suffix.starts_with("00") || suffix.starts_with("2f")) {
+            match fs::remove_file(path) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+        }
+    }
+    dir.sync_all()
+}
+
 /// Return records for one volume. The prefix is the hex-encoded device identity plus NUL.
 pub fn history(prefix: &str) -> io::Result<()> {
     if prefix.len() > 1024 || prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {

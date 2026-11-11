@@ -68,7 +68,7 @@ pub(super) fn entry_cover(entry: &Entry, parent: Option<Cover>) -> (Cover, &'sta
             _ => (Cover::Folder, "Carpeta"),
         },
         Kind::Video => {
-            let episodic = path.file_stem().and_then(|stem| stem.to_str()).is_some_and(has_episode_number);
+            let episodic = super::continuity::episode(&entry.name).is_some();
             if episodic || parent == Some(Cover::Series) {
                 (Cover::Series, tr("Episodio", "Episodi"))
             } else if parent == Some(Cover::Movie) {
@@ -88,17 +88,4 @@ fn is_season(name: &str) -> bool {
 
 fn small_number(text: &str) -> bool {
     (1..=2).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn has_episode_number(stem: &str) -> bool {
-    stem.split(|c: char| !c.is_ascii_alphanumeric()).any(|token| {
-        if let Some(number) = token.strip_prefix(['s', 'S']) {
-            return number.split_once(['e', 'E']).is_some_and(|(season, episode)| {
-                small_number(season) && small_number(episode)
-            });
-        }
-        token.split_once(['x', 'X']).is_some_and(|(season, episode)| {
-            small_number(season) && small_number(episode)
-        })
-    })
 }

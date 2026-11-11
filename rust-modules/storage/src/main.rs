@@ -42,6 +42,7 @@ fn main() {
                 ("--cineusb-delete", [id, path]) => Some(usb_open::delete(id, path)),
                 ("--cineusb-delete-folder", [id, path]) => Some(usb_open::delete_folder(id, path)),
                 ("--cineusb-eject", [id, path]) => Some(usb_open::eject(id, path)),
+                ("--cineusb-clear-history", [base]) => Some(usb_preferences::clear_history(base)),
                 ("--cineusb-history", [prefix]) => Some(usb_preferences::history(prefix)),
                 ("--cineusb-resume", [key]) => Some(usb_preferences::resume(key, None)),
                 ("--cineusb-resume", [key, position]) => Some(usb_preferences::resume(key, Some(position))),
