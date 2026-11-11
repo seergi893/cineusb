@@ -596,10 +596,21 @@ impl Browser {
                 Err(TryRecvError::Empty) => return false,
                 result => {
                     let records = self.history.entry(prefix.clone()).or_default();
-                    for (key, value) in result.ok().flatten().unwrap_or_default() {
-                        records.entry(key).or_insert(value);
+                    match result {
+                        Ok(Some(values)) => {
+                            for (key, value) in values {
+                                records.entry(key).or_insert(value);
+                            }
+                            self.history_loaded.insert(prefix.clone());
+                        }
+                        // A transport or helper failure does not mean empty history.
+                        // Keep the feature unavailable until we can read saved data;
+                        // otherwise a later write could overwrite the actual resume point.
+                        _ => {
+                            plx_base::eventlog::log("cineusb: history unavailable; keeping saved data intact");
+                            self.status = tr("No se pudo cargar el historial USB.", "No s'ha pogut carregar l'historial USB.").into();
+                        }
                     }
-                    self.history_loaded.insert(prefix.clone());
                     self.history_job = None;
                     changed = true;
                 }
@@ -649,7 +660,7 @@ impl Browser {
         self.history.get(&prefix).into_iter().flatten().filter_map(|(key, value)| {
             if *value != FAVORITE { return None; }
             let relative = decode_relative(key.strip_prefix(&prefix)?.strip_suffix("00")?)?;
-            (relative.components().count() >= 2).then(|| volume.path.join(relative))
+            (relative.components().count() >= 1).then(|| volume.path.join(relative))
         }).collect()
     }
 
@@ -2073,7 +2084,7 @@ fn path_key(identity: &str, volume: &Volume, path: &std::path::Path) -> Option<S
 
 fn favorite_key(identity: &str, volume: &Volume, path: &std::path::Path) -> Option<String> {
     let relative = path.strip_prefix(&volume.path).ok()?;
-    if relative.components().count() < 2 { return None; }
+    if relative.components().count() < 1 { return None; }
     Some(format!("{}00", path_key(identity, volume, path)?))
 }
 
@@ -2457,7 +2468,7 @@ mod usb_browser_tests {
         let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: Some(42), system: true };
         let structural = volume.path.join("Vídeos");
         let nested = structural.join("Sèrie");
-        assert_eq!(favorite_key("uuid:disk-a", &volume, &structural), None);
+        assert!(favorite_key("uuid:disk-a", &volume, &structural).is_some());
         let key = favorite_key("uuid:disk-a", &volume, &nested).unwrap();
         assert_ne!(favorite_key("uuid:disk-b", &volume, &nested), Some(key.clone()));
         assert!(history_matches(&key, &path_key("uuid:disk-a", &volume, &nested).unwrap()));
