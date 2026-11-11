@@ -73,7 +73,7 @@ const TOOLBAR: Rect = Rect::new(475.0, 36.0, 1349.0, 67.0);
 const ACTIONS: [(Action, Rect); 7] = [
     (Action::Library, Rect::new(486.0, 45.0, 189.0, 49.0)),
     (Action::Favorites, Rect::new(681.0, 45.0, 187.0, 49.0)),
-    (Action::ToggleFavorite, Rect::new(96.0, 220.0, 420.0, 45.0)),
+    (Action::ToggleFavorite, Rect::new(1404.0, 222.0, 420.0, 45.0)),
     (Action::Select, Rect::new(874.0, 45.0, 198.0, 49.0)),
     (Action::DeleteFolders, Rect::new(1078.0, 45.0, 174.0, 49.0)),
     (Action::Settings, Rect::new(1258.0, 45.0, 188.0, 49.0)),
@@ -1413,7 +1413,7 @@ impl Browser {
                 let glyph = match action {
                     Action::Library => Some(Glyph::Shared(Icon::Collection)),
                     Action::Favorites => Some(Glyph::Star(false)),
-                    Action::ToggleFavorite => Some(Glyph::Star(self.folder_favorite_key().and_then(|key| self.history_value(&key)) == Some(FAVORITE))),
+                    Action::ToggleFavorite => None,
                     Action::Select => Some(Glyph::Shared(Icon::CheckCircleFill)),
                     Action::Settings => Some(Glyph::Settings),
                     Action::Eject => Some(Glyph::Eject),
@@ -1422,7 +1422,9 @@ impl Browser {
                 };
                 if action == Action::Favorites {
                     self.draw_favorites_button(p, rect, label);
-                } else if action != Action::ToggleFavorite && self.action != Some(action) && action != Action::DeleteFolders {
+                } else if action == Action::ToggleFavorite {
+                    self.draw_favorite_toggle(p, rect, label);
+                } else if self.action != Some(action) && action != Action::DeleteFolders {
                     draw_button_content(p, rect, label, glyph, theme::TEXT_PRIMARY);
                 } else {
                     self.draw_button(p, rect, label, self.action == Some(action), action == Action::DeleteFolders, glyph);
@@ -1436,18 +1438,18 @@ impl Browser {
             parts.join("   /   ")
         });
         let focused = self.item(self.selected);
-        let (title, detail) = if self.favorite_cards().is_some() {
-            (tr("Carpetas favoritas", "Carpetes favorites"), "")
+        let (title, detail, greeting_icon) = if self.favorite_cards().is_some() {
+            (tr("Carpetas favoritas", "Carpetes favorites"), "", None)
         } else if breadcrumb.is_none() {
             let greeting = match self.hour {
-                Some(6..=11) => tr("Buenos días", "Bon dia"),
-                Some(12..=19) => tr("Buenas tardes", "Bona tarda"),
-                Some(_) => tr("Buenas noches", "Bona nit"),
-                None => tr("Te damos la bienvenida", "Benvingut a CineUSB"),
+                Some(6..=11) => (tr("Buenos días", "Bon dia"), Some(Glyph::Sun)),
+                Some(12..=19) => (tr("Buenas tardes", "Bona tarda"), Some(Glyph::Sunset)),
+                Some(_) => (tr("Buenas noches", "Bona nit"), Some(Glyph::Moon)),
+                None => (tr("Te damos la bienvenida", "Benvingut a CineUSB"), None),
             };
-            (greeting, tr("Tus películas y series, desde USB", "Les teves pel·lícules i sèries, a l’USB"))
+            (greeting.0, tr("Tus películas y series, desde USB", "Les teves pel·lícules i sèries, a l’USB"), greeting.1)
         } else {
-            focused.as_ref().map_or(("Biblioteca USB", "Carpeta"), |(title, kind, _)| (title.as_str(), *kind))
+            focused.as_ref().map_or(("Biblioteca USB", "Carpeta", None), |(title, kind, _)| (title.as_str(), *kind, None))
         };
         let title_size = if TtfMeasure.width_str(title, theme::size::DISPLAY, true) <= width {
             theme::size::DISPLAY
@@ -1455,14 +1457,16 @@ impl Browser {
         plx_ui::text_view::TextView::new(title, title_size, theme::TEXT_PRIMARY)
             .with_measure(&TtfMeasure).bold().break_long_words().leading(42.0).max_lines(2)
             .draw(p, Rect::new(x, 116.0, width, 84.0));
+        if let Some(icon) = greeting_icon {
+            let after_title = x + TtfMeasure.width_str(title, title_size, true) + 16.0;
+            draw_glyph(p, icon, Rect::new(after_title, 112.0, 39.0, 39.0), theme::USB_FAVORITES);
+        }
         let count = self.selection.as_ref().map(|marked| {
             format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"))
         });
         let section = breadcrumb.as_deref().unwrap_or(if self.favorite_cards().is_some() { "" } else { tr("Discos conectados", "Discos connectats") });
         draw_line(p, section, Rect::new(x, 191.0, width, 33.0), theme::size::BODY, false);
-        if !self.action_available(Action::ToggleFavorite) {
-            draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, 222.0, 920.0, 37.0), theme::size::CAPTION, false);
-        }
+        draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, 226.0, 920.0, 37.0), theme::size::CAPTION, false);
 
         if self.len() == 0 {
             let message = if self.favorite_cards().is_some() {
@@ -1658,6 +1662,31 @@ impl Browser {
         }
     }
 
+    fn draw_favorite_toggle(&self, p: Painter, rect: Rect, label: &str) {
+        let marked = self.folder_favorite_key().and_then(|key| self.history_value(&key)) == Some(FAVORITE);
+        let focused = self.action == Some(Action::ToggleFavorite);
+        let animation = self.favorite_motion.as_ref().filter(|(path, _, started)|
+            started.elapsed() < MOTION && self.folders.last().is_some_and(|folder| folder.path == *path));
+        let Some((_, _, started)) = animation else {
+            self.draw_button(p, rect, label, focused, false, Some(Glyph::Star(marked)));
+            return;
+        };
+        let t = motion_alpha(*started);
+        let pulse = (t * std::f32::consts::PI).sin();
+        let rect = rect.scaled(1.0 + 0.025 * pulse);
+        let fill = if focused { self.accent() } else { theme::CONTROL_IDLE_FILL };
+        let ink = if focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
+        widgets::draw_control_face(p, rect, fill, focused, widgets::ControlGround::Keyed);
+        p.alpha(pulse).rring(rect, rect.h * 0.5, 2.0, theme::USB_FAVORITES);
+        let (run, width) = TtfMeasure.fit_line_measured(label, rect.w - 67.0, theme::size::CAPTION, true);
+        let x = rect.x + (rect.w - width - 39.0) * 0.5;
+        let star = Rect::new(x, rect.y + (rect.h - 26.0) * 0.5, 26.0, 26.0).scaled(1.0 + 0.16 * pulse);
+        draw_glyph(p.alpha(1.0 - t), Glyph::Star(!marked), star, ink);
+        draw_glyph(p.alpha(t), Glyph::Star(marked), star, ink);
+        Label::new(run.as_ptr(), theme::size::CAPTION, ink).h(HAlign::Center).bold()
+            .draw(p, Rect::new(x + 39.0, rect.y, width, rect.h));
+    }
+
     fn draw_favorites_button(&self, p: Painter, rect: Rect, label: &str) {
         let focus = self.action == Some(Action::Favorites);
         let blend = self.favorite_highlight();
@@ -1723,8 +1752,10 @@ impl Browser {
                 draw_glyph(p.alpha(alpha), Glyph::Star(*marked), star, self.accent());
             } else if record == FAVORITE { draw_glyph(p, Glyph::Star(true), star, self.accent()); }
         }
-        let caption = widgets::poster_title(p, card, radius, &title, &TtfMeasure);
-        let status_y = caption.y - 30.0;
+        let video = current.is_some_and(|(_, entry)| entry.kind == Kind::Video);
+        if video { widgets::art_scrim(p, card, radius, 68.0, widgets::STILL_SCRIM_A); }
+        let caption = widgets::poster_title(p, card, radius, &title, video, &TtfMeasure);
+        let status_y = if video { card.y + card.h - 44.0 } else { caption.y - 30.0 };
         let (position, duration) = unpack_progress(record);
         if duration > 0 {
             let bar = Rect::new(card.x + 14.0, status_y - 9.0, card.w - 28.0, 5.0);
@@ -1767,7 +1798,7 @@ impl Browser {
             for (text, budget) in std::iter::once((&episode, episode_budget))
                 .chain(duration.as_ref().map(|text| (text, duration_budget))) {
                 let (run, width) = TtfMeasure.fit_line_measured(text, budget - 10.0, size, true);
-                let badge = Rect::new(x, card.y + 12.0, width + 10.0, 32.0);
+                let badge = Rect::new(x, caption.y + caption.h + 5.0, width + 10.0, 32.0);
                 p.rect_sheened(badge, 10.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
                 if focused && self.action.is_none() { p.rring(badge, 10.0, 1.0, self.accent()); }
                 Label::new(run.as_ptr(), theme::size::DIAGNOSTIC, theme::TEXT_PRIMARY).h(HAlign::Center).bold().draw(p, badge);
@@ -1886,7 +1917,7 @@ fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, sta
 }
 
 #[derive(Clone, Copy)]
-enum Glyph { Play, Trash, Eject, Drive, Settings, Star(bool), Shared(Icon) }
+enum Glyph { Play, Trash, Eject, Drive, Settings, Sun, Sunset, Moon, Star(bool), Shared(Icon) }
 
 fn draw_glyph(p: Painter, glyph: Glyph, rect: Rect, ink: [f32; 4]) {
     let asset = match glyph {
@@ -1894,6 +1925,9 @@ fn draw_glyph(p: Painter, glyph: Glyph, rect: Rect, ink: [f32; 4]) {
         Glyph::Shared(icon) => return icons::draw(p, icon, rect, ink),
         Glyph::Star(false) => include_str!("../../../assets/icons/cineusb-star.svg"),
         Glyph::Star(true) => include_str!("../../../assets/icons/cineusb-star-fill.svg"),
+        Glyph::Sun => include_str!("../../../assets/icons/cineusb-sun.svg"),
+        Glyph::Sunset => include_str!("../../../assets/icons/cineusb-sunset.svg"),
+        Glyph::Moon => include_str!("../../../assets/icons/cineusb-moon.svg"),
         Glyph::Drive => include_str!("../../../assets/icons/cineusb-drive-outline.svg"),
         Glyph::Trash => include_str!("../../../assets/icons/cineusb-trash.svg"),
         Glyph::Eject => include_str!("../../../assets/icons/cineusb-eject.svg"),
