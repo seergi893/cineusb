@@ -139,6 +139,7 @@ struct PlayingVideo {
     saved: u64,
     next_save: Instant,
     seen_player: bool,
+    observed_playhead: bool,
 }
 
 struct DetailsRequest {
@@ -807,8 +808,8 @@ impl Browser {
         self.status = tr("Abriendo vídeo…", "Obrint el vídeo…").into();
         self.request(move || {
             let result = inspect_video(&path, mount_id, spanish).map(|(file, info)| {
-                let uuid = known_uuid.or_else(|| volume_facts(&volume).1);
-                let key = uuid.and_then(|uuid| progress_key(&uuid, &volume, &path, &file));
+                let identity = known_uuid.or_else(|| volume_facts(&volume).1);
+                let key = identity.and_then(|identity| progress_key(&identity, &volume, &path, &file));
                 let saved = key.as_ref().and_then(|key| resume_record(key, None).ok().flatten()).unwrap_or(0);
                 let resume = if offer_resume && continuity::resumable(saved, info.duration_secs) { saved } else { 0 };
                 PreparedVideo { file, info, volume, path, title, key, resume, saved }
@@ -1091,7 +1092,7 @@ impl Browser {
         let (title, subject, detail, options) = match dialog {
             Dialog::Settings => (tr("Ajustes", "Ajustos"), String::new(), "", ["", ""]),
             Dialog::Appearance => (tr("Apariencia", "Aparença"), String::new(), "", ["", ""]),
-            Dialog::Accent => (tr("Color de acento", "Color de destacat"), String::new(), "", ["", ""]),
+            Dialog::Accent => (tr("Color de acento", "Color de ressaltat"), String::new(), "", ["", ""]),
             Dialog::Cards => (tr("Tamaño de tarjetas", "Mida de les targetes"), String::new(), "", ["", ""]),
             Dialog::Sort => (tr("Biblioteca USB · Orden", "Biblioteca USB · Ordre"), String::new(), "", ["", ""]),
             Dialog::AutoNext => (tr("Siguiente episodio automático", "Episodi següent automàtic"), String::new(),
@@ -1146,7 +1147,7 @@ impl Browser {
                 tr("Idioma de audio predeterminado", "Idioma d’àudio per defecte"),
                 tr("Siguiente episodio automático", "Episodi següent automàtic"),
                 tr("Apariencia", "Aparença"), tr("Biblioteca USB", "Biblioteca USB")],
-            Dialog::Appearance => &[tr("Color de acento", "Color de destacat"), tr("Tamaño de tarjetas", "Mida de les targetes")],
+            Dialog::Appearance => &[tr("Color de acento", "Color de ressaltat"), tr("Tamaño de tarjetas", "Mida de les targetes")],
             Dialog::Accent => &[tr("Morado", "Lila"), tr("Azul", "Blau"), tr("Gris neutro", "Gris neutre")],
             Dialog::Cards => &[tr("Normal", "Normal"), tr("Compacto", "Compacte"), tr("Grande", "Gran")],
             Dialog::Sort => &[tr("Nombre", "Nom"), tr("Fecha de modificación", "Data de modificació"), tr("Tamaño", "Mida")],
@@ -1251,6 +1252,7 @@ fn draw_hint(p: Painter, x: f32, key: HintKey, text: &str) -> f32 {
 
 fn video_size(bytes: u64) -> String {
     let (unit, divisor) = match bytes {
+        1_000_000_000_000.. => ("TB", 1_000_000_000_000),
         1_000_000_000.. => ("GB", 1_000_000_000),
         1_000_000.. => ("MB", 1_000_000),
         1_000.. => ("KB", 1_000),
@@ -1440,13 +1442,13 @@ fn volume_facts(volume: &Volume) -> VolumeFacts {
     Default::default()
 }
 
-fn progress_key(uuid: &str, volume: &Volume, path: &std::path::Path, file: &File) -> Option<String> {
+fn progress_key(identity: &str, volume: &Volume, path: &std::path::Path, file: &File) -> Option<String> {
     use std::fmt::Write as _;
     use std::os::unix::fs::MetadataExt as _;
     let relative = path.strip_prefix(&volume.path).ok()?;
     let metadata = file.metadata().ok()?;
     let mut key = String::new();
-    for byte in uuid.bytes().chain([0]).chain(relative.as_os_str().as_encoded_bytes().iter().copied())
+    for byte in identity.bytes().chain([0]).chain(relative.as_os_str().as_encoded_bytes().iter().copied())
         .chain([0]).chain(metadata.len().to_le_bytes()).chain(metadata.mtime().to_le_bytes()) {
         write!(key, "{byte:02x}").ok()?;
     }
@@ -1616,6 +1618,9 @@ fn initial_forced_subtitle(item: &plx_data::metadata::PlayingItem, enabled: bool
 }
 
 pub(super) fn tick(app: &mut App) {
+    if !app.window_activity.allow_present(true) && matches!(app.usb.dialog, Some(Dialog::Next { .. })) {
+        app.usb.dialog = None;
+    }
     let Some(PreparedVideo { file, info, title, volume, path, key, resume, saved }) = app.usb.update() else { return };
     if !app.usb.scan.volumes.contains(&volume) { return; }
     let ps = &mut app.player.session;
@@ -1642,7 +1647,7 @@ pub(super) fn tick(app: &mut App) {
         if playback::start_playback(ps, &mut app.adapters.player, resume.saturating_mul(1_000_000_000).min(i64::MAX as u64) as i64, playback::Origin::Here,
             4500, None, &mut app.pages, &mut app.bridge) {
             app.usb.playing = Some(PlayingVideo { volume, path, key, position: resume, duration: info.duration_secs,
-                saved, next_save: Instant::now() + Duration::from_secs(30), seen_player: false });
+                saved, next_save: Instant::now() + Duration::from_secs(30), seen_player: false, observed_playhead: false });
             app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(
                 Some(item)));
             return;
@@ -1656,7 +1661,9 @@ pub(super) fn observe_playback(app: &mut App) {
     let Some(playing) = &mut app.usb.playing else { return };
     if super::bridge::player(&app.pages).is_some() {
         playing.seen_player = true;
-        if let Some(position) = plx_media::player::observed_position_ns(&app.player.session) {
+        if let Some(position) = plx_media::player::observed_position_ns(&app.player.session)
+            .filter(|position| *position > 0 || playing.observed_playhead) {
+            playing.observed_playhead = true;
             playing.position = position.max(0) as u64 / 1_000_000_000;
         }
         if let Some(duration) = plx_media::player::duration_ns(&app.player.session).filter(|duration| *duration > 0) {

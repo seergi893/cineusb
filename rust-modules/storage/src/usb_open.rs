@@ -165,22 +165,28 @@ pub fn volume_details(mount_id: &str, path_hex: &str) -> io::Result<()> {
     let device = table.split(|byte| *byte == b'\n').find(|line|
         line.split(|byte| *byte == b' ').next().is_some_and(|field| field == mount_id.as_bytes()))
         .and_then(mount_source).map(decode_mount).filter(|path| path.starts_with("/dev"));
-    let uuid = device.as_deref().and_then(volume_uuid);
+    let uuid = device.as_deref().and_then(volume_identity);
     serde_json::to_writer(io::stdout().lock(), &(capacity, uuid))?;
     Ok(())
 }
 
-fn volume_uuid(device: &Path) -> Option<String> {
-    let aliases = fs::read_dir("/dev/disk/by-uuid").into_iter().flatten();
-    if let Some(uuid) = aliases.filter_map(Result::ok).find_map(|entry| {
-        (fs::canonicalize(entry.path()).ok()? == device).then(|| entry.file_name().into_string().ok()).flatten()
-    }) { return Some(uuid); }
-    // Some webOS builds have blkid but do not populate /dev/disk/by-uuid.
-    let output = std::process::Command::new("blkid").args(["-s", "UUID", "-o", "value"])
-        .arg(device).output().ok()?;
-    let uuid = std::str::from_utf8(&output.stdout).ok()?.trim();
-    (output.status.success() && !uuid.is_empty() && uuid.len() <= 128
-        && uuid.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')).then(|| uuid.to_owned())
+fn volume_identity(device: &Path) -> Option<String> {
+    let device = fs::canonicalize(device).ok()?;
+    let alias = |directory| fs::read_dir(directory).into_iter().flatten().filter_map(Result::ok)
+        .filter_map(|entry| (fs::canonicalize(entry.path()).ok()? == device)
+            .then(|| entry.file_name().into_string().ok()).flatten()).min();
+    if let Some(uuid) = alias("/dev/disk/by-uuid") { return Some(format!("uuid:{uuid}")); }
+    // Some webOS builds expose blkid without creating the device aliases.
+    if let Ok(output) = std::process::Command::new("blkid").args(["-s", "UUID", "-o", "value"]).arg(&device).output() {
+        if let Ok(uuid) = std::str::from_utf8(&output.stdout) {
+            let uuid = uuid.trim();
+            if output.status.success() && !uuid.is_empty() && uuid.len() <= 128
+                && uuid.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
+                return Some(format!("uuid:{uuid}"));
+            }
+        }
+    }
+    alias("/dev/disk/by-id").map(|id| format!("disk:{id}"))
 }
 
 fn fd_mount_id(file: &File) -> io::Result<u64> {
@@ -344,13 +350,15 @@ type FolderEntry = (String, bool, Option<i64>, Option<u64>);
 fn folder_entries(folder: &File) -> io::Result<Vec<FolderEntry>> {
     let mut entries = Vec::new();
     let mut bytes = 0;
+    let mut wire_bytes = 0;
     for entry in fs::read_dir(format!("/proc/self/fd/{}", folder.as_raw_fd()))? {
         let entry = entry?;
         let kind = entry.file_type()?;
         if kind.is_dir() || kind.is_file() {
             let name = hex_path(&entry.file_name());
-            bytes += name.len() + 54;
-            if bytes > 192 * 1024 { return Err(io::Error::other("USB folder listing too large")); }
+            bytes += name.len() + 14;
+            wire_bytes += name.len() + 54;
+            if bytes > 192 * 1024 || wire_bytes > 512 * 1024 { return Err(io::Error::other("USB folder listing too large")); }
             use std::os::unix::fs::MetadataExt;
             let metadata = entry.metadata().ok();
             let modified = metadata.as_ref().map(MetadataExt::mtime);

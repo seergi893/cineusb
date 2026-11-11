@@ -253,8 +253,27 @@ pub(super) fn open_video(path: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(test)]
-mod tests {
+mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn sort_keeps_folders_first_and_uses_natural_order_for_ties() {
+        let mut entries = vec![
+            media_entry("Episodio 10.mkv".into(), false).unwrap(),
+            media_entry("Episodio 2.mkv".into(), false).unwrap(),
+            media_entry("Temporada".into(), true).unwrap(),
+        ];
+        entries[0].size = Some(100);
+        entries[0].modified = Some(10);
+        entries[1].modified = Some(20);
+        sort_entries_by(&mut entries, 0);
+        assert_eq!(entries[0].kind, Kind::Folder);
+        assert_eq!(entries[1].name, "Episodio 2.mkv");
+        sort_entries_by(&mut entries, 1);
+        assert_eq!(entries[1].name, "Episodio 2.mkv");
+        assert_eq!(resort(&mut entries, 1, 2), 2);
+        assert_eq!(entries[1].name, "Episodio 10.mkv");
+    }
 
     #[test]
     fn mount_table_keeps_usb_partitions_and_decodes_paths() {

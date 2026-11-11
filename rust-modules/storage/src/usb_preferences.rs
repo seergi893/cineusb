@@ -160,6 +160,11 @@ mod tests {
         assert_eq!(load(&path).unwrap().as_deref(), Some("ca 1 0"));
         save(&path, &record("es", "1", "1").unwrap()).unwrap();
         assert_eq!(load(&path).unwrap().as_deref(), Some("es 1 1"));
+        let extended = "ca 1 0 0 2 1 2";
+        assert!(validate_extended(extended).is_ok());
+        save(&path, extended).unwrap();
+        assert_eq!(load(&path).unwrap().as_deref(), Some(extended));
+        assert!(validate_extended("ca 1 0 1 3 0 0").is_err());
         assert!(record("ca", "yes", "0").is_err());
         assert!(record("../es", "0", "0").is_err());
         fs::remove_dir_all(root).unwrap();
