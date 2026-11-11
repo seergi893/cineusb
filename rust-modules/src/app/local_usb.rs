@@ -309,13 +309,6 @@ impl Browser {
                 match result {
                     DiskResult::Folder(volume, path, Ok(mut entries)) => {
                         disk::sort_entries_by(&mut entries, self.settings.sort);
-                        if let Some(view) = self.favorite_view.as_mut().filter(|view| view.depth == self.folders.len()) {
-                            view.selected = self.selected;
-                            view.scroll = self.scroll.pos;
-                        } else if let Some(folder) = self.folders.last_mut() {
-                            folder.selected = self.selected;
-                            folder.scroll = self.scroll.pos;
-                        }
                         let collection = path.strip_prefix(&volume.path).ok().and_then(art::collection);
                         self.prune_missing_favorites(&volume, &path, &entries);
                         self.folders.push(Folder { volume, path, entries, collection, selected: 0, scroll: 0.0 });
@@ -384,6 +377,8 @@ impl Browser {
                             for path in missing { self.remove_history_under(&volume, &path); }
                             self.enter_favorites(volume, paths);
                             self.status.clear();
+                        } else if self.favorite_view.is_none() {
+                            self.set_favorite_section(false);
                         }
                     }
                     DiskResult::Eject(volume, result) => {
@@ -1188,6 +1183,13 @@ impl Browser {
     }
 
     fn open_folder(&mut self, volume: Volume, path: PathBuf) {
+        if let Some(view) = self.favorite_view.as_mut().filter(|view| view.depth == self.folders.len()) {
+            view.selected = self.selected;
+            view.scroll = self.scroll.pos;
+        } else if let Some(folder) = self.folders.last_mut() {
+            folder.selected = self.selected;
+            folder.scroll = self.scroll.pos;
+        }
         self.status = tr("Abriendo carpeta…", "Obrint la carpeta…").into();
         self.request(move || {
             let entries = list_folder(&path, system_mount(&volume));
@@ -1737,11 +1739,16 @@ impl Browser {
                     if seconds < 60 { "<1 min".to_owned() }
                     else { format!("{} min", seconds / 60) }
                 });
-            let texts = [Some(format!("{season}×{episode:02}")), duration];
-            let max_width = if texts[1].is_some() { (card.w - 24.0 - 5.0) * 0.5 } else { card.w - 24.0 };
+            let episode = format!("{season}×{episode:02}");
+            let size = theme::size::DIAGNOSTIC;
+            let available = card.w - 24.0;
+            let duration_budget = duration.as_ref().map_or(0.0, |text|
+                (TtfMeasure.width_str(text, size, true) + 10.0).min(available * 0.57));
+            let episode_budget = if duration.is_some() { available - duration_budget - 5.0 } else { available };
             let mut x = card.x + 12.0;
-            for text in texts.into_iter().flatten() {
-                let (run, width) = TtfMeasure.fit_line_measured(&text, max_width - 10.0, theme::size::DIAGNOSTIC, true);
+            for (text, budget) in std::iter::once((&episode, episode_budget))
+                .chain(duration.as_ref().map(|text| (text, duration_budget))) {
+                let (run, width) = TtfMeasure.fit_line_measured(text, budget - 10.0, size, true);
                 let badge = Rect::new(x, card.y + 12.0, width + 10.0, 32.0);
                 p.rect_sheened(badge, 10.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
                 if focused && self.action.is_none() { p.rring(badge, 10.0, 1.0, self.accent()); }
