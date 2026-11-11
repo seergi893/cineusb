@@ -238,6 +238,7 @@ pub(super) struct Browser {
     favorite_motion: Option<(PathBuf, bool, Instant)>,
     estimate: Option<(i64, plx_appkit::player_hud::model::FinishClock)>,
     next_estimate: Option<Instant>,
+    estimate_anchor: Option<(i64, i32)>,
     next_scan: Instant,
     last_tick: Instant,
 }
@@ -259,7 +260,7 @@ impl Browser {
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
             queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_view: None,
             favorite_section: (false, now, 0.0),
-            dialog_started: None, button_motion: None, favorite_motion: None, estimate: None, next_estimate: None,
+            dialog_started: None, button_motion: None, favorite_motion: None, estimate: None, next_estimate: None, estimate_anchor: None,
         }
     }
 
@@ -575,6 +576,7 @@ impl Browser {
         self.store_playhead(completed, true);
         self.estimate = None;
         self.next_estimate = None;
+        self.estimate_anchor = None;
         let Some(playing) = self.playing.take() else { return };
         if !completed || !self.settings.auto_next { return; }
         let Some(folder) = self.folders.last().filter(|folder|
@@ -765,8 +767,12 @@ impl Browser {
         let path = self.folders.last().map(|folder| folder.path.clone());
         self.change_history(key, if marked { 0 } else { FAVORITE });
         if let Some(path) = path {
-            if marked {
-                if let Some(view) = &mut self.favorite_view { view.paths.retain(|item| *item != path); }
+            if let Some(view) = &mut self.favorite_view {
+                if marked { view.paths.retain(|item| *item != path); }
+                else if !view.paths.contains(&path) {
+                    view.paths.push(path.clone());
+                    view.paths.sort();
+                }
             }
             self.favorite_motion = Some((path, !marked, Instant::now()));
         }
@@ -1350,7 +1356,10 @@ impl Browser {
     fn option_available(&self, index: usize) -> bool {
         match self.dialog.as_ref() {
             Some(Dialog::Video { volume, .. }) if index == 1 => system_mount(volume).is_some(),
-            Some(Dialog::Video { volume, path }) if index == 2 => self.video_history_key(volume, path).is_some(),
+            Some(Dialog::Video { volume, path }) if index == 2 => {
+                self.identity(volume).is_some_and(|identity| self.history_loaded.contains(&history_prefix(identity)))
+                    && self.video_history_key(volume, path).is_some()
+            }
             _ => true,
         }
     }
@@ -2299,12 +2308,17 @@ pub(super) fn observe_playback(app: &mut App) {
         let resumed = !paused && playing.paused;
         playing.paused = paused;
         let now = Instant::now();
-        if resumed || just_paused || app.usb.next_estimate.is_none_or(|next| now >= next) {
+        let position = plx_media::player::intended_pos_ns(&app.player.session);
+        let rate = plx_media::player::applied_rate(&app.player.session).unwrap_or(1000);
+        let seeking = plx_media::player::seek_pending(&app.player.session).is_some();
+        let anchor = (paused || seeking).then_some((position, rate));
+        let anchor_changed = anchor.is_some() && anchor != app.usb.estimate_anchor;
+        app.usb.estimate_anchor = anchor;
+        if resumed || just_paused || anchor_changed || app.usb.next_estimate.is_none_or(|next| now >= next) {
             app.usb.next_estimate = Some(now + Duration::from_secs(1));
-            if !paused || just_paused || app.usb.estimate.is_none() || plx_media::player::seek_pending(&app.player.session).is_some() {
-                let position = plx_media::player::intended_pos_ns(&app.player.session);
+            if !paused || just_paused || anchor_changed || app.usb.estimate.is_none() {
                 let estimate = plx_media::player::duration_ns(&app.player.session).and_then(|duration|
-                    remaining_wall_seconds(position, duration, plx_media::player::applied_rate(&app.player.session).unwrap_or(1000)))
+                    remaining_wall_seconds(position, duration, rate))
                     .and_then(i18n::local_finish_time);
                 if app.usb.estimate.as_ref().map(|(minute, _)| *minute) != estimate.map(|(minute, _, _)| minute) {
                     app.usb.estimate = estimate.map(|(minute, hour, min)| {
@@ -2356,6 +2370,9 @@ mod usb_browser_tests {
         browser.action = Some(Action::Settings);
         assert!(browser.favorite_section.0 && browser.favorite_cards().is_none());
         browser.action = None;
+        browser.dialog = Some(Dialog::Settings);
+        browser.back();
+        assert!(browser.favorite_section.0 && browser.favorite_cards().is_none());
         browser.back();
         assert!(browser.favorite_section.0 && browser.favorite_cards().is_some());
         browser.back();

@@ -584,6 +584,12 @@ pub fn draw_playbar(p: Painter, bar: Playbar, measure: &dyn plx_machine::machine
 }
 
 /// [`draw_playbar`] over a [`PlaybarLook`]: the compiled package's bar (`DrawOp::Playbar`).
+fn clock_template_width(label: &str, size: i32, measure: &dyn plx_machine::machine::Measure) -> f32 {
+    // Measure with the same zero template used by the tabular elapsed clock.
+    let template: String = label.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect();
+    measure.width_str(&template, size, true)
+}
+
 fn finish_label(clock: super::model::FinishClock, remaining_ns: i64) -> String {
     let minutes = remaining_ns.max(0).cast_unsigned().div_ceil(60_000_000_000);
     let time = if clock.twelve_hour {
@@ -668,6 +674,10 @@ pub(super) fn draw_playbar_with_finish(p: Painter, bar: Playbar, look: PlaybarLo
     // elapsed under the playhead (':' centered on the knob, clamped to the bar); remaining at the
     // right — hidden once the moving elapsed label would overlap it (near the end of the movie).
     let ty = sy + CLOCK_TOP;
+    let combined = finish.map(|clock| finish_label(clock, dur - dispos));
+    let combined_width = combined.as_deref().map(|label| clock_template_width(label, look.clock_size, measure))
+        .filter(|width| *width < sw * 0.55);
+    let elapsed_right = combined_width.map_or(sx + sw, |width| sx + sw - width - 26.0);
     // A grown knob clock keeps its BASELINE, so it grows upward and never into the remaining clock's
     // line. It is a CROSSFADE of two ladder rungs (the resting CAPTION and the one above it), each
     // laid out at its own size, never a tweened size or a scaled texture; the extents the rest of
@@ -679,28 +689,15 @@ pub(super) fn draw_playbar_with_finish(p: Painter, bar: Playbar, look: PlaybarLo
     let (mut el_l, mut el_r) = (f32::INFINITY, f32::NEG_INFINITY);
     for (sz, face_a) in crate::scrub_preview::clock_faces(look.clock_size, bar.clock_grow).into_iter().flatten() {
         let ety = plx_gfx::text::baseline_y(sz, 1, look.clock_size, 1, ty);
-        let (l, r) = draw_clock(p.alpha(face_a), &elapsed, clock_x, ety, sz, white, sx, sx + sw, measure);
+        let (l, r) = draw_clock(p.alpha(face_a), &elapsed, clock_x, ety, sz, white, sx, elapsed_right, measure);
         el_l = el_l.min(l);
         el_r = el_r.max(r);
     }
     let plain_remaining = fmt_time(dur - dispos, true);
-    let combined = finish.map(|clock| finish_label(clock, dur - dispos));
-    let rem = combined.as_deref().filter(|label| el_r + 20.0 + measure.width_str(label, look.clock_size, false) < sx + sw)
-        .unwrap_or(&plain_remaining);
-    // MEASURE the label, never estimate it. `chars * CAPTION * 0.52` was an Arial-calibrated
-    // constant guarding a real behaviour — the remaining clock hides before the moving elapsed
-    // clock can reach it — and it only ever worked because it over-estimated: under Arial it
-    // returned ~99.8px against a true ~85px. Under the shipped Inter that margin had already
-    // halved, and freezing tabular figures (which the clock's own template idiom requires, see
-    // `draw_clock`) widens numerals further, leaving about a pixel of slack. At that point the
-    // guard stops guarding and the two clocks can overlap near the end of a long item.
-    // Same '0'-template `draw_clock` uses, so the two agree by construction: with tabular figures
-    // the template's width IS the real string's width at every tick.
-    let rem_tmpl: String = rem
-        .chars()
-        .map(|c| if c.is_ascii_digit() { '0' } else { c })
-        .collect();
-    let rem_w = measure.width_str(&rem_tmpl, look.clock_size, true);
+    let (rem, rem_w) = match (combined.as_deref(), combined_width) {
+        (Some(label), Some(width)) => (label, width),
+        _ => (plain_remaining.as_str(), clock_template_width(&plain_remaining, look.clock_size, measure)),
+    };
     let rem_l = sx + sw - rem_w;
     let rem_shown = el_r + 20.0 < rem_l;
     if rem_shown {

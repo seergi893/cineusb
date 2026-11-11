@@ -7,7 +7,7 @@
 //! before input/Tick and refreshes it before drawing, alongside `busy` and `transport`. The renderer
 //! reads it through its `Frame`, and the scrub preview takes it directly; a draw reads no player global.
 //!
-//! Pure data: every field is `Copy`, there is no borrowed string and no allocation, so building one is
+//! Pure data: every field is `Copy`, the finish clock only borrows static translations and there is no allocation, so building one is
 //! a dozen atomic loads and the snapshot costs nothing to hand down the draw. It carries no
 //! `PartialEq` because of [`HudModel::bitmap_by_key`], a function pointer.
 //!

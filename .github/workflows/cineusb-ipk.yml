@@ -65,8 +65,8 @@ jobs:
           cd rust-modules
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-modules --lib \
             --features hostsim,local-usb usb_browser_tests::
-          CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plx_appkit --lib \
-            --features plx_base/hostsim cineusb_finish_label
+          CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-modules -p plx_appkit --lib \
+            --features hostsim,local-usb cineusb_finish_label
       - name: Lint the USB storage helper
         working-directory: rust-modules
         run: |
