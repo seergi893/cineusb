@@ -1394,8 +1394,7 @@ impl Browser {
         let p = Painter::root().alpha(plx_ui::nav::page_alpha());
         let x = plx_ui::consts::MARGIN_X;
         let width = 1920.0 - 2.0 * x;
-        p.rect_sheened(TOOLBAR, 24.0, theme::MENU_GLASS_TOP, theme::MENU_GLASS_BOT);
-        p.rring(TOOLBAR, 24.0, 1.0, theme::CONTROL_IDLE_FILL);
+        p.rect(TOOLBAR, 24.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL, 0.0);
         draw_line(p, "CineUSB", Rect::new(x, 45.0, 345.0, 50.0), theme::size::HEADLINE, true);
         for (action, rect) in ACTIONS {
             if self.action_available(action) {
@@ -1423,6 +1422,8 @@ impl Browser {
                 };
                 if action == Action::Favorites {
                     self.draw_favorites_button(p, rect, label);
+                } else if action != Action::ToggleFavorite && self.action != Some(action) && action != Action::DeleteFolders {
+                    draw_button_content(p, rect, label, glyph, theme::TEXT_PRIMARY);
                 } else {
                     self.draw_button(p, rect, label, self.action == Some(action), action == Action::DeleteFolders, glyph);
                 }
@@ -1448,36 +1449,21 @@ impl Browser {
         } else {
             focused.as_ref().map_or(("Biblioteca USB", "Carpeta"), |(title, kind, _)| (title.as_str(), *kind))
         };
-        draw_line(p, title, Rect::new(x, 104.0, 920.0, 66.0), theme::size::HERO, true);
+        let title_size = if TtfMeasure.width_str(title, theme::size::DISPLAY, true) <= width {
+            theme::size::DISPLAY
+        } else { theme::size::TITLE };
+        plx_ui::text_view::TextView::new(title, title_size, theme::TEXT_PRIMARY)
+            .with_measure(&TtfMeasure).bold().break_long_words().leading(42.0).max_lines(2)
+            .draw(p, Rect::new(x, 116.0, width, 84.0));
         let count = self.selection.as_ref().map(|marked| {
             format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"))
         });
         let section = breadcrumb.as_deref().unwrap_or(if self.favorite_cards().is_some() { "" } else { tr("Discos conectados", "Discos connectats") });
-        draw_line(p, section, Rect::new(x, 181.0, width * 0.43, 45.0), theme::size::BODY, false);
+        draw_line(p, section, Rect::new(x, 191.0, width, 33.0), theme::size::BODY, false);
         if !self.action_available(Action::ToggleFavorite) {
             draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, 222.0, 920.0, 37.0), theme::size::CAPTION, false);
         }
 
-        if let Some((volume, (Some((total, used, free, readonly)), _))) = self.facts.as_ref()
-            .filter(|(disk, _)| self.volume() == Some(disk)) {
-            let rect = Rect::new(1070.0, 118.0, 754.0, 139.0);
-            p.rect_sheened(rect, 22.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
-            draw_glyph(p, Glyph::Drive, Rect::new(rect.x + 22.0, rect.y + 19.0, 25.0, 25.0), theme::TEXT_PRIMARY);
-            draw_line(p, &volume_name(volume), Rect::new(rect.x + 61.0, rect.y + 9.0, 390.0, 44.0), theme::size::LABEL, true);
-            let capacity = format!("{} · {}", video_size(*total), if *readonly {
-                tr("Solo lectura", "Només lectura").to_owned()
-            } else { tr("USB", "USB").to_owned() });
-            draw_line(p, &capacity, Rect::new(rect.x + 460.0, rect.y + 9.0, 266.0, 44.0), theme::size::MICRO, false);
-            let fraction = (*used as f64 / *total as f64).clamp(0.0, 1.0);
-            let bar = Rect::new(rect.x + 23.0, rect.y + 63.0, rect.w - 46.0, 8.0);
-            p.rect_sheened(bar, 4.0, theme::MENU_GLASS_TOP, theme::MENU_GLASS_TOP);
-            let fill = Rect::new(bar.x, bar.y, bar.w * fraction as f32, bar.h);
-            if fill.w > 0.0 { p.rect_sheened(fill, 4.0, self.accent(), self.accent()); }
-            let usage = format!("{} {} · {:.0} %", video_size(*used), tr("usados", "ocupats"), fraction * 100.0);
-            let free = format!("{} {}", video_size(*free), tr("libres", "lliures"));
-            draw_line(p, &usage, Rect::new(rect.x + 23.0, rect.y + 81.0, 380.0, 42.0), theme::size::MICRO, false);
-            draw_line(p, &free, Rect::new(rect.x + 460.0, rect.y + 81.0, 266.0, 42.0), theme::size::MICRO, false);
-        }
         if self.len() == 0 {
             let message = if self.favorite_cards().is_some() {
                 tr("No hay carpetas favoritas en este USB.", "No hi ha cap carpeta favorita en aquest USB.")
@@ -1499,10 +1485,17 @@ impl Browser {
             self.draw_tile(p, self.selected, true);
             p.clip_clear();
         }
+        let storage = self.facts.as_ref().filter(|(disk, _)| self.volume() == Some(disk))
+            .and_then(|(disk, (capacity, _))| capacity.map(|facts| (disk, facts)));
+        if self.dialog.is_none() {
+            if let Some((disk, facts)) = storage {
+                self.draw_storage(p, disk, facts);
+            }
+        }
         if let Some(dialog) = &self.dialog {
             self.draw_dialog(p, dialog);
         } else if !self.status.is_empty() {
-            draw_line(p, &self.status, Rect::new(x, 990.0, width, 48.0), theme::size::CAPTION, false);
+            draw_line(p, &self.status, Rect::new(x, 990.0, width - if storage.is_some() { 610.0 } else { 0.0 }, 48.0), theme::size::CAPTION, false);
         } else {
             let primary = if self.selection.is_some() && self.action.is_none() {
                 tr("Marcar", "Marca")
@@ -1524,6 +1517,25 @@ impl Browser {
             }
             cursor = draw_hint(p, cursor, HintKey::Ok, primary);
             draw_hint(p, cursor, HintKey::Icon(Icon::ChevronLeft), back);
+        }
+    }
+
+    fn draw_storage(&self, p: Painter, volume: &Volume, (total, used, free, readonly): (u64, u64, u64, bool)) {
+        let rect = Rect::new(1234.0, 984.0, 590.0, 56.0);
+        p.rect(rect, 16.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL, 0.0);
+        draw_glyph(p, Glyph::Drive, Rect::new(rect.x + 13.0, rect.y + 8.0, 19.0, 19.0), theme::TEXT_PRIMARY);
+        let name = volume_name(volume);
+        draw_line(p, &name, Rect::new(rect.x + 39.0, rect.y + 4.0, 110.0, 30.0), theme::size::DIAGNOSTIC, true);
+        let fraction = if total == 0 { 0.0 } else { (used as f64 / total as f64).clamp(0.0, 1.0) };
+        let usage = format!("{:.0} % · {} / {} {}", fraction * 100.0, video_size(free), video_size(total),
+            tr("libres", "lliures"));
+        let mode = if readonly { tr(" · Solo lectura", " · Només lectura") } else { "" };
+        draw_line(p, &format!("{usage}{mode}"), Rect::new(rect.x + 154.0, rect.y + 4.0, 420.0, 30.0), theme::size::DIAGNOSTIC, false);
+        let bar = Rect::new(rect.x + 15.0, rect.y + 39.0, rect.w - 30.0, 5.0);
+        p.rect(bar, 2.5, theme::RAIL_TRACK, theme::RAIL_TRACK, 0.0);
+        if fraction > 0.0 {
+            let fill = Rect::new(bar.x, bar.y, bar.w * fraction as f32, bar.h);
+            p.rect(fill, 2.5, self.accent(), self.accent(), 0.0);
         }
     }
 
@@ -1649,7 +1661,11 @@ impl Browser {
     fn draw_favorites_button(&self, p: Painter, rect: Rect, label: &str) {
         let focus = self.action == Some(Action::Favorites);
         let blend = self.favorite_highlight();
-        self.draw_button(p, rect, label, focus && blend <= 0.0, false, Some(Glyph::Star(false)));
+        if focus && blend <= 0.0 {
+            self.draw_button(p, rect, label, true, false, Some(Glyph::Star(false)));
+        } else {
+            draw_button_content(p, rect, label, Some(Glyph::Star(false)), theme::TEXT_PRIMARY);
+        }
         if blend > 0.0 {
             let gold = theme::USB_FAVORITES;
             let q = p.alpha(blend);
@@ -1707,9 +1723,11 @@ impl Browser {
                 draw_glyph(p.alpha(alpha), Glyph::Star(*marked), star, self.accent());
             } else if record == FAVORITE { draw_glyph(p, Glyph::Star(true), star, self.accent()); }
         }
+        let caption = widgets::poster_title(p, card, radius, &title, &TtfMeasure);
+        let status_y = caption.y - 30.0;
         let (position, duration) = unpack_progress(record);
         if duration > 0 {
-            let bar = Rect::new(card.x + 14.0, card.y + card.h - 90.0, card.w - 28.0, 5.0);
+            let bar = Rect::new(card.x + 14.0, status_y - 9.0, card.w - 28.0, 5.0);
             p.rect_sheened(bar, 2.5, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
             let fill = Rect::new(bar.x, bar.y, bar.w * (position as f64 / duration as f64).clamp(0.0, 1.0) as f32, bar.h);
             p.rect_sheened(fill, 2.5, self.accent(), self.accent());
@@ -1757,12 +1775,11 @@ impl Browser {
             }
         }
         if record == WATCHED {
-            icons::draw(p, Icon::Check, Rect::new(card.x + 15.0, card.y + card.h - 76.0, 22.0, 22.0), theme::USB_WATCHED_EDGE);
-            draw_line(p, tr("Visto", "Vist"), Rect::new(card.x + 44.0, card.y + card.h - 81.0, card.w - 58.0, 28.0), theme::size::MICRO, true);
+            icons::draw(p, Icon::Check, Rect::new(card.x + 15.0, status_y + 5.0, 22.0, 22.0), theme::USB_WATCHED_EDGE);
+            draw_line(p, tr("Visto", "Vist"), Rect::new(card.x + 44.0, status_y, card.w - 58.0, 28.0), theme::size::MICRO, true);
         } else {
-        draw_line(p, kind, Rect::new(card.x + 16.0, card.y + card.h - 81.0, card.w - 32.0, 28.0), theme::size::CAPTION, false);
+        draw_line(p, kind, Rect::new(card.x + 16.0, status_y, card.w - 32.0, 28.0), theme::size::CAPTION, false);
         }
-        widgets::poster_label(p, card, radius, &title, &TtfMeasure);
     }
 }
 
@@ -1891,6 +1908,10 @@ fn draw_button(p: Painter, rect: Rect, label: &str, focused: bool, danger: bool,
         else { (theme::CONTROL_IDLE_FILL, theme::TEXT_PRIMARY) };
     widgets::draw_control_face(p, rect, fill, focused, widgets::ControlGround::Keyed);
     if focused && danger { p.rring(rect, rect.h * 0.5, 3.0, theme::CONTROL_FOCUS_RING); }
+    draw_button_content(p, rect, label, glyph, ink);
+}
+
+fn draw_button_content(p: Painter, rect: Rect, label: &str, glyph: Option<Glyph>, ink: [f32; 4]) {
     let icon_space = if glyph.is_some() { 39.0 } else { 0.0 };
     let (run, width) = TtfMeasure.fit_line_measured(label, rect.w - 28.0 - icon_space, theme::size::CAPTION, true);
     let x = rect.x + (rect.w - width - icon_space) * 0.5;

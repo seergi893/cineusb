@@ -845,6 +845,30 @@ pub fn poster_label(
             card.w - 2.0 * INSET_X, cap_h));
 }
 
+/// Wrapped title on portrait art. Returns its bounds so the caller can place status above it.
+pub fn poster_title(
+    p: Painter,
+    card: Rect,
+    radius: f32,
+    title: &str,
+    measure: &dyn plx_machine::machine::Measure,
+) -> Rect {
+    let width = card.w - 24.0;
+    let view = |size| TextView::new(title, size, theme::TEXT_PRIMARY)
+        .with_measure(measure).bold().break_long_words();
+    let normal = view(theme::size::LABEL).max_lines(2);
+    let compact = view(theme::size::MICRO).max_lines(2);
+    let small = view(theme::size::DIAGNOSTIC).max_lines(4);
+    let title = if !normal.truncates(width) { &normal }
+        else if !compact.truncates(width) { &compact }
+        else { &small };
+    let height = title.measure_h(width);
+    let frame = Rect::new(card.x + 12.0, card.y + card.h - height - 8.0, width, height);
+    art_scrim(p, card, radius, height + 68.0, STILL_SCRIM_A);
+    title.draw(p, frame);
+    frame
+}
+
 /// The gradient a [`still_line`] is read against — height and peak alpha.
 ///
 /// **112 for the PAIR since 2026-09-05**, and the revision states its own reason: "the system's
