@@ -200,7 +200,7 @@ fn filesystem_serial(device: &Path) -> Option<String> {
     let file = File::open(device).ok()?;
     let mut sector = [0u8; 512];
     if file.read_at(&mut sector, 0).ok()? != sector.len() { return None; }
-    let (kind, serial) = if &sector[3..11] == b"NTFS    " {
+    let (kind, serial): (&str, &[u8]) = if &sector[3..11] == b"NTFS    " {
         ("ntfs", &sector[0x48..0x50])
     } else if &sector[3..11] == b"EXFAT   " {
         ("exfat", &sector[0x64..0x68])
