@@ -30,9 +30,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/rust-toolchain
+      - name: Install USB test dependencies
+        run: |
+          sudo sed -i 's|http://ports.ubuntu.com/ubuntu-ports|https://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=20 install -y ffmpeg libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev
       - name: Test local MKV and MP4 with the bundled FFmpeg configuration
         run: |
-          command -v ffmpeg || sudo apt-get install -y ffmpeg
           HOST=1 RELEASE=1 ci/build-ffmpeg.sh
           export PLXNATIVE_APP_DIR="$PWD/vendor/ffmpeg-prefix-host/lib"
           export CINEUSB_FD_FIXTURES="$RUNNER_TEMP/cineusb-fd-fixtures"
@@ -61,7 +65,6 @@ jobs:
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-storage --bin plxnative-storage usb_
       - name: Test USB video menu and startup subtitles
         run: |
-          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev
           cd rust-modules
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-modules --lib \
             --features hostsim,local-usb usb_browser_tests::
