@@ -33,21 +33,33 @@ jobs:
       - name: Install USB test dependencies
         run: |
           if ! command -v ffmpeg || ! command -v nasm || ! pkg-config --exists sdl2 SDL2_ttf gl; then
-            # Prefer the Ubuntu runner's configured mirrors instead of forcing
-            # archive.ubuntu.com, which can fail DNS resolution on some runners.
-            apt_options=(-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-            for attempt in 1 2 3 4; do
-              echo "APT dependency setup attempt $attempt/4"
-              if sudo apt-get "${apt_options[@]}" update -o APT::Update::Error-Mode=any &&
-                 sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install --no-install-recommends -y ffmpeg nasm libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev; then
+            # The hosted runner's Azure mirror can be unreachable even when
+            # other package hosts work. Try independent HTTPS Ubuntu mirrors.
+            apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+            installed=false
+            for mirror in \
+              https://mirror.math.princeton.edu/pub/ubuntu \
+              https://mirrors.mit.edu/ubuntu \
+              https://mirrors.kernel.org/ubuntu \
+              https://archive.ubuntu.com/ubuntu; do
+              echo "::group::Trying Ubuntu mirror $mirror"
+              sources="$RUNNER_TEMP/cineusb-ubuntu.list"
+              printf 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] %s noble main universe\n' "$mirror" > "$sources"
+              printf 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] %s noble-updates main universe\n' "$mirror" >> "$sources"
+              custom=(-o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sourceparts=-)
+              if sudo apt-get "${custom[@]}" "${apt_options[@]}" update -o APT::Update::Error-Mode=any &&
+                 sudo env DEBIAN_FRONTEND=noninteractive apt-get "${custom[@]}" "${apt_options[@]}" install --no-install-recommends -y ffmpeg nasm libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev; then
+                installed=true
+                echo "::endgroup::"
                 break
               fi
-              if [ "$attempt" -eq 4 ]; then
-                echo "::error::Ubuntu package installation failed after four attempts; inspect runner DNS and APT sources."
-                exit 1
-              fi
-              sleep $((attempt * 15))
+              echo "::warning::Mirror $mirror unavailable; trying next mirror"
+              echo "::endgroup::"
             done
+            if [ "$installed" != true ]; then
+              echo "::error::All independent Ubuntu mirrors failed. Runner network/DNS needs investigation."
+              exit 1
+            fi
           fi
       - name: Test local MKV and MP4 with the bundled FFmpeg configuration
         run: |
