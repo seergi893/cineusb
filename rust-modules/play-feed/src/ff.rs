@@ -490,6 +490,8 @@ fn cineusb_prefers_spain_then_other_spanish_then_default_audio() {
     tracks[2].codec = "unsupported".into();
     assert_eq!(pick_local_audio(&tracks, 1, true).unwrap().index, 2);
     assert_eq!(pick_local_audio(&tracks[..1], 1, true).unwrap().index, 1);
+    let unmarked = [audio(4, "eng", "aac", false), audio(5, "fra", "aac", false)];
+    assert_eq!(pick_local_audio(&unmarked, 5, true).unwrap().index, 4);
 }
 
 fn pick_local_audio(tracks: &[LocalAudio], best: i32, spanish: bool) -> Option<&LocalAudio> {
@@ -498,7 +500,7 @@ fn pick_local_audio(tracks: &[LocalAudio], best: i32, spanish: bool) -> Option<&
         for rank in [2, 1] {
             if let Some(track) = valid().find(|track| spanish_rank(track) == rank) { return Some(track); }
         }
-        if let Some(track) = valid().find(|track| track.default) { return Some(track); }
+        return valid().find(|track| track.default).or_else(|| valid().next());
     }
     valid().find(|track| track.index == best)
         .or_else(|| valid().find(|track| track.default))
