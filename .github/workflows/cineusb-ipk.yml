@@ -64,6 +64,9 @@ jobs:
           cd rust-modules
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-modules --lib \
             --features hostsim,local-usb usb_browser_tests::
+      - name: Lint the USB storage helper
+        working-directory: rust-modules
+        run: cargo +"$RUST_TOOLCHAIN" clippy --locked -p plxnative-storage --tests
   package:
     if: github.repository == 'seergi893/cineusb'
     needs: usb-smoke

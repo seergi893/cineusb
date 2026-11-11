@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Volume {
     pub path: PathBuf,
+    pub label: Option<OsString>,
     pub mount_id: Option<u64>,
     pub system: bool,
 }
@@ -40,6 +41,7 @@ pub(super) fn volumes() -> Scan {
             .is_dir()
             .then_some(Volume {
                 path,
+                label: None,
                 mount_id: None,
                 system: false,
             })
@@ -68,7 +70,7 @@ fn scan(usb: &Path, bridge: &Path, table: io::Result<Vec<u8>>) -> Scan {
             continue;
         }
         if on_different_device(&path) && fs::read_dir(&path).is_ok() {
-            mounts.push(Volume { path, mount_id: None, system: false });
+            mounts.push(Volume { path, label: None, mount_id: None, system: false });
         } else if path.starts_with(usb) {
             hidden_mounts = true;
         }
@@ -113,6 +115,7 @@ fn mounted_volumes(bytes: &[u8], usb: &Path, bridge: &Path) -> Vec<Volume> {
             ((within(usb) || within(bridge)) && !matches!(fs_type, b"tmpfs" | b"ramfs"))
                 .then_some(Volume {
                 path,
+                label: None,
                 mount_id: Some(mount_id),
                     system: false,
             })
@@ -227,11 +230,13 @@ mod tests {
             [
                 Volume {
                     path: "/tmp/usb/sda/Mis pelis".into(),
+                    label: None,
                     mount_id: Some(12),
                     system: false,
                 },
                 Volume {
                     path: "/tmp/cineusb-volumes/sda1".into(),
+                    label: None,
                     mount_id: Some(14),
                     system: false,
                 },

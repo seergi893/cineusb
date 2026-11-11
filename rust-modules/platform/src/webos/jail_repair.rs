@@ -33,8 +33,9 @@ const RTKMEM: &str = "/dev/rtkmem";
 #[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
 fn call_hbc(payload: &str) -> Result<String, Failure> {
     let registration = super::ls2::register().map_err(|_| Failure::HbcUnavailable)?;
+    let budget = if payload.contains("--cineusb-delete-folder ") { Duration::from_secs(60) } else { BUDGET };
     registration
-        .call(EXEC_URI, payload, BUDGET)
+        .call(EXEC_URI, payload, budget)
         .map_err(|failure| match failure {
             super::ls2::Fail::Timeout => Failure::Timeout,
             super::ls2::Fail::Setup { .. } => Failure::HbcUnavailable,
@@ -138,15 +139,18 @@ fn usb_unhex(encoded: &str) -> Result<std::ffi::OsString, Failure> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn list_usb_volumes() -> Result<Vec<(u64, std::path::PathBuf)>, Failure> {
+pub type UsbVolume = (u64, std::path::PathBuf, Option<std::ffi::OsString>);
+
+#[cfg(target_os = "linux")]
+pub fn list_usb_volumes() -> Result<Vec<UsbVolume>, Failure> {
     let reply = run_usb_helper("--cineusb-volumes")?;
-    let volumes: Vec<(u64, String)> = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
-    volumes.into_iter().map(|(id, encoded)| {
+    let volumes: Vec<(u64, String, Option<String>)> = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
+    volumes.into_iter().map(|(id, encoded, label)| {
         let path = std::path::PathBuf::from(usb_unhex(&encoded)?);
         if id == 0 || path == Path::new("/tmp/usb") || !path.starts_with("/tmp/usb") {
             return Err(Failure::CommandFailed);
         }
-        Ok((id, path))
+        Ok((id, path, label.as_deref().map(usb_unhex).transpose()?))
     }).collect()
 }
 
@@ -168,8 +172,23 @@ pub fn delete_usb_video(path: &Path, mount_id: u64) -> Result<(), Failure> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn eject_usb_disk(path: &Path, mount_id: u64) -> Result<(), Failure> {
-    usb_mutation("--cineusb-eject", path, mount_id)
+pub fn eject_usb_disk(path: &Path, mount_id: u64) -> Result<(), String> {
+    usb_report("--cineusb-eject", path, mount_id)
+}
+
+#[cfg(target_os = "linux")]
+pub fn delete_usb_folder(path: &Path, mount_id: u64) -> Result<(), String> {
+    usb_report("--cineusb-delete-folder", path, mount_id)
+}
+
+#[cfg(target_os = "linux")]
+fn usb_report(operation: &str, path: &Path, mount_id: u64) -> Result<(), String> {
+    let hex = usb_path_hex(path).map_err(|error| format!("{error:?}"))?;
+    let reply = run_usb_helper(&format!("{operation} {mount_id} '{hex}'")).map_err(|error| format!("{error:?}"))?;
+    match serde_json::from_str::<Option<String>>(&reply).map_err(|error| error.to_string())? {
+        None => Ok(()),
+        Some(error) => Err(error),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -178,9 +197,9 @@ pub fn usb_preferences() -> Result<String, Failure> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn save_usb_preferences(catalan: bool, forced: bool) -> Result<(), Failure> {
+pub fn save_usb_preferences(catalan: bool, forced: bool, spanish_audio: bool) -> Result<(), Failure> {
     let language = if catalan { "ca" } else { "es" };
-    let value = format!("{language} {}", u8::from(forced));
+    let value = format!("{language} {} {}", u8::from(forced), u8::from(spanish_audio));
     if run_usb_helper(&format!("--cineusb-preferences {value}"))? == value {
         Ok(())
     } else {

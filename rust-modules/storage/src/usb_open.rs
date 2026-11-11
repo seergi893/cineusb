@@ -72,7 +72,18 @@ fn require_mount(path: &Path, mount_id: u64) -> io::Result<()> {
 
 pub fn list_volumes() -> io::Result<()> {
     if unsafe { libc::geteuid() } != 0 { return Err(invalid()); }
-    let volumes: Vec<_> = usb_mounts()?.into_iter().map(|(id, path)| (id, hex_path(path.as_os_str()))).collect();
+    let labels: Vec<_> = fs::read_dir("/dev/disk/by-label").into_iter().flatten().filter_map(|entry| {
+        let entry = entry.ok()?;
+        let device = fs::canonicalize(entry.path()).ok()?;
+        Some((device, entry.file_name()))
+    }).collect();
+    let volumes: Vec<_> = usb_mounts()?.into_iter().map(|(id, path)| {
+        let label = path.file_name().and_then(|name| {
+            let device = Path::new("/dev").join(name);
+            labels.iter().find(|(path, _)| *path == device).map(|(_, label)| hex_path(label))
+        });
+        (id, hex_path(path.as_os_str()), label)
+    }).collect();
     serde_json::to_writer(io::stdout().lock(), &volumes)?;
     Ok(())
 }
@@ -141,6 +152,59 @@ fn fd_mount_id(file: &File) -> io::Result<u64> {
         .ok_or_else(|| io::Error::other("cannot verify USB mount for the opened file"))
 }
 
+/// Remove children relative to open directories. Never follow links or cross another mount,
+/// including bind mounts that have the same device number.
+fn remove_tree(parent: &File, name: &std::ffi::OsStr, mount: u64, depth: usize, deadline: std::time::Instant) -> io::Result<()> {
+    if std::time::Instant::now() >= deadline { return Err(io::ErrorKind::TimedOut.into()); }
+    if depth >= 64 { return Err(io::Error::other("USB folder nesting exceeds the supported limit")); }
+    let name = CString::new(name.as_bytes()).map_err(|_| invalid())?;
+    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    let entry = unsafe { File::from_raw_fd(fd) };
+    if fd_mount_id(&entry)? != mount { return Err(invalid()); }
+    let directory = entry.metadata()?.is_dir();
+    if depth == 0 && !directory { return Err(invalid()); }
+    if directory {
+        for child in fs::read_dir(format!("/proc/self/fd/{}", entry.as_raw_fd()))? {
+            remove_tree(&entry, &child?.file_name(), mount, depth + 1, deadline)?;
+        }
+    }
+    let flags = if directory { libc::AT_REMOVEDIR } else { 0 };
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn remove_folder_under(root: &Path, path: &Path, mount: u64) -> io::Result<()> {
+    if path == root { return Err(invalid()); }
+    let parent = open_under(root, path.parent().ok_or_else(invalid)?, true)
+        .or_else(|error| {
+            if path.parent() != Some(root) { return Err(error); }
+            OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(root)
+        })?;
+    if fd_mount_id(&parent)? != mount { return Err(invalid()); }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(50);
+    remove_tree(&parent, path.file_name().ok_or_else(invalid)?, mount, 0, deadline)
+}
+
+pub fn delete_folder(mount_id: &str, path_hex: &str) -> io::Result<()> {
+    if unsafe { libc::geteuid() } != 0 { return Err(invalid()); }
+    let path = decode_path(path_hex)?;
+    let id = mount_id.parse().map_err(|_| invalid())?;
+    let root = usb_mounts()?.into_iter().find_map(|(mount, root)| {
+        (mount == id && path != root && path.starts_with(&root)).then_some(root)
+    }).ok_or_else(invalid)?;
+    // Traverse the full path from /tmp/usb so no parent component can be a symlink.
+    if !path.strip_prefix(&root).map_err(|_| invalid())?.components().all(|c| matches!(c, Component::Normal(_))) {
+        return Err(invalid());
+    }
+    let result = remove_folder_under(Path::new("/tmp/usb"), &path, id);
+    let detail = result.err().map(|error| error.to_string());
+    serde_json::to_writer(io::stdout().lock(), &detail)?;
+    Ok(())
+}
+
 fn delete_under(root: &Path, path: &Path, mount_id: u64) -> io::Result<()> {
     let parent = open_under(root, path.parent().ok_or_else(invalid)?, true)?;
     let name = CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|_| invalid())?;
@@ -178,7 +242,8 @@ fn pdm(method: &str, payload: &serde_json::Value) -> io::Result<serde_json::Valu
     let response: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|_| io::Error::other("webOS did not return USB device status"))?;
     if !output.status.success() || response["returnValue"].as_bool() != Some(true) {
-        return Err(io::Error::other(format!("webOS rejected {method} (code {})", response["errorCode"])));
+        let detail = response["errorText"].as_str().unwrap_or("webOS rejected the request");
+        return Err(io::Error::other(format!("{detail} ({method}, {})", response["errorCode"])));
     }
     Ok(response)
 }
@@ -202,7 +267,7 @@ fn mount_source(line: &[u8]) -> Option<&[u8]> {
     line.split(|byte| *byte == b' ').skip_while(|field| *field != b"-").nth(2)
 }
 
-pub fn eject(mount_id: &str, path_hex: &str) -> io::Result<()> {
+fn eject_checked(mount_id: &str, path_hex: &str) -> io::Result<()> {
     if unsafe { libc::geteuid() } != 0 { return Err(invalid()); }
     let path = decode_path(path_hex)?;
     let id = mount_id.parse().map_err(|_| invalid())?;
@@ -225,10 +290,16 @@ pub fn eject(mount_id: &str, path_hex: &str) -> io::Result<()> {
         let mounted = table.split(|byte| *byte == b'\n').filter_map(mount_source)
             .filter_map(|device| device.strip_prefix(b"/dev/"))
             .any(|device| drives.iter().any(|drive| device == drive.as_bytes()));
-        if !mounted { return io::stdout().write_all(b"CINEUSB_USB_OK"); }
+        if !mounted { return Ok(()); }
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
     Err(io::Error::other("webOS still shows partitions mounted after eject"))
+}
+
+pub fn eject(mount_id: &str, path_hex: &str) -> io::Result<()> {
+    let error = eject_checked(mount_id, path_hex).err().map(|error| error.to_string());
+    serde_json::to_writer(io::stdout().lock(), &error)?;
+    Ok(())
 }
 
 fn folder_entries(folder: &File) -> io::Result<Vec<(String, bool)>> {
@@ -289,6 +360,25 @@ mod tests {
         delete_under(&root, &video, mount).unwrap();
         assert!(!video.exists());
         assert!(link.is_symlink());
+        assert_eq!(fs::read(neighbour).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usb_recursive_delete_removes_only_the_selected_directory() {
+        let root = std::env::temp_dir().join(format!("cineusb-tree-{}", std::process::id()));
+        let selected = root.join("Selected");
+        let nested = selected.join("Nested");
+        fs::create_dir_all(&nested).unwrap();
+        let neighbour = root.join("keep.txt");
+        fs::write(&neighbour, b"keep").unwrap();
+        fs::write(nested.join("notes.txt"), b"delete").unwrap();
+        std::os::unix::fs::symlink(&root, selected.join("outside")).unwrap();
+        let mount = fd_mount_id(&File::open(&root).unwrap()).unwrap();
+        assert!(remove_folder_under(&root, &root, mount).is_err());
+        assert!(remove_folder_under(&root, &selected, mount + 1).is_err());
+        remove_folder_under(&root, &selected, mount).unwrap();
+        assert!(!selected.exists());
         assert_eq!(fs::read(neighbour).unwrap(), b"keep");
         fs::remove_dir_all(root).unwrap();
     }

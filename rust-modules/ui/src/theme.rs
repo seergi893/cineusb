@@ -950,6 +950,8 @@ pub const FAN_NAME_SHADOW: [f32; 4] = with_a(BLACK, 0.50);
 /// Error/destructive signal ink — the wrong-PIN dot flash. Desaturated toward the palette's
 /// warm neutrals so it reads as a state, not an alarm.
 pub const DANGER: [f32; 4] = RED_400;
+/// Filled confirmation button with white text.
+pub const CONTROL_DELETE_FILL: [f32; 4] = rgb8(0xb9, 0x28, 0x38);
 /// How much [`DANGER`] a destructive control's IDLE plate carries — the design's 16%.
 ///
 /// Named rather than written into [`CONTROL_DANGER_IDLE_FILL`] because it is the one number that

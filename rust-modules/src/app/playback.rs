@@ -652,6 +652,11 @@ pub(crate) fn commit_track(
     use plx_appkit::track_menu::TrackCommit;
     match commit {
         TrackCommit::Audio { carried, memo } => {
+            #[cfg(feature = "local-usb")]
+            if plx_media::route::url(ps).starts_with("file:")
+                && plx_play_feed::audio_payload_codec(&carried.codec).is_none() {
+                return;
+            }
             #[cfg(feature = "play-uri")]
             if ps.attempt_view().backend() == Some(plx_media::player::attempt_view::Backend::Uri) {
                 if pa.uri_maps_track(ps, plx_playback_contract::TrackKind::Audio,

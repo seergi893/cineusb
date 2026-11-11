@@ -2073,6 +2073,7 @@ pub fn clear_url(ps: &mut PlaybackSession) {
 
 pub fn set_local_source(ps: &mut PlaybackSession, file: std::fs::File, title: &str,
     audio: Option<CarriedAudio>, forced: Option<(i64, i32)>,
+    item: &plx_data::metadata::PlayingItem,
     caps: std::sync::Arc<plx_platform::devcaps::Caps>) -> bool {
     ps.begin_attempt(caps);
     if !ps.qualify_explicit_feed_source() { return false; }
@@ -2087,8 +2088,11 @@ pub fn set_local_source(ps: &mut PlaybackSession, file: std::fs::File, title: &s
     ps.cur_sub_client_drawable = subtitle_ordinal >= 0;
     ps.sub_mode = if forced.is_some() { SubMode::ForcedOnly } else { SubMode::Off };
     if subtitle_ordinal >= 0 { crate::player::request_subtitle(subtitle_ordinal); }
-    ps.track_ctx = None;
+    let selected_language = item.audio.iter().find(|track| track.selected)
+        .map_or("", |track| track.lang_code.as_str());
+    ps.track_ctx = Some(TrackContext::of_landing(item, selected_language, None));
     ps.local_file = Some(std::sync::Arc::new(file));
+    crate::player::set_audio_track(ps, audio.as_ref().map_or(-1, |track| track.ordinal));
     ps.cur_audio = audio;
     ps.url = "file:///cineusb-video".into();
     unsafe {
@@ -13495,6 +13499,15 @@ pub fn commit_audio_selection(ps: &mut PlaybackSession, audio: CarriedAudio) -> 
 
 /// The route half of [`commit_audio_selection`]: which way the pick reloads, and what it displaces.
 fn commit_audio_route(ps: &mut PlaybackSession, audio: CarriedAudio) -> bool {
+    if ps.local_file.is_some() {
+        let _edit = begin_user_contract_boundary();
+        let (ordinal, codec) = (audio.ordinal, audio.codec.clone());
+        ps.cur_audio = Some(audio);
+        ps.selection_known = true;
+        crate::player::route_fx::request_audio_track(ps, ordinal, &codec);
+        crate::player::note_audio_pick();
+        return true;
+    }
     if forced_direct_play(ps) && !audio_track_direct_plays(ps, &audio.codec, audio.channels, audio.sample_rate) {
         let friendly = plx_data::metadata::friendly_codec(&audio.codec);
         crate::player::log(&format!(
