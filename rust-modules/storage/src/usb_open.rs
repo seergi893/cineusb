@@ -186,7 +186,33 @@ fn volume_identity(device: &Path) -> Option<String> {
             }
         }
     }
-    alias("/dev/disk/by-id").map(|id| format!("disk:{id}"))
+    // On rooted webOS, /dev/disk/by-uuid and blkid may both be missing.
+    // Read the filesystem's own serial number rather than using the unstable
+    // /dev/sdX name, which can change after reconnecting a USB drive.
+    filesystem_serial(&device).or_else(|| alias("/dev/disk/by-id").map(|id| format!("disk:{id}")))
+}
+
+/// Stable, filesystem-scoped identity for volumes with no blkid/udev links.
+/// Only recognized on-disk formats are accepted; never fall back to mount ID,
+/// mount path, or capacity, as those can merge unrelated drives' histories.
+fn filesystem_serial(device: &Path) -> Option<String> {
+    use std::os::unix::fs::FileExt as _;
+    let file = File::open(device).ok()?;
+    let mut sector = [0u8; 512];
+    if file.read_at(&mut sector, 0).ok()? != sector.len() { return None; }
+    let (kind, serial) = if &sector[3..11] == b"NTFS    " {
+        ("ntfs", &sector[0x48..0x50])
+    } else if &sector[3..11] == b"EXFAT   " {
+        ("exfat", &sector[0x64..0x68])
+    } else if &sector[82..90] == b"FAT32   " {
+        ("fat32", &sector[0x43..0x47])
+    } else if &sector[54..62] == b"FAT16   " || &sector[54..62] == b"FAT12   " {
+        ("fat", &sector[0x27..0x2b])
+    } else {
+        return None;
+    };
+    if serial.iter().all(|byte| *byte == 0) { return None; }
+    Some(format!("{kind}:{}", serial.iter().map(|byte| format!("{byte:02x}")).collect::<String>()))
 }
 
 fn fd_mount_id(file: &File) -> io::Result<u64> {
