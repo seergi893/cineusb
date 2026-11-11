@@ -33,9 +33,13 @@ jobs:
       - name: Install USB test dependencies
         run: |
           if ! command -v ffmpeg || ! command -v nasm || ! pkg-config --exists sdl2 SDL2_ttf gl; then
-            sudo sed -Ei 's|https?://[^/ ]*archive\.ubuntu\.com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
-            sudo timeout 120s apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=1 -o Acquire::https::Timeout=10 update
-            sudo timeout 150s apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=1 -o Acquire::https::Timeout=10 install --no-install-recommends -y ffmpeg nasm libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev
+            sources="$RUNNER_TEMP/cineusb-ubuntu.list"
+            for suite in noble noble-updates noble-security; do
+              printf 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu/ %s main universe\n' "$suite"
+            done > "$sources"
+            apt_options=(-o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sourceparts=- -o Acquire::ForceIPv4=true -o Acquire::Retries=1 -o Acquire::https::Timeout=10 -o Acquire::https::Proxy=DIRECT)
+            sudo timeout 120s apt-get "${apt_options[@]}" update
+            sudo timeout 150s apt-get "${apt_options[@]}" install --no-install-recommends -y ffmpeg nasm libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev
           fi
       - name: Test local MKV and MP4 with the bundled FFmpeg configuration
         run: |
