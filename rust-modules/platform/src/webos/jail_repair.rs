@@ -155,14 +155,27 @@ pub fn list_usb_volumes() -> Result<Vec<UsbVolume>, Failure> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn list_usb_folder(path: &Path, mount_id: u64) -> Result<Vec<(std::ffi::OsString, bool)>, Failure> {
+pub type UsbEntry = (std::ffi::OsString, bool, Option<i64>, Option<u64>);
+
+#[cfg(target_os = "linux")]
+pub type UsbVolumeDetails = (Option<(u64, u64, u64, bool)>, Option<String>);
+
+#[cfg(target_os = "linux")]
+pub fn usb_volume_details(path: &Path, mount_id: u64) -> Result<UsbVolumeDetails, Failure> {
+    let hex = usb_path_hex(path)?;
+    let reply = run_usb_helper(&format!("--cineusb-volume-details {mount_id} '{hex}'"))?;
+    serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)
+}
+
+#[cfg(target_os = "linux")]
+pub fn list_usb_folder(path: &Path, mount_id: u64) -> Result<Vec<UsbEntry>, Failure> {
     let hex = usb_path_hex(path)?;
     let reply = run_usb_helper(&format!("--cineusb-list {mount_id} '{hex}'"))?;
-    let entries: Vec<(String, bool)> = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
-    entries.into_iter().map(|(encoded, dir)| {
+    let entries: Vec<(String, bool, Option<i64>, Option<u64>)> = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
+    entries.into_iter().map(|(encoded, dir, modified, size)| {
         let name = usb_unhex(&encoded)?;
         if Path::new(&name).file_name() != Some(name.as_os_str()) { return Err(Failure::CommandFailed); }
-        Ok((name, dir))
+        Ok((name, dir, modified, size))
     }).collect()
 }
 
@@ -192,14 +205,23 @@ fn usb_report(operation: &str, path: &Path, mount_id: u64) -> Result<(), String>
 }
 
 #[cfg(target_os = "linux")]
+pub fn usb_resume(key: &str, position: Option<u64>) -> Result<Option<u64>, Failure> {
+    if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err(Failure::CommandFailed); }
+    let command = position.map_or_else(|| format!("--cineusb-resume {key}"), |seconds| format!("--cineusb-resume {key} {seconds}"));
+    let reply = run_usb_helper(&command)?;
+    if reply.is_empty() { Ok(None) } else { reply.parse().map(Some).map_err(|_| Failure::CommandFailed) }
+}
+
+#[cfg(target_os = "linux")]
 pub fn usb_preferences() -> Result<String, Failure> {
     run_usb_helper("--cineusb-preferences")
 }
 
 #[cfg(target_os = "linux")]
-pub fn save_usb_preferences(catalan: bool, forced: bool, spanish_audio: bool) -> Result<(), Failure> {
-    let language = if catalan { "ca" } else { "es" };
-    let value = format!("{language} {} {}", u8::from(forced), u8::from(spanish_audio));
+pub fn save_usb_preferences(value: &str) -> Result<(), Failure> {
+    if !value.bytes().all(|byte| matches!(byte, b'a' | b'c' | b'e' | b's' | b'0'..=b'2' | b' ')) {
+        return Err(Failure::CommandFailed);
+    }
     if run_usb_helper(&format!("--cineusb-preferences {value}"))? == value {
         Ok(())
     } else {

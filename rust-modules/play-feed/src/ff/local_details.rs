@@ -14,6 +14,8 @@ pub struct LocalVideoDetails {
     pub bytes: Option<u64>,
     pub duration_secs: Option<u64>,
     pub range: Option<VideoRange>,
+    pub hdr10_plus: bool,
+    pub hdr10_base: bool,
 }
 
 /// Inspect a separate read-only descriptor. File size survives an unreadable container header.
@@ -34,9 +36,15 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
                 let dovi = dovi_conf(params).filter(|record| record.dv_profile != 0);
                 let hdr = container_hdr(params);
                 let pq = hdr.trc == 16 && hdr.pri == 9;
-                let plus = dovi.is_none() && (has_dynamic_side_data((*params).coded_side_data, (*params).nb_coded_side_data)
-                    || (pq && sample_hdr10plus(fmt, index, params)));
+                let plus = has_dynamic_side_data((*params).coded_side_data, (*params).nb_coded_side_data)
+                    || (pq && sample_hdr10plus(fmt, index, params));
+                details.hdr10_plus = plus;
                 details.range = video_range(dovi, hdr.trc, hdr.pri, plus);
+                details.hdr10_base = match details.range {
+                    Some(VideoRange::DolbyVisionHdr10 | VideoRange::Hdr10) => true,
+                    Some(VideoRange::Hdr10Plus) => pq,
+                    _ => false,
+                };
             }
         }
         Ok(())

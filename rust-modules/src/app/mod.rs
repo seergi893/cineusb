@@ -547,6 +547,8 @@ unsafe fn run_and_shutdown(app: &mut App) -> ! {
         || app.bridge.controlled_failure().is_some();
     app.glass.sources.borrow_mut().clear();
     let code = i32::from(failed);
+    #[cfg(feature = "local-usb")]
+    local_usb::flush_playback(app);
     run::shutdown(&mut app.player.session, &mut app.adapters.player);
     // The crash-channel guard is the one `Drop` that persists something (it closes the capture
     // backend and removes its database), so it runs here explicitly: nothing drops the `App`.

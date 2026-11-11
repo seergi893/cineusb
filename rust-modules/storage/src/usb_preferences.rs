@@ -53,7 +53,8 @@ fn load(path: &Path) -> io::Result<Option<String>> {
     };
     if !file.metadata()?.is_file() { return Err(invalid()); }
     let mut text = String::new();
-    file.take(7).read_to_string(&mut text)?;
+    file.take(64).read_to_string(&mut text)?;
+    if text.split(' ').count() == 7 { return validate_extended(&text).map(|()| Some(text)); }
     let (lang, options) = text.split_once(' ').ok_or_else(invalid)?;
     let (forced, audio) = options.split_once(' ').unwrap_or((options, "0"));
     record(lang, forced, audio).map(Some)
@@ -72,6 +73,65 @@ fn save(path: &Path, text: &str) -> io::Result<()> {
     if result.is_err() { let _ = fs::remove_file(temp); }
     result?;
     dir.sync_all()
+}
+
+fn validate_extended(text: &str) -> io::Result<()> {
+    let fields: Vec<_> = text.split(' ').collect();
+    let [language, forced, audio, next, accent, cards, sort] = fields.as_slice() else { return Err(invalid()) };
+    record(language, forced, audio)?;
+    if !matches!(*next, "0" | "1") || ![accent, cards, sort].into_iter().all(|value| matches!(*value, "0" | "1" | "2")) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+pub fn write_extended(fields: &[String]) -> io::Result<()> {
+    let text = fields.join(" ");
+    validate_extended(&text)?;
+    save(&preference_file()?, &text)?;
+    io::stdout().write_all(text.as_bytes())
+}
+
+/// Store a separate atomic record per video. Keep the full key to verify the index on read.
+pub fn resume(key: &str, position: Option<&str>) -> io::Result<()> {
+    if key.is_empty() || key.len() > 16_384 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    let hash = key.bytes().fold(0xcbf29ce484222325u64, |state, byte|
+        (state ^ u64::from(byte)).wrapping_mul(0x100000001b3));
+    let prefs = preference_file()?;
+    let install = prefs.file_name().ok_or_else(invalid)?.to_string_lossy();
+    let path = prefs.with_file_name(format!("{install}.resume-{hash:016x}"));
+    if position.is_none() || position == Some("0") {
+        match open_directory(path.parent().ok_or_else(invalid)?, false) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            result => { result?; }
+        }
+    }
+    if let Some(position) = position {
+        let position = position.parse::<u64>().map_err(|_| invalid())?;
+        if position == 0 {
+            match fs::remove_file(path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                result => return result,
+            }
+        }
+        return save(&path, &format!("{key} {position}"));
+    }
+    let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() { return Err(invalid()); }
+    let mut record = String::new();
+    file.take(16_416).read_to_string(&mut record)?;
+    if let Some((saved, position)) = record.split_once(' ') {
+        if saved == key {
+            write!(io::stdout().lock(), "{}", position.parse::<u64>().map_err(|_| invalid())?)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn read() -> io::Result<()> {
@@ -100,6 +160,11 @@ mod tests {
         assert_eq!(load(&path).unwrap().as_deref(), Some("ca 1 0"));
         save(&path, &record("es", "1", "1").unwrap()).unwrap();
         assert_eq!(load(&path).unwrap().as_deref(), Some("es 1 1"));
+        let extended = "ca 1 0 0 2 1 2";
+        assert!(validate_extended(extended).is_ok());
+        save(&path, extended).unwrap();
+        assert_eq!(load(&path).unwrap().as_deref(), Some(extended));
+        assert!(validate_extended("ca 1 0 1 3 0 0").is_err());
         assert!(record("ca", "yes", "0").is_err());
         assert!(record("../es", "0", "0").is_err());
         fs::remove_dir_all(root).unwrap();
