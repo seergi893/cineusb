@@ -333,6 +333,8 @@ impl Browser {
                         if self.folders.last().is_some_and(|folder| !self.scan.volumes.contains(&folder.volume)) {
                             self.folders.clear();
                             self.dialog = None;
+                            self.prepared = None;
+                            self.ready = None;
                             self.selection = None;
                             if !self.status.is_empty() { self.status.push_str(" · "); }
                             self.status.push_str(tr("Se ha retirado el disco USB.", "S’ha retirat el disc USB."));
@@ -803,12 +805,12 @@ impl Browser {
         let title = path.file_stem().or_else(|| path.file_name()).unwrap_or_default().to_string_lossy().into_owned();
         let mount_id = system_mount(volume);
         let spanish = self.settings.spanish_audio;
-        let known_uuid = self.facts.as_ref().filter(|(disk, _)| disk == volume).and_then(|(_, (_, uuid))| uuid.clone());
+        let known_identity = self.facts.as_ref().filter(|(disk, _)| disk == volume).and_then(|(_, (_, identity))| identity.clone());
         let volume = volume.clone();
         self.status = tr("Abriendo vídeo…", "Obrint el vídeo…").into();
         self.request(move || {
             let result = inspect_video(&path, mount_id, spanish).map(|(file, info)| {
-                let identity = known_uuid.or_else(|| volume_facts(&volume).1);
+                let identity = known_identity.or_else(|| volume_facts(&volume).1);
                 let key = identity.and_then(|identity| progress_key(&identity, &volume, &path, &file));
                 let saved = key.as_ref().and_then(|key| resume_record(key, None).ok().flatten()).unwrap_or(0);
                 let resume = if offer_resume && continuity::resumable(saved, info.duration_secs) { saved } else { 0 };
@@ -1601,7 +1603,7 @@ fn local_playing_item(info: &plx_play_feed::LocalMedia, dovi: plx_data::metadata
         // the ordinary subtitle-selection path from issuing Plex PUT requests.
         sid: plx_plex::plex::ServerId::from_raw(0),
         rk: String::new(), show_rk: String::new(), kind: String::new(),
-        duration_ms: info.duration_secs.and_then(|seconds| i64::try_from(seconds.saturating_mul(1000)).ok()), audio, subs, video_fps: info.fps,
+        duration_ms: info.duration_secs.and_then(|seconds| seconds.checked_mul(1000)), audio, subs, video_fps: info.fps,
         width: i64::from(info.width), height: i64::from(info.height), bitrate: 0,
         dovi, markers: Vec::new(), chapters: Vec::new(), hdr: dovi.present,
     }
