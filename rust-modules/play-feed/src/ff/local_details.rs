@@ -12,6 +12,7 @@ pub enum VideoRange {
 #[derive(Clone, Copy, Default)]
 pub struct LocalVideoDetails {
     pub bytes: Option<u64>,
+    pub resolution: Option<(u32, u32)>,
     pub duration_secs: Option<u64>,
     pub range: Option<VideoRange>,
     pub hdr10_plus: bool,
@@ -33,6 +34,8 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
             let index = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, std::ptr::null_mut(), 0);
             if index >= 0 {
                 let params = stream_codecpar(*(*fmt).streams.add(index as usize));
+                let (width, height) = ((*params).width, (*params).height);
+                if width > 0 && height > 0 { details.resolution = Some((width as u32, height as u32)); }
                 let dovi = dovi_conf(params).filter(|record| record.dv_profile != 0);
                 let hdr = container_hdr(params);
                 let pq = hdr.trc == 16 && hdr.pri == 9;

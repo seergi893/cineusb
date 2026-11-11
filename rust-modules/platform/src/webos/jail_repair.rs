@@ -205,6 +205,13 @@ fn usb_report(operation: &str, path: &Path, mount_id: u64) -> Result<(), String>
 }
 
 #[cfg(target_os = "linux")]
+pub fn usb_history(prefix: &str) -> Result<std::collections::BTreeMap<String, u64>, Failure> {
+    if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err(Failure::CommandFailed); }
+    let reply = run_usb_helper(&format!("--cineusb-history {prefix}"))?;
+    serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)
+}
+
+#[cfg(target_os = "linux")]
 pub fn usb_resume(key: &str, position: Option<u64>) -> Result<Option<u64>, Failure> {
     if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err(Failure::CommandFailed); }
     let command = position.map_or_else(|| format!("--cineusb-resume {key}"), |seconds| format!("--cineusb-resume {key} {seconds}"));

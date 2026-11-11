@@ -2070,6 +2070,14 @@ fn pointer_on_bar(app: &App, x: f32, y: f32) -> bool {
     app.pages.input.hit.top_at(x, y).is_some_and(|stop| stop.key.elem >= plx_ui::dispatch::STRIP_BASE)
 }
 
+fn playback_has_ended(app: &App) -> bool {
+    #[cfg(feature = "local-usb")]
+    if super::local_usb::playing_local(app) {
+        return plx_media::player::local_eos_confirmed(&app.player.session);
+    }
+    plx_media::player::ended(&app.player.session) == Some(true)
+}
+
 pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         #[cfg(feature = "play-feed")]
         park_on_decoder_release(app);
@@ -2195,7 +2203,7 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // show has another episode queued and the Next episode preference is not Off, else leave
         // the player (back to the detail page or home, whichever is behind), instead of freezing
         // on the last frame.
-        if playback_may_run(app) && super::bridge::player(&app.pages).is_some() && plx_media::player::ended(&app.player.session) == Some(true) {
+        if playback_may_run(app) && super::bridge::player(&app.pages).is_some() && playback_has_ended(app) {
             #[cfg(feature = "local-usb")]
             super::local_usb::playback_completed(app);
             let handed_off_to_up_next = finish_playback(&mut app.player,
@@ -3231,7 +3239,13 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                         // only, alpha untouched). 1.0 for SDR, a re-encode, or the 100% default.
                         let source_hdr = app.bridge.metadata_view().playing().is_some_and(|p| p.hdr);
                         let gain = plx_media::route::overlay_gain(&app.player.session, source_hdr);
-                        plx_ui::output_gain(gain, || app.pages.draw(&mut app.bridge, true));
+                        plx_ui::output_gain(gain, || {
+                            app.pages.draw(&mut app.bridge, true);
+                            #[cfg(feature = "local-usb")]
+                            if matches!(hud_policy, plx_screens::player::HudPolicy::Normal) {
+                                super::local_usb::draw_finish_estimate(app, fr.now);
+                            }
+                        });
                         // Skipped rather than drawn while one of the player's own panels is
                         // up — `More` carries this very panel's own toggle, and the panel's
                         // content routinely spans wide enough to reach any of their bottom-right

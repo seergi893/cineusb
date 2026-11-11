@@ -758,6 +758,14 @@ pub fn local_hour() -> Option<i32> {
     Some(civil_time(libc::time_t::try_from(now_unix_seconds()?).ok()?)?.tm_hour)
 }
 
+/// Wall-clock estimate in the TV timezone, rounded up to the displayed minute.
+pub fn local_finish_time(seconds_remaining: u64) -> Option<(i64, i32, i32)> {
+    let end = now_unix_seconds()?.checked_add(i64::try_from(seconds_remaining).ok()?)?;
+    let minute = end.checked_add(59)? / 60;
+    let time = civil_time(libc::time_t::try_from(minute.checked_mul(60)?).ok()?)?;
+    Some((minute, time.tm_hour, time.tm_min))
+}
+
 fn now_unix_seconds() -> Option<i64> {
     let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     i64::try_from(seconds).ok()

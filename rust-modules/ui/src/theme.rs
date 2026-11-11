@@ -1509,3 +1509,8 @@ pub const RUNTIME_WARNING: [f32; 4] = PURPLE_700;
 pub fn usb_accent(index: usize) -> [f32; 4] {
     [ACCENT, rgb8(0x91, 0xbc, 0xff), rgb8(0xc2, 0xc6, 0xcc)][index]
 }
+
+/// Watched USB cards use green independently of the chosen accent.
+pub const USB_WATCHED_TOP: [f32; 4] = rgb8(0x16, 0x3b, 0x2c);
+pub const USB_WATCHED_BOTTOM: [f32; 4] = rgb8(0x20, 0x54, 0x3d);
+pub const USB_WATCHED_EDGE: [f32; 4] = rgb8(0x42, 0xc9, 0x85);

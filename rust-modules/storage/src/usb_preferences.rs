@@ -54,7 +54,7 @@ fn load(path: &Path) -> io::Result<Option<String>> {
     if !file.metadata()?.is_file() { return Err(invalid()); }
     let mut text = String::new();
     file.take(64).read_to_string(&mut text)?;
-    if text.split(' ').count() == 7 { return validate_extended(&text).map(|()| Some(text)); }
+    if matches!(text.split(' ').count(), 7 | 8) { return validate_extended(&text).map(|()| Some(text)); }
     let (lang, options) = text.split_once(' ').ok_or_else(invalid)?;
     let (forced, audio) = options.split_once(' ').unwrap_or((options, "0"));
     record(lang, forced, audio).map(Some)
@@ -77,8 +77,9 @@ fn save(path: &Path, text: &str) -> io::Result<()> {
 
 fn validate_extended(text: &str) -> io::Result<()> {
     let fields: Vec<_> = text.split(' ').collect();
-    let [language, forced, audio, next, accent, cards, sort] = fields.as_slice() else { return Err(invalid()) };
+    let [language, forced, audio, next, accent, cards, sort, tail @ ..] = fields.as_slice() else { return Err(invalid()) };
     record(language, forced, audio)?;
+    if !matches!(tail, [] | ["0" | "1"]) { return Err(invalid()); }
     if !matches!(*next, "0" | "1") || ![accent, cards, sort].into_iter().all(|value| matches!(*value, "0" | "1" | "2")) {
         return Err(invalid());
     }
@@ -93,6 +94,47 @@ pub fn write_extended(fields: &[String]) -> io::Result<()> {
 }
 
 /// Store a separate atomic record per video. Keep the full key to verify the index on read.
+/// Return records for one volume. The prefix is the hex-encoded device identity plus NUL.
+pub fn history(prefix: &str) -> io::Result<()> {
+    if prefix.len() > 1024 || prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    let prefs = preference_file()?;
+    let root = prefs.parent().ok_or_else(invalid)?;
+    let install = prefs.file_name().ok_or_else(invalid)?.to_string_lossy();
+    let file_prefix = format!("{install}.resume-");
+    match open_directory(root, false) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return serde_json::to_writer(io::stdout().lock(), &std::collections::BTreeMap::<String, u64>::new()).map_err(Into::into),
+        result => { result?; }
+    }
+    let mut records = std::collections::BTreeMap::new();
+    let mut bytes = 0usize;
+    for entry in fs::read_dir(root)?.filter_map(Result::ok) {
+        if !entry.file_name().to_string_lossy().starts_with(&file_prefix) { continue; }
+        let Some((key, position)) = read_resume(&entry.path()).ok().flatten() else { continue };
+        if key.starts_with(prefix) {
+            bytes += key.len() + 30;
+            if bytes > 512 * 1024 { return Err(io::Error::other("USB history exceeds reply limit")); }
+            records.insert(key, position);
+        }
+    }
+    serde_json::to_writer(io::stdout().lock(), &records)?;
+    Ok(())
+}
+
+fn read_resume(path: &Path) -> io::Result<Option<(String, u64)>> {
+    let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() { return Err(invalid()); }
+    let mut record = String::new();
+    file.take(16_416).read_to_string(&mut record)?;
+    let (key, position) = record.split_once(' ').ok_or_else(invalid)?;
+    Ok(Some((key.into(), position.parse().map_err(|_| invalid())?)))
+}
+
 pub fn resume(key: &str, position: Option<&str>) -> io::Result<()> {
     if key.is_empty() || key.len() > 16_384 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid());
@@ -118,18 +160,8 @@ pub fn resume(key: &str, position: Option<&str>) -> io::Result<()> {
         }
         return save(&path, &format!("{key} {position}"));
     }
-    let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if !file.metadata()?.is_file() { return Err(invalid()); }
-    let mut record = String::new();
-    file.take(16_416).read_to_string(&mut record)?;
-    if let Some((saved, position)) = record.split_once(' ') {
-        if saved == key {
-            write!(io::stdout().lock(), "{}", position.parse::<u64>().map_err(|_| invalid())?)?;
-        }
+    if let Some((saved, position)) = read_resume(&path)? {
+        if saved == key { write!(io::stdout().lock(), "{position}")?; }
     }
     Ok(())
 }

@@ -42,10 +42,11 @@ fn main() {
                 ("--cineusb-delete", [id, path]) => Some(usb_open::delete(id, path)),
                 ("--cineusb-delete-folder", [id, path]) => Some(usb_open::delete_folder(id, path)),
                 ("--cineusb-eject", [id, path]) => Some(usb_open::eject(id, path)),
+                ("--cineusb-history", [prefix]) => Some(usb_preferences::history(prefix)),
                 ("--cineusb-resume", [key]) => Some(usb_preferences::resume(key, None)),
                 ("--cineusb-resume", [key, position]) => Some(usb_preferences::resume(key, Some(position))),
                 ("--cineusb-preferences", []) => Some(usb_preferences::read()),
-                ("--cineusb-preferences", fields) if fields.len() == 7 => Some(usb_preferences::write_extended(fields)),
+                ("--cineusb-preferences", fields) if matches!(fields.len(), 7 | 8) => Some(usb_preferences::write_extended(fields)),
                 ("--cineusb-preferences", [language, forced, audio]) => Some(usb_preferences::write(language, forced, audio)),
                 ("--cineusb-open" | "--cineusb-volumes" | "--cineusb-list" | "--cineusb-delete" | "--cineusb-eject", _) => {
                     Some(Err(std::io::Error::other("invalid CineUSB USB request")))
