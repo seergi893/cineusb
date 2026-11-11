@@ -499,6 +499,27 @@ mod tests {
     }
 
     #[test]
+    fn disk_serial_is_stable_without_udev_or_blkid() {
+        let root = std::env::temp_dir().join(format!("cineusb-serial-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let a = root.join("sdb1");
+        let b = root.join("sdc1");
+        let mut ntfs = [0u8; 512];
+        ntfs[3..11].copy_from_slice(b"NTFS    ");
+        ntfs[0x48..0x50].copy_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
+        fs::write(&a, ntfs).unwrap();
+        fs::write(&b, ntfs).unwrap();
+        assert_eq!(filesystem_serial(&a).as_deref(), Some("ntfs:f0debc9a78563412"));
+        assert_eq!(filesystem_serial(&a), filesystem_serial(&b));
+        ntfs[0x48] = 0x42;
+        fs::write(&b, ntfs).unwrap();
+        assert_ne!(filesystem_serial(&a), filesystem_serial(&b));
+        fs::write(&b, [0u8; 512]).unwrap();
+        assert!(filesystem_serial(&b).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn system_mount_list_ignores_the_stale_sda1_placeholder() {
         let table = b"45 54 0:20 / /tmp/usb/sda/sda1 rw - tmpfs tmpfs rw\n365 54 8:17 / /tmp/usb/sdb/sdb1 rw,relatime - tntfs /dev/sdb1 rw\n";
         assert_eq!(live_mounts(table), [(365, PathBuf::from("/tmp/usb/sdb/sdb1"))]);
