@@ -7374,6 +7374,7 @@ mod cineusb_descriptor_tests {
             assert_eq!(details.bytes, Some(file.metadata().unwrap().len()));
             assert_eq!(details.duration_secs, Some(1));
             assert_eq!(details.range, Some(VideoRange::Sdr));
+            assert_eq!(details.resolution, Some((160, 90)));
             unsafe {
                 let mut fmt = std::ptr::null_mut();
                 assert_eq!(open_local_format(&file, &mut fmt), 0, "reopen {name}");

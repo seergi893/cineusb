@@ -610,7 +610,8 @@ impl Browser {
     fn remove_history_under(&mut self, volume: &Volume, path: &std::path::Path) {
         let Some(identity) = self.identity(volume) else { return };
         let Some(base) = path_key(identity, volume, path) else { return };
-        if let Some(records) = self.history.get_mut(&history_prefix(identity)) {
+        let prefix = history_prefix(identity);
+        if let Some(records) = self.history.get_mut(&prefix) {
             records.retain(|key, _| !history_matches(key, &base));
         }
         self.queued_progress.retain(|key, _| !history_matches(key, &base));
@@ -848,6 +849,7 @@ impl Browser {
 
     fn choose_option(&mut self) {
         if self.settings_job.is_some() { return; }
+        self.dialog_started = None;
         match self.dialog.take() {
             Some(Dialog::Settings) => {
                 self.status.clear();
@@ -2160,16 +2162,22 @@ pub(super) fn observe_playback(app: &mut App) {
         let resumed = !paused && playing.paused;
         playing.paused = paused;
         let now = Instant::now();
-        if resumed || app.usb.next_estimate.is_none_or(|next| now >= next) {
+        if resumed || just_paused || app.usb.next_estimate.is_none_or(|next| now >= next) {
             app.usb.next_estimate = Some(now + Duration::from_secs(1));
-            if !paused || just_paused || app.usb.estimate.is_none() {
+            if !paused || just_paused || app.usb.estimate.is_none() || plx_media::player::seek_pending(&app.player.session).is_some() {
                 let position = plx_media::player::intended_pos_ns(&app.player.session);
                 let estimate = plx_media::player::duration_ns(&app.player.session).and_then(|duration|
                     remaining_wall_seconds(position, duration, plx_media::player::applied_rate(&app.player.session).unwrap_or(1000)))
                     .and_then(i18n::local_finish_time);
                 if app.usb.estimate.as_ref().map(|(minute, _)| *minute) != estimate.map(|(minute, _, _)| minute) {
-                    app.usb.estimate = estimate.map(|(minute, hour, min)| (minute,
-                        format!("{} {hour:02}:{min:02}", tr("Termina a las", "Acaba a les"))));
+                    app.usb.estimate = estimate.map(|(minute, hour, min)| {
+                        let clock = match i18n::current().clock() {
+                            i18n::Clock::H12 => format!("{}:{min:02} {}", (hour + 11) % 12 + 1,
+                                if hour < 12 { "a. m." } else { "p. m." }),
+                            _ => format!("{hour:02}:{min:02}"),
+                        };
+                        (minute, format!("{} {clock}", tr("Termina a las", "Acaba a les")))
+                    });
                     plx_machine::idle::invalidate();
                 }
             }

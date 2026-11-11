@@ -107,8 +107,13 @@ pub fn clear_history(base: &str) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         result => result?,
     };
+    clear_history_in(root, &file_prefix, base)?;
+    dir.sync_all()
+}
+
+fn clear_history_in(root: &Path, file_prefix: &str, base: &str) -> io::Result<()> {
     for entry in fs::read_dir(root)?.filter_map(Result::ok) {
-        if !entry.file_name().to_string_lossy().starts_with(&file_prefix) { continue; }
+        if !entry.file_name().to_string_lossy().starts_with(file_prefix) { continue; }
         let path = entry.path();
         let Some((key, _)) = read_resume(&path).ok().flatten() else { continue };
         if key.strip_prefix(base).is_some_and(|suffix| suffix.starts_with("00") || suffix.starts_with("2f")) {
@@ -118,7 +123,7 @@ pub fn clear_history(base: &str) -> io::Result<()> {
             }
         }
     }
-    dir.sync_all()
+    Ok(())
 }
 
 /// Return records for one volume. The prefix is the hex-encoded device identity plus NUL.
@@ -209,6 +214,28 @@ pub fn write(language: &str, forced: &str, audio: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usb_history_preserves_another_partition_and_install() {
+        let root = std::env::temp_dir().join(format!("cineusb-history-{}", std::process::id()));
+        let favorite = root.join("app.resume-one");
+        let nested = root.join("app.resume-two");
+        let sibling = root.join("app.resume-three");
+        let other_partition = root.join("app.resume-four");
+        let other_install = root.join("other.resume-five");
+        for (path, record) in [
+            (&favorite, "61004100 18446744073709551614"),
+            (&nested, "6100412f4200 18446744073709551615"),
+            (&sibling, "6100414200 10"),
+            (&other_partition, "62004100 60"),
+            (&other_install, "61004100 120"),
+        ] { save(path, record).unwrap(); }
+        assert_eq!(read_resume(&nested).unwrap(), Some(("6100412f4200".into(), u64::MAX)));
+        clear_history_in(&root, "app.resume-", "610041").unwrap();
+        assert!(!favorite.exists() && !nested.exists());
+        assert!(sibling.exists() && other_partition.exists() && other_install.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn usb_preferences_round_trip_preserves_both_settings() {
