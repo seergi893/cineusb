@@ -25,16 +25,17 @@ concurrency:
 jobs:
   usb-smoke:
     if: github.repository == 'seergi893/cineusb'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/rust-toolchain
       - name: Install USB test dependencies
         run: |
-          sudo sed -i 's|http://ports.ubuntu.com/ubuntu-ports|https://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=20 update
-          sudo apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=20 install -y ffmpeg libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev
+          if ! command -v ffmpeg || ! pkg-config --exists sdl2 SDL2_ttf gl; then
+            sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 update
+            sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 install -y ffmpeg libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev
+          fi
       - name: Test local MKV and MP4 with the bundled FFmpeg configuration
         run: |
           HOST=1 RELEASE=1 ci/build-ffmpeg.sh
