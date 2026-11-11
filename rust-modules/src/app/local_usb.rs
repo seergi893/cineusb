@@ -23,24 +23,33 @@ use plx_platform::i18n::{self, Language, Preference};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-const TOP: f32 = 338.0;
-const COLS: usize = poster_grid::COLS;
-const GRID: Geom = Geom::of(COLS, plx_ui::consts::MARGIN_X, &STYLE);
+const TOP: f32 = 257.0;
+const GRID_BOTTOM: f32 = 965.0;
+const GRID_WIDTH: f32 = 1920.0 - 2.0 * plx_ui::consts::MARGIN_X;
+
+fn grid_geometry(len: usize) -> Geom {
+    let rows = len.max(1).div_ceil(8);
+    let cols = len.max(1).div_ceil(rows);
+    let gap = 22.0;
+    let width = ((GRID_WIDTH - (cols - 1) as f32 * gap) / cols as f32).min(214.0);
+    Geom { cols, left: plx_ui::consts::MARGIN_X, w: width, h: width * 1.5, gap, value_line: false }
+}
 
 fn tr(es: &'static str, ca: &'static str) -> &'static str {
     if i18n::current().language() == Language::Ca { ca } else { es }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Action { Settings, Select, DeleteFolders, Eject }
+enum Action { Library, Select, DeleteFolders, Settings, Eject }
 
 enum Mutation { Delete, Eject }
 
-const ACTIONS: [(Action, Rect); 4] = [
-    (Action::Settings, Rect::new(758.0, 46.0, 150.0, 56.0)),
-    (Action::Select, Rect::new(924.0, 46.0, 246.0, 56.0)),
-    (Action::DeleteFolders, Rect::new(1186.0, 46.0, 176.0, 56.0)),
-    (Action::Eject, Rect::new(1378.0, 46.0, 446.0, 56.0)),
+const ACTIONS: [(Action, Rect); 5] = [
+    (Action::Library, Rect::new(718.0, 45.0, 190.0, 50.0)),
+    (Action::Select, Rect::new(924.0, 45.0, 240.0, 50.0)),
+    (Action::DeleteFolders, Rect::new(1180.0, 45.0, 174.0, 50.0)),
+    (Action::Settings, Rect::new(1370.0, 45.0, 166.0, 50.0)),
+    (Action::Eject, Rect::new(1552.0, 45.0, 272.0, 50.0)),
 ];
 const PANEL: Rect = Rect::new(510.0, 292.0, 900.0, 496.0);
 const OPTIONS: [Rect; 2] = [
@@ -92,6 +101,12 @@ enum DiskResult {
     Eject(Volume, Result<(), String>),
 }
 
+struct DetailsRequest {
+    volume: Volume,
+    path: PathBuf,
+    reply: Receiver<plx_play_feed::LocalVideoDetails>,
+}
+
 pub(super) struct Browser {
     scan: Scan,
     folders: Vec<Folder>,
@@ -111,6 +126,8 @@ pub(super) struct Browser {
     settings_started: bool,
     pending: Option<Receiver<DiskResult>>,
     scanning: Option<Receiver<Scan>>,
+    details_job: Option<DetailsRequest>,
+    details: Option<(Volume, PathBuf, plx_play_feed::LocalVideoDetails)>,
     next_scan: Instant,
     last_tick: Instant,
 }
@@ -126,6 +143,7 @@ impl Browser {
             settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false },
             settings_job: None, settings_started: false,
             pending: None, scanning: None, next_scan: now, last_tick: now,
+            details_job: None, details: None,
         }
     }
 
@@ -271,6 +289,7 @@ impl Browser {
                 }
             }
         }
+        changed |= self.update_video_details();
         if self.action.is_some_and(|action| !self.action_available(action)) {
             self.action = None;
             changed = true;
@@ -290,8 +309,52 @@ impl Browser {
     }
 
     fn scroll_target(&self) -> f32 {
-        let row = self.selected / COLS;
-        (row as f32 * GRID.pitch() + GRID.h - 570.0).max(0.0)
+        let grid = grid_geometry(self.len());
+        let row = self.selected / grid.cols;
+        let viewport = GRID_BOTTOM - TOP - 22.0;
+        let top = row as f32 * grid.pitch();
+        self.scroll.pos.clamp((top + grid.h - viewport).max(0.0), top)
+    }
+
+    fn tile_rect(&self, index: usize) -> Rect {
+        let mut grid = grid_geometry(self.len());
+        let first = index / grid.cols * grid.cols;
+        let count = self.len().saturating_sub(first).min(grid.cols).max(1);
+        let row_width = count as f32 * grid.w + (count - 1) as f32 * grid.gap;
+        grid.left = (1920.0 - row_width) * 0.5;
+        poster_grid::cell_in(&grid, index, TOP, self.scroll.pos, &[])
+    }
+
+    fn update_video_details(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(job) = &self.details_job {
+            match job.reply.try_recv() {
+                Err(TryRecvError::Empty) => return false,
+                result => {
+                    self.details = Some((job.volume.clone(), job.path.clone(), result.unwrap_or_default()));
+                    self.details_job = None;
+                    changed = true;
+                }
+            }
+        }
+        let Some(Dialog::Video { volume, path }) = self.dialog.as_ref() else { return changed };
+        if self.details.as_ref().is_some_and(|(disk, file, _)| disk == volume && file == path) {
+            return changed;
+        }
+        let mount = system_mount(volume);
+        let file = path.clone();
+        let (send, reply) = mpsc::sync_channel(1);
+        if plx_base::task::spawn_off_frame("cineusb-video-details", move |_| {
+            let details = open_for_details(&file, mount).map_or_else(|_| Default::default(), |file| {
+                plx_play_feed::probe_local_details(&file)
+            });
+            let _ = send.send(details);
+        }) {
+            self.details_job = Some(DetailsRequest { volume: volume.clone(), path: path.clone(), reply });
+        } else {
+            self.details = Some((volume.clone(), path.clone(), Default::default()));
+        }
+        changed
     }
 
     fn update_settings(&mut self) -> bool {
@@ -357,6 +420,7 @@ impl Browser {
 
     fn action_available(&self, action: Action) -> bool {
         match action {
+            Action::Library => self.selection.is_none() && self.volume().is_some(),
             Action::Settings => self.selection.is_none(),
             Action::Select => self.selection.is_some() || self.folders.last().is_some_and(|folder| {
                 system_mount(&folder.volume).is_some() && folder.entries.iter().any(|entry| entry.kind == Kind::Folder)
@@ -371,6 +435,10 @@ impl Browser {
         self.option = 0;
         self.status.clear();
         self.dialog = match action {
+            Action::Library => {
+                self.open_library_root();
+                None
+            }
             Action::Settings => Some(Dialog::Settings),
             Action::Eject => self.volume().cloned().map(Dialog::Eject),
             Action::Select => {
@@ -380,6 +448,19 @@ impl Browser {
             }
             Action::DeleteFolders => Some(Dialog::DeleteFolders),
         };
+    }
+
+    fn open_library_root(&mut self) {
+        self.action = None;
+        if self.folders.is_empty() {
+            if let Some(volume) = self.volume().cloned() {
+                self.open_folder(volume.clone(), volume.path.clone());
+            }
+        } else if self.folders.len() > 1 {
+            self.folders.truncate(1);
+            let selected = self.folders[0].selected;
+            self.select(selected, true);
+        }
     }
 
     fn choose_option(&mut self) {
@@ -506,6 +587,7 @@ impl Browser {
             match entry.kind {
                 Kind::Folder => self.open_folder(folder.volume.clone(), path),
                 Kind::Video => {
+                    self.details = None;
                     self.dialog = Some(Dialog::Video { volume: folder.volume.clone(), path });
                     self.option = 0;
                 }
@@ -585,10 +667,10 @@ impl Browser {
         // browser has no shared hit-map. Pick the clicked card when possible,
         // or activate the focused card (the physical OK button may arrive with
         // the pointer parked outside the cards).
-        if let Some(index) = (0..self.len()).find(|&index| {
-            let rect = poster_grid::cell_in(&GRID, index, TOP, self.scroll.pos, &[]);
-            x >= rect.x && x < rect.x + rect.w
-                && y >= rect.y && y < rect.y + rect.h
+        let grid = grid_geometry(self.len());
+        let visible = poster_grid::visible_in(&grid, self.len(), TOP, self.scroll.pos);
+        if let Some(index) = visible.into_iter().find(|&index| {
+            y >= TOP - 14.0 && y < GRID_BOTTOM && hit(self.tile_rect(index), x, y)
         }) {
             self.select(index, false);
             self.action = None;
@@ -630,8 +712,8 @@ impl Browser {
             return;
         }
         let dir = match key {
-            Key::Up if self.selected < COLS => {
-                self.action = if self.selection.is_some() { Some(Action::Select) } else { Some(Action::Settings) };
+            Key::Up if self.selected < grid_geometry(self.len()).cols => {
+                self.action = ACTIONS.iter().find(|(action, _)| self.action_available(*action)).map(|(action, _)| *action);
                 return;
             }
             Key::Up => Dir::Up,
@@ -642,7 +724,7 @@ impl Browser {
             Key::Back if !repeat => return self.back(),
             _ => return,
         };
-        if let Some(index) = poster_grid::neighbour(self.selected, self.len(), COLS, dir) {
+        if let Some(index) = poster_grid::neighbour(self.selected, self.len(), grid_geometry(self.len()).cols, dir) {
             self.select(index, false);
         }
     }
@@ -670,17 +752,21 @@ impl Browser {
         let p = Painter::root().alpha(plx_ui::nav::page_alpha());
         let x = plx_ui::consts::MARGIN_X;
         let width = 1920.0 - 2.0 * x;
-        draw_line(p, "CineUSB  ·  Biblioteca local", Rect::new(x, 56.0, 720.0, 34.0), theme::size::CAPTION, true);
+        draw_line(p, "CineUSB", Rect::new(x, 45.0, 460.0, 50.0), theme::size::HEADLINE, true);
         for (action, rect) in ACTIONS {
             if self.action_available(action) {
                 let label = match action {
+                    Action::Library => tr("Biblioteca", "Biblioteca"),
                     Action::Settings => tr("Ajustes", "Ajustos"),
                     Action::Select if self.selection.is_some() => tr("Cancelar selección", "Cancel·la la selecció"),
                     Action::Select => tr("Seleccionar", "Selecciona"),
                     Action::DeleteFolders => tr("Eliminar", "Esborra"),
-                    Action::Eject => tr("Desconectar USB de forma segura", "Expulsa l’USB amb seguretat"),
+                    Action::Eject => tr("Expulsar USB", "Expulsa l’USB"),
                 };
                 let glyph = match action {
+                    Action::Library => Some(Glyph::Shared(Icon::Collection)),
+                    Action::Select => Some(Glyph::Shared(Icon::CheckCircleFill)),
+                    Action::Settings => Some(Glyph::Settings),
                     Action::Eject => Some(Glyph::Eject),
                     Action::DeleteFolders => Some(Glyph::Trash),
                     _ => None,
@@ -706,13 +792,13 @@ impl Browser {
         } else {
             focused.as_ref().map_or(("Biblioteca USB", "Carpeta"), |(title, kind, _)| (title.as_str(), *kind))
         };
-        draw_line(p, title, Rect::new(x, 108.0, width, 96.0), theme::size::HERO, true);
+        draw_line(p, title, Rect::new(x, 104.0, width, 66.0), theme::size::HERO, true);
         let count = self.selection.as_ref().map(|marked| {
             format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"))
         });
-        draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, 206.0, width, 42.0), theme::size::BODY, false);
         let section = breadcrumb.as_deref().unwrap_or(tr("Discos conectados", "Discos connectats"));
-        draw_line(p, section, Rect::new(x, 272.0, width, 48.0), theme::size::HEADLINE, true);
+        draw_line(p, section, Rect::new(x, 181.0, width * 0.68, 45.0), theme::size::BODY, false);
+        draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x + width * 0.7, 181.0, width * 0.3, 45.0), theme::size::CAPTION, false);
 
         if self.len() == 0 {
             let message = if self.folders.last().is_some() {
@@ -726,22 +812,39 @@ impl Browser {
             };
             draw_line(p, message, Rect::new(x, 380.0, width, 70.0), theme::size::BODY, false);
         } else {
-            p.clip(Rect::new(0.0, TOP - 18.0, 1920.0, 626.0));
-            let cells = poster_grid::visible_in(&GRID, self.len(), TOP, self.scroll.pos);
+            p.clip(Rect::new(0.0, TOP - 14.0, 1920.0, GRID_BOTTOM - TOP + 14.0));
+            let grid = grid_geometry(self.len());
+            let cells = poster_grid::visible_in(&grid, self.len(), TOP, self.scroll.pos);
             for i in cells.filter(|index| *index != self.selected) { self.draw_tile(p, i, false); }
             self.draw_tile(p, self.selected, true);
             p.clip_clear();
         }
-        let hint = if !self.status.is_empty() { &self.status }
-        else if self.selection.is_some() {
-            tr("OK Marcar carpeta    ·    ↑ Acciones    ·    Atrás Cancelar selección",
-                "OK Marca la carpeta    ·    ↑ Accions    ·    Enrere Cancel·la la selecció")
+        if let Some(dialog) = &self.dialog {
+            self.draw_dialog(p, dialog);
+        } else if !self.status.is_empty() {
+            draw_line(p, &self.status, Rect::new(x, 990.0, width, 48.0), theme::size::CAPTION, false);
         } else {
-            tr("↑ Acciones    ·    OK Abrir    ·    Atrás Volver",
-                "↑ Accions    ·    OK Obre    ·    Enrere Torna")
-        };
-        draw_line(p, hint, Rect::new(x, 990.0, width, 48.0), theme::size::CAPTION, false);
-        if let Some(dialog) = &self.dialog { self.draw_dialog(p, dialog); }
+            let primary = if self.selection.is_some() && self.action.is_none() {
+                tr("Marcar", "Marca")
+            } else if self.action.is_some() {
+                tr("Elegir", "Tria")
+            } else {
+                tr("Abrir", "Obre")
+            };
+            let back = if self.selection.is_some() && self.action.is_none() {
+                tr("Cancelar selección", "Cancel·la la selecció")
+            } else {
+                tr("Volver", "Torna")
+            };
+            let mut cursor = x;
+            if self.action.is_none() {
+                cursor = draw_hint(p, cursor, HintKey::Icon(Icon::ChevronUp), tr("Barra superior", "Barra superior"));
+            } else {
+                cursor = draw_hint(p, cursor, HintKey::Icon(Icon::ChevronDown), tr("Tarjetas", "Targetes"));
+            }
+            cursor = draw_hint(p, cursor, HintKey::Ok, primary);
+            draw_hint(p, cursor, HintKey::Icon(Icon::ChevronLeft), back);
+        }
     }
 
     fn draw_dialog(&self, p: Painter, dialog: &Dialog) {
@@ -765,7 +868,7 @@ impl Browser {
                 [tr("Automático", "Automàtic"), tr("Español", "Castellà")]),
             Dialog::Video { path, .. } => (tr("Opciones del vídeo", "Opcions del vídeo"),
                 path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
-                tr("Elige qué quieres hacer con este archivo.", "Què vols fer amb aquest fitxer?"),
+                "",
                 [tr("Reproducir", "Reprodueix"), tr("Eliminar archivo", "Esborra el fitxer")]),
             Dialog::Delete { path, .. } => (tr("¿Eliminar este archivo?", "Vols esborrar aquest fitxer?"),
                 path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
@@ -801,6 +904,11 @@ impl Browser {
         }
         draw_line(p, &subject, Rect::new(x, title_y + 67.0, w, 52.0), theme::size::BODY, true);
         draw_line(p, detail, Rect::new(x, title_y + 133.0, w, 48.0), theme::size::CAPTION, false);
+        if let Dialog::Video { volume, path } = dialog {
+            if let Some((_, _, details)) = self.details.as_ref().filter(|(disk, file, _)| disk == volume && file == path) {
+                draw_video_details(p, *details, x, 490.0);
+            }
+        }
         for (index, (rect, label)) in OPTIONS.into_iter().zip(options).enumerate() {
             if index == 1 && !self.second_option_available() { continue; }
             let glyph = match (dialog, index) {
@@ -815,12 +923,15 @@ impl Browser {
 
     fn draw_tile(&self, p: Painter, index: usize, focused: bool) {
         let Some((title, kind, cover)) = self.item(index) else { return };
-        let frame = poster_grid::cell_in(&GRID, index, TOP, self.scroll.pos, &[]);
+        let frame = self.tile_rect(index);
         let scale = self.pop.scale(index, focused && self.action.is_none(), &STYLE);
         let card = frame.scaled(scale);
         let radius = STYLE.tile_radius(card, scale);
         let lift = ((scale - 1.0) / (STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
         cover.draw(p, card, radius, lift);
+        if focused && self.action.is_none() {
+            p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, theme::CONTROL_FOCUS_RING);
+        }
         if let Some(marked) = &self.selection {
             if let Some(entry) = self.folders.last().and_then(|folder| folder.entries.get(index)).filter(|entry| entry.kind == Kind::Folder) {
                 let checked = marked.contains(&entry.name);
@@ -843,14 +954,82 @@ fn hit(rect: Rect, x: f32, y: f32) -> bool {
     x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
 }
 
+enum HintKey { Ok, Icon(Icon) }
+
+fn draw_hint(p: Painter, x: f32, key: HintKey, text: &str) -> f32 {
+    let width = if matches!(key, HintKey::Ok) { 44.0 } else { 34.0 };
+    let rect = Rect::new(x, 999.0, width, 30.0);
+    p.rect_sheened(rect, 9.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+    match key {
+        HintKey::Ok => {
+            let run = TtfMeasure.fit_line("OK", width, 17, true);
+            Label::new(run.as_ptr(), 17, theme::TEXT_READING).h(HAlign::Center).bold().draw(p, rect);
+        }
+        HintKey::Icon(icon) => icons::draw(p, icon, Rect::new(x + 6.0, 1003.0, 22.0, 22.0), theme::TEXT_READING),
+    }
+    let (run, text_width) = TtfMeasure.fit_line_measured(text, 300.0, theme::size::CAPTION, false);
+    Label::new(run.as_ptr(), theme::size::CAPTION, theme::TEXT_SECONDARY).h(HAlign::Left)
+        .draw(p, Rect::new(x + width + 10.0, 990.0, text_width, 48.0));
+    x + width + 10.0 + text_width + 28.0
+}
+
+fn video_size(bytes: u64) -> String {
+    let (unit, divisor) = match bytes {
+        1_000_000_000.. => ("GB", 1_000_000_000),
+        1_000_000.. => ("MB", 1_000_000),
+        1_000.. => ("KB", 1_000),
+        _ => return format!("{bytes} B"),
+    };
+    let tenths = bytes / (divisor / 10);
+    let number = if tenths < 100 {
+        i18n::current().decimal(tenths as i64, 1)
+    } else {
+        i18n::current().decimal((bytes / divisor) as i64, 0)
+    };
+    format!("{number} {unit}")
+}
+
+fn video_duration(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    if minutes == 0 {
+        "< 1 min".into()
+    } else if minutes < 60 {
+        format!("{minutes} min")
+    } else {
+        format!("{} h {:02} min", minutes / 60, minutes % 60)
+    }
+}
+
+fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, mut x: f32, y: f32) {
+    use plx_play_feed::VideoRange;
+    let range = details.range.map(|range| match range {
+        VideoRange::Sdr => "SDR",
+        VideoRange::Hdr10 => "HDR10",
+        VideoRange::Hdr10Plus => "HDR10+",
+        VideoRange::DolbyVision => "Dolby Vision",
+        VideoRange::DolbyVisionHdr10 => "Dolby Vision + HDR10",
+    });
+    let size = details.bytes.map(video_size);
+    let duration = details.duration_secs.map(video_duration);
+    for text in [range, size.as_deref(), duration.as_deref()].into_iter().flatten() {
+        let (run, width) = TtfMeasure.fit_line_measured(text, 360.0, theme::size::CAPTION, true);
+        let rect = Rect::new(x, y, width + 32.0, 43.0);
+        p.rect_sheened(rect, 12.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+        Label::new(run.as_ptr(), theme::size::CAPTION, theme::TEXT_READING).h(HAlign::Center).bold().draw(p, rect);
+        x += rect.w + 12.0;
+    }
+}
+
 #[derive(Clone, Copy)]
-enum Glyph { Play, Trash, Eject }
+enum Glyph { Play, Trash, Eject, Settings, Shared(Icon) }
 
 fn draw_glyph(p: Painter, glyph: Glyph, rect: Rect, ink: [f32; 4]) {
     let asset = match glyph {
         Glyph::Play => return icons::draw(p, Icon::Play, rect, ink),
+        Glyph::Shared(icon) => return icons::draw(p, icon, rect, ink),
         Glyph::Trash => include_str!("../../../assets/icons/cineusb-trash.svg"),
         Glyph::Eject => include_str!("../../../assets/icons/cineusb-eject.svg"),
+        Glyph::Settings => include_str!("../../../assets/icons/cineusb-settings.svg"),
     };
     icons::draw_svg(p, icons::Svg::new(asset), rect, ink);
 }
@@ -989,6 +1168,19 @@ fn inspect_video(path: &std::path::Path, _mount_id: Option<u64>, spanish: bool) 
     direct
 }
 
+fn open_for_details(path: &std::path::Path, _mount_id: Option<u64>) -> Result<File, String> {
+    #[cfg(not(feature = "hostsim"))]
+    if _mount_id.is_some() {
+        return crate::port::open_usb_file(path, _mount_id).map_err(|error| format!("{error:?}"));
+    }
+    let direct = disk::open_video(path).map_err(|error| error.to_string());
+    #[cfg(not(feature = "hostsim"))]
+    if direct.is_err() {
+        return crate::port::open_usb_file(path, None).map_err(|error| format!("{error:?}"));
+    }
+    direct
+}
+
 fn display_name(entry: &Entry) -> String {
     let name = std::path::Path::new(&entry.name);
     match entry.kind {
@@ -1119,6 +1311,40 @@ pub(super) fn tick(app: &mut App) {
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn library_returns_to_the_cached_root_and_restores_its_focus() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: Some(42), system: true };
+        let folder = |path, selected, names: &[&str]| Folder {
+            volume: volume.clone(), path, selected, collection: None,
+            entries: names.iter().map(|name| Entry { name: (*name).into(), kind: Kind::Folder }).collect(),
+        };
+        browser.scan.volumes.push(volume.clone());
+        browser.folders.push(folder(volume.path.clone(), 1, &["Pel·lícules", "Sèries"]));
+        browser.folders.push(folder(volume.path.join("Sèries"), 0, &[]));
+        let scan_at = browser.next_scan;
+        browser.open_action(Action::Library);
+        assert_eq!(browser.folders.len(), 1);
+        assert_eq!(browser.volume(), Some(&volume));
+        assert_eq!(browser.selected, 1);
+        assert!(browser.pending.is_none());
+        assert_eq!(browser.next_scan, scan_at);
+    }
+
+    #[test]
+    fn compact_grid_balances_short_rows_and_centres_the_last_row() {
+        let mut browser = Browser::new();
+        browser.scan.volumes = (0..9).map(|index| Volume {
+            path: format!("/tmp/usb/sda/sda{index}").into(), label: None, mount_id: None, system: false,
+        }).collect();
+        assert_eq!(grid_geometry(browser.len()).cols, 5);
+        for (first, last) in [(0, 4), (5, 8)] {
+            let left = browser.tile_rect(first);
+            let right = browser.tile_rect(last);
+            assert!((left.x + right.x + right.w - 1920.0).abs() < 0.1);
+        }
+    }
 
     #[test]
     fn delete_from_video_menu_defaults_to_cancel() {

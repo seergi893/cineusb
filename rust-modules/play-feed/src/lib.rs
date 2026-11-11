@@ -17,6 +17,7 @@ pub mod ff_pcm;
 mod ff;
 pub use ff::{boot, demux, pushed_any, set_feed_audio, set_pcm_out, DemuxTransport};
 pub use ff::{probe_local, probe_local_with_audio, LocalAudio, LocalMedia, LocalSubtitle};
+pub use ff::{probe_local_details, LocalVideoDetails, VideoRange};
 pub use ff::native_audio;
 
 /// Physical mechanisms exercised by media's integration fixtures. This module exports no raw

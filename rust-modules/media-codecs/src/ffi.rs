@@ -519,6 +519,7 @@ pub const AV_PKT_DATA_DOVI_CONF: c_int = 29;
 /// member offsets are hard-coded in `plx_play_feed::vp9_hdr::{parse_mastering, parse_cll}` and pinned by
 /// the same file; a bump that moves them has to change both.
 pub const AV_PKT_DATA_MASTERING_DISPLAY_METADATA: c_int = 20;
+pub const AV_PKT_DATA_DYNAMIC_HDR10_PLUS: c_int = 31;
 pub const AV_PKT_DATA_CONTENT_LIGHT_LEVEL: c_int = 22;
 
 // ---- AVStream field accessors, at the constants above. Read by offset rather than modelled:

@@ -40,6 +40,7 @@ jobs:
           for ext in mkv mp4; do
             ffmpeg -nostdin -v error -f lavfi -i color=size=160x90:rate=24 \
               -f lavfi -i anullsrc=r=48000:cl=stereo -t 1 -c:v libx264 -c:a aac \
+              -color_trc bt709 -colorspace bt709 -color_primaries bt709 \
               "$CINEUSB_FD_FIXTURES/Película.$ext"
           done
           printf '1\n00:00:00,100 --> 00:00:00,800\nFull subtitle\n' > "$CINEUSB_FD_FIXTURES/full.srt"
