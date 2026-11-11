@@ -165,6 +165,10 @@ SAME32(offsetof(AVPacket, size), 28, "AVPacket.size moved");
 SAME64(offsetof(AVPacket, size), 32, "AVPacket.size moved [host]");
 SAME32(offsetof(AVPacket, stream_index), 32, "AVPacket.stream_index moved");
 SAME64(offsetof(AVPacket, stream_index), 36, "AVPacket.stream_index moved [host]");
+SAME32(offsetof(AVPacket, side_data), 40, "AVPacket.side_data moved");
+SAME64(offsetof(AVPacket, side_data), 48, "AVPacket.side_data moved [host]");
+SAME32(offsetof(AVPacket, side_data_elems), 44, "AVPacket.side_data_elems moved");
+SAME64(offsetof(AVPacket, side_data_elems), 56, "AVPacket.side_data_elems moved [host]");
 SAME32(offsetof(AVPacket, flags), 36, "AVPacket.flags moved");
 SAME64(offsetof(AVPacket, flags), 40, "AVPacket.flags moved [host]");
 SAME32(offsetof(AVPacket, duration), 48, "AVPacket.duration moved");
@@ -282,6 +286,7 @@ SAME64(offsetof(AVBSFContext, time_base_in), 40, "AVBSFContext.time_base_in move
 SAME(AV_CODEC_ID_H264, 27, "AV_CODEC_ID_H264 != 27");
 SAME(AV_CODEC_ID_HEVC, 172, "AV_CODEC_ID_HEVC != 172 (173 on FFmpeg 6 — the enum shifts again)");
 SAME(AV_PKT_DATA_MASTERING_DISPLAY_METADATA, 20, "AV_PKT_DATA_MASTERING_DISPLAY_METADATA != 20");
+SAME(AV_PKT_DATA_DYNAMIC_HDR10_PLUS, 31, "AV_PKT_DATA_DYNAMIC_HDR10_PLUS != 31");
 SAME(AV_PKT_DATA_CONTENT_LIGHT_LEVEL, 22, "AV_PKT_DATA_CONTENT_LIGHT_LEVEL != 22");
 /* `play-feed/src/vp9_hdr.rs` parses these two structs out of raw bytes at hard-coded offsets, so a size
    alone cannot pin them: a reorder that keeps 88 bytes would swap fields silently. Every member is

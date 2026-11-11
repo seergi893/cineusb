@@ -521,6 +521,10 @@ pub struct LocalSubtitle {
 /// Each attempt exclusively owns the file cursor. FFmpeg duplicates the descriptor, so the
 /// probe and any later restart must rewind the shared cursor before handing it over again.
 unsafe fn open_local_format(file: &File, fmt: &mut *mut AVFormatContext) -> c_int {
+    open_local_format_with_budget(file, fmt, false)
+}
+
+unsafe fn open_local_format_with_budget(file: &File, fmt: &mut *mut AVFormatContext, details: bool) -> c_int {
     if let Err(error) = (&*file).rewind() {
         return -error.raw_os_error().unwrap_or(libc::EIO);
     }
@@ -528,6 +532,12 @@ unsafe fn open_local_format(file: &File, fmt: &mut *mut AVFormatContext) -> c_in
     let mut result = av_dict_set_int(&mut options, c"fd".as_ptr(), i64::from(file.as_raw_fd()), 0);
     if result >= 0 {
         result = av_dict_set(&mut options, c"protocol_whitelist".as_ptr(), c"fd".as_ptr(), 0);
+    }
+    if details && result >= 0 {
+        result = av_dict_set_int(&mut options, c"probesize".as_ptr(), 2 * 1024 * 1024, 0);
+        if result >= 0 {
+            result = av_dict_set_int(&mut options, c"analyzeduration".as_ptr(), 1_000_000, 0);
+        }
     }
     if result >= 0 {
         result = avformat_open_input(fmt, c"fd:".as_ptr(), std::ptr::null_mut(), &mut options);
@@ -542,6 +552,13 @@ pub fn probe_local(file: &File) -> Result<LocalMedia, String> {
 }
 
 pub fn probe_local_with_audio(file: &File, spanish: bool) -> Result<LocalMedia, String> {
+    read_local_format(file, false, |fmt| unsafe { local_stream_facts(fmt, spanish).map_err(str::to_owned) })
+}
+
+mod local_details;
+pub use local_details::{probe_local_details, LocalVideoDetails, VideoRange};
+
+fn read_local_format<T>(file: &File, details: bool, read: impl FnOnce(*mut AVFormatContext) -> Result<T, String>) -> Result<T, String> {
     if !abi_ok() { return Err("El lector de vídeo no está disponible.".into()); }
     if file.metadata().map_err(|error| format!("No se pudo consultar el vídeo · {error}"))?.len() == 0 {
         return Err("El archivo de vídeo está vacío.".into());
@@ -549,7 +566,7 @@ pub fn probe_local_with_audio(file: &File, spanish: bool) -> Result<LocalMedia, 
     ensure_registered();
     unsafe {
         let mut fmt = std::ptr::null_mut();
-        let code = open_local_format(file, &mut fmt);
+        let code = open_local_format_with_budget(file, &mut fmt, details);
         let result = if code < 0 {
             plx_base::eventlog::log(&format!("cineusb: avformat_open_input(fd) failed code={code}"));
             if code == -libc::EIO {
@@ -563,7 +580,7 @@ pub fn probe_local_with_audio(file: &File, spanish: bool) -> Result<LocalMedia, 
                 plx_base::eventlog::log(&format!("cineusb: avformat_find_stream_info(fd) failed code={code}"));
                 Err(format!("No se pudieron analizar las pistas del vídeo ({code})."))
             } else {
-                local_stream_facts(fmt, spanish).map_err(str::to_owned)
+                read(fmt)
             }
         };
         avformat_close_input(&mut fmt);
@@ -2553,6 +2570,10 @@ pub enum SeiStrip {
 /// header or payload, bytes after the trailing bits) falls back to the whole-NAL rule: dropped if
 /// an HDR10+ header was seen, kept unchanged otherwise.
 pub fn strip_hdr10plus_sei(nal: &[u8]) -> SeiStrip {
+    strip_hdr10plus_sei_with(nal, false)
+}
+
+fn strip_hdr10plus_sei_with(nal: &[u8], strict: bool) -> SeiStrip {
     if nal.len() < 2 {
         return SeiStrip::Keep;
     }
@@ -2589,7 +2610,8 @@ pub fn strip_hdr10plus_sei(nal: &[u8]) -> SeiStrip {
         };
         let end = p.saturating_add(psize);
         let payload = rbsp.get(p..end.min(rbsp.len())).unwrap_or(&[]);
-        let is_plus = ptype == 4 && payload.len() >= 3 && payload[..3] == [0xb5, 0x00, 0x3c];
+        let is_plus = ptype == 4 && payload.starts_with(&[0xb5, 0x00, 0x3c])
+            && (!strict || (end <= rbsp.len() && payload.len() >= 7 && payload[3..6] == [0, 1, 4]));
         found |= is_plus;
         if end > rbsp.len() {
             break;
@@ -7346,6 +7368,10 @@ mod cineusb_descriptor_tests {
             let facts = probe_local(&file).unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!((facts.video.as_str(), facts.width, facts.height), ("h264", 160, 90));
             assert_eq!(facts.audio, "aac");
+            let details = probe_local_details(&file);
+            assert_eq!(details.bytes, Some(file.metadata().unwrap().len()));
+            assert_eq!(details.duration_secs, Some(1));
+            assert_eq!(details.range, Some(VideoRange::Sdr));
             unsafe {
                 let mut fmt = std::ptr::null_mut();
                 assert_eq!(open_local_format(&file, &mut fmt), 0, "reopen {name}");
