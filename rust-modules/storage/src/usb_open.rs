@@ -146,6 +146,43 @@ pub fn list_folder(mount_id: &str, path_hex: &str) -> io::Result<()> {
     Ok(())
 }
 
+pub fn volume_details(mount_id: &str, path_hex: &str) -> io::Result<()> {
+    if unsafe { libc::geteuid() } != 0 { return Err(invalid()); }
+    let id = mount_id.parse().map_err(|_| invalid())?;
+    let path = decode_path(path_hex)?;
+    if !usb_mounts()?.contains(&(id, path.clone())) { return Err(invalid()); }
+    let folder = open_under(Path::new("/tmp/usb"), &path, true)?;
+    if fd_mount_id(&folder)? != id { return Err(invalid()); }
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs64>::uninit();
+    let capacity = if unsafe { libc::fstatvfs64(folder.as_raw_fd(), stats.as_mut_ptr()) } == 0 {
+        let stats = unsafe { stats.assume_init() };
+        let unit = u64::from(stats.f_frsize);
+        let total = stats.f_blocks.checked_mul(unit).filter(|total| *total > 0);
+        total.map(|total| (total, stats.f_blocks.saturating_sub(stats.f_bfree).saturating_mul(unit),
+            stats.f_bavail.saturating_mul(unit).min(total), stats.f_flag & libc::ST_RDONLY != 0))
+    } else { None };
+    let table = fs::read("/proc/self/mountinfo")?;
+    let device = table.split(|byte| *byte == b'\n').find(|line|
+        line.split(|byte| *byte == b' ').next().is_some_and(|field| field == mount_id.as_bytes()))
+        .and_then(mount_source).map(decode_mount).filter(|path| path.starts_with("/dev"));
+    let uuid = device.as_deref().and_then(volume_uuid);
+    serde_json::to_writer(io::stdout().lock(), &(capacity, uuid))?;
+    Ok(())
+}
+
+fn volume_uuid(device: &Path) -> Option<String> {
+    let aliases = fs::read_dir("/dev/disk/by-uuid").into_iter().flatten();
+    if let Some(uuid) = aliases.filter_map(Result::ok).find_map(|entry| {
+        (fs::canonicalize(entry.path()).ok()? == device).then(|| entry.file_name().into_string().ok()).flatten()
+    }) { return Some(uuid); }
+    // Some webOS builds have blkid but do not populate /dev/disk/by-uuid.
+    let output = std::process::Command::new("blkid").args(["-s", "UUID", "-o", "value"])
+        .arg(device).output().ok()?;
+    let uuid = std::str::from_utf8(&output.stdout).ok()?.trim();
+    (output.status.success() && !uuid.is_empty() && uuid.len() <= 128
+        && uuid.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')).then(|| uuid.to_owned())
+}
+
 fn fd_mount_id(file: &File) -> io::Result<u64> {
     let info = fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd()))?;
     info.lines().find_map(|line| line.strip_prefix("mnt_id:")?.trim().parse().ok())
@@ -302,7 +339,9 @@ pub fn eject(mount_id: &str, path_hex: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn folder_entries(folder: &File) -> io::Result<Vec<(String, bool)>> {
+type FolderEntry = (String, bool, Option<i64>, Option<u64>);
+
+fn folder_entries(folder: &File) -> io::Result<Vec<FolderEntry>> {
     let mut entries = Vec::new();
     let mut bytes = 0;
     for entry in fs::read_dir(format!("/proc/self/fd/{}", folder.as_raw_fd()))? {
@@ -310,9 +349,13 @@ fn folder_entries(folder: &File) -> io::Result<Vec<(String, bool)>> {
         let kind = entry.file_type()?;
         if kind.is_dir() || kind.is_file() {
             let name = hex_path(&entry.file_name());
-            bytes += name.len() + 14;
+            bytes += name.len() + 54;
             if bytes > 192 * 1024 { return Err(io::Error::other("USB folder listing too large")); }
-            entries.push((name, kind.is_dir()));
+            use std::os::unix::fs::MetadataExt;
+            let metadata = entry.metadata().ok();
+            let modified = metadata.as_ref().map(MetadataExt::mtime);
+            let size = metadata.filter(|_| kind.is_file()).map(|meta| meta.len());
+            entries.push((name, kind.is_dir(), modified, size));
         }
     }
     Ok(entries)
@@ -414,7 +457,9 @@ mod tests {
         fs::create_dir(&films).unwrap();
         fs::rename(&video, films.join(video.file_name().unwrap())).unwrap();
         let folder = open_under(&root, &films, true).unwrap();
-        assert_eq!(folder_entries(&folder).unwrap(), [(hex_path(video.file_name().unwrap()), false)]);
+        let entries = folder_entries(&folder).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!((&entries[0].0, entries[0].1), (&hex_path(video.file_name().unwrap()), false));
         fs::remove_dir_all(root).unwrap();
     }
 

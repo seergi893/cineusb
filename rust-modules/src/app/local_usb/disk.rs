@@ -25,6 +25,8 @@ pub(super) enum Kind {
 pub(super) struct Entry {
     pub name: OsString,
     pub kind: Kind,
+    pub modified: Option<i64>,
+    pub size: Option<u64>,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -144,7 +146,12 @@ pub(super) fn listing(path: &Path) -> io::Result<Vec<Entry>> {
         let entry = entry?;
         let file_type = entry.file_type()?;
         if file_type.is_dir() || file_type.is_file() {
-            entries.extend(media_entry(entry.file_name(), file_type.is_dir()));
+            if let Some(mut media) = media_entry(entry.file_name(), file_type.is_dir()) {
+                let metadata = entry.metadata().ok();
+                media.modified = metadata.as_ref().map(MetadataExt::mtime);
+                media.size = metadata.filter(|_| file_type.is_file()).map(|meta| meta.len());
+                entries.push(media);
+            }
         }
     }
     sort_entries(&mut entries);
@@ -159,11 +166,48 @@ pub(super) fn media_entry(name: OsString, directory: bool) -> Option<Entry> {
     } else {
         return None;
     };
-    Some(Entry { name, kind })
+    Some(Entry { name, kind, modified: None, size: None })
 }
 
 pub(super) fn sort_entries(entries: &mut [Entry]) {
-    entries.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
+    sort_entries_by(entries, 0);
+}
+
+pub(super) fn sort_entries_by(entries: &mut [Entry], order: usize) {
+    entries.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| match order {
+        1 => b.modified.cmp(&a.modified),
+        2 => b.size.cmp(&a.size),
+        _ => std::cmp::Ordering::Equal,
+    }).then_with(|| natural(a.name.as_encoded_bytes(), b.name.as_encoded_bytes()))
+      .then_with(|| a.name.cmp(&b.name)));
+}
+
+pub(super) fn resort(entries: &mut [Entry], selected: usize, order: usize) -> usize {
+    let name = entries.get(selected).map(|entry| entry.name.clone());
+    sort_entries_by(entries, order);
+    name.and_then(|name| entries.iter().position(|entry| entry.name == name)).unwrap_or_default()
+}
+
+fn natural(mut a: &[u8], mut b: &[u8]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    while let (Some(&x), Some(&y)) = (a.first(), b.first()) {
+        if x.is_ascii_digit() && y.is_ascii_digit() {
+            let n = a.iter().take_while(|byte| byte.is_ascii_digit()).count();
+            let m = b.iter().take_while(|byte| byte.is_ascii_digit()).count();
+            let left = &a[a[..n].iter().take_while(|&&byte| byte == b'0').count()..n];
+            let right = &b[b[..m].iter().take_while(|&&byte| byte == b'0').count()..m];
+            let comparison = left.len().cmp(&right.len()).then_with(|| left.cmp(right));
+            if comparison != Ordering::Equal { return comparison; }
+            a = &a[n..];
+            b = &b[m..];
+        } else {
+            let comparison = x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase());
+            if comparison != Ordering::Equal { return comparison; }
+            a = &a[1..];
+            b = &b[1..];
+        }
+    }
+    a.len().cmp(&b.len())
 }
 
 fn is_system_folder(name: &OsStr) -> bool {
@@ -268,23 +312,29 @@ mod tests {
         fs::write(path.join("Película 01.srt"), b"caption").unwrap();
         std::os::unix::fs::symlink("Película 01.MKV", path.join("alias.mp4")).unwrap();
         assert_eq!(
-            listing(&path).unwrap(),
+            listing(&path).unwrap().into_iter().map(|mut entry| {
+                assert!(entry.modified.is_some());
+                assert_eq!(entry.size, (entry.kind == Kind::Video).then_some(5));
+                entry.modified = None;
+                entry.size = None;
+                entry
+            }).collect::<Vec<_>>(),
             [
                 Entry {
                     name: ".personal".into(),
-                    kind: Kind::Folder
+                    kind: Kind::Folder, modified: None, size: None
                 },
                 Entry {
                     name: "LG Smart TV Films".into(),
-                    kind: Kind::Folder
+                    kind: Kind::Folder, modified: None, size: None
                 },
                 Entry {
                     name: "Sèries".into(),
-                    kind: Kind::Folder
+                    kind: Kind::Folder, modified: None, size: None
                 },
                 Entry {
                     name: "Película 01.MKV".into(),
-                    kind: Kind::Video
+                    kind: Kind::Video, modified: None, size: None
                 },
             ]
         );

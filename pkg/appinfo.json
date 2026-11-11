@@ -1,6 +1,6 @@
 {
   "id": "com.seergi893.cineusb",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "vendor": "CineUSB",
   "type": "native",
   "main": "plxnative",

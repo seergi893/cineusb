@@ -161,6 +161,8 @@ pub(crate) unsafe fn run(app: &mut App) {
         clock_notice.poll();
         // What the hold hint has taught since last frame, written once to the install's session.
         hint_taught.poll(app.boot_initial.is_some());
+        #[cfg(feature = "local-usb")]
+        super::local_usb::observe_playback(app);
         ingest(app, fr);
         #[cfg(feature = "local-usb")]
         if app.route() == AppArg::LocalUsb && !super::bridge::player_arriving(&app.pages) {
@@ -2194,6 +2196,8 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // the player (back to the detail page or home, whichever is behind), instead of freezing
         // on the last frame.
         if playback_may_run(app) && super::bridge::player(&app.pages).is_some() && plx_media::player::ended(&app.player.session) == Some(true) {
+            #[cfg(feature = "local-usb")]
+            super::local_usb::playback_completed(app);
             let handed_off_to_up_next = finish_playback(&mut app.player,
                 &mut app.adapters.player,
                 &mut app.repause_at,

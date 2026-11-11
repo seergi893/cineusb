@@ -436,6 +436,7 @@ pub const SEEK_END: c_int = 2;
 pub const AVSEEK_SIZE: c_int = 0x10000;
 
 pub struct LocalMedia {
+    pub duration_secs: Option<u64>,
     pub video: String,
     pub audio: String,
     pub audio_channels: i64,
@@ -634,6 +635,7 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext, spanish: bool) -> Result
         });
     let rate = (*video).framerate;
     Ok(LocalMedia {
+        duration_secs: u64::try_from(fmt_duration(fmt)).ok().filter(|value| *value > 0).map(|value| value / 1_000_000),
         video: codec(video), audio, audio_channels, audio_rate, audio_depth,
         audio_stream_index: ai, audio_language, audio_title, audio_tracks,
         width: u16::try_from((*video).width).unwrap_or(0),

@@ -1,5 +1,6 @@
 //! USB browsing and its off-frame filesystem jobs.
 mod art;
+mod continuity;
 mod disk;
 
 use art::Cover;
@@ -27,11 +28,11 @@ const TOP: f32 = 257.0;
 const GRID_BOTTOM: f32 = 965.0;
 const GRID_WIDTH: f32 = 1920.0 - 2.0 * plx_ui::consts::MARGIN_X;
 
-fn grid_geometry(len: usize) -> Geom {
-    let rows = len.max(1).div_ceil(8);
+fn grid_geometry(len: usize, size: usize) -> Geom {
+    let (limit, gap, max_width) = [(8, 22.0, 214.0), (10, 18.0, 174.0), (6, 26.0, 270.0)][size];
+    let rows = len.max(1).div_ceil(limit);
     let cols = len.max(1).div_ceil(rows);
-    let gap = 22.0;
-    let width = ((GRID_WIDTH - (cols - 1) as f32 * gap) / cols as f32).min(214.0);
+    let width = ((GRID_WIDTH - (cols - 1) as f32 * gap) / cols as f32).min(max_width);
     Geom { cols, left: plx_ui::consts::MARGIN_X, w: width, h: width * 1.5, gap, value_line: false }
 }
 
@@ -56,10 +57,13 @@ const OPTIONS: [Rect; 2] = [
     Rect::new(555.0, 676.0, 390.0, 66.0),
     Rect::new(975.0, 676.0, 390.0, 66.0),
 ];
-const SETTINGS_OPTIONS: [Rect; 3] = [
-    Rect::new(550.0, 523.0, 820.0, 62.0),
-    Rect::new(550.0, 597.0, 820.0, 62.0),
-    Rect::new(550.0, 671.0, 820.0, 62.0),
+const SETTINGS_OPTIONS: [Rect; 6] = [
+    Rect::new(550.0, 401.0, 820.0, 49.0),
+    Rect::new(550.0, 458.0, 820.0, 49.0),
+    Rect::new(550.0, 515.0, 820.0, 49.0),
+    Rect::new(550.0, 572.0, 820.0, 49.0),
+    Rect::new(550.0, 629.0, 820.0, 49.0),
+    Rect::new(550.0, 686.0, 820.0, 49.0),
 ];
 
 enum Dialog {
@@ -67,6 +71,13 @@ enum Dialog {
     Language,
     ForcedSubtitles,
     Audio,
+    AutoNext,
+    Appearance,
+    Accent,
+    Cards,
+    Sort,
+    Resume(u64),
+    Next { volume: Volume, path: PathBuf, deadline: Instant },
     Video { volume: Volume, path: PathBuf },
     Delete { volume: Volume, path: PathBuf },
     DeleteFolders,
@@ -78,6 +89,10 @@ struct Settings {
     language: Preference,
     forced_subtitles: bool,
     spanish_audio: bool,
+    auto_next: bool,
+    accent: usize,
+    cards: usize,
+    sort: usize,
 }
 
 enum SettingsJob {
@@ -95,10 +110,35 @@ struct Folder {
 
 enum DiskResult {
     Folder(Volume, PathBuf, io::Result<Vec<Entry>>),
-    Video(Result<(File, plx_play_feed::LocalMedia, String), String>),
+    Video(Result<PreparedVideo, String>),
     Delete(PathBuf, Result<(), String>),
     DeleteFolders { removed: Vec<OsString>, total: usize, error: Option<String>, entries: io::Result<Vec<Entry>> },
     Eject(Volume, Result<(), String>),
+}
+
+type VolumeFacts = (Option<(u64, u64, u64, bool)>, Option<String>);
+type VolumeFactsJob = (Volume, Receiver<VolumeFacts>);
+
+struct PreparedVideo {
+    file: File,
+    info: plx_play_feed::LocalMedia,
+    volume: Volume,
+    path: PathBuf,
+    title: String,
+    key: Option<String>,
+    resume: u64,
+    saved: u64,
+}
+
+struct PlayingVideo {
+    volume: Volume,
+    path: PathBuf,
+    key: Option<String>,
+    position: u64,
+    duration: Option<u64>,
+    saved: u64,
+    next_save: Instant,
+    seen_player: bool,
 }
 
 struct DetailsRequest {
@@ -128,6 +168,14 @@ pub(super) struct Browser {
     scanning: Option<Receiver<Scan>>,
     details_job: Option<DetailsRequest>,
     details: Option<(Volume, PathBuf, plx_play_feed::LocalVideoDetails)>,
+    facts: Option<(Volume, VolumeFacts)>,
+    facts_job: Option<VolumeFactsJob>,
+    prepared: Option<PreparedVideo>,
+    ready: Option<PreparedVideo>,
+    playing: Option<PlayingVideo>,
+    progress_job: Option<std::thread::JoinHandle<()>>,
+    queued_progress: std::collections::BTreeMap<String, u64>,
+    countdown_display: u64,
     next_scan: Instant,
     last_tick: Instant,
 }
@@ -140,10 +188,12 @@ impl Browser {
             scroll: Spring::at(0.0), pop: GridPop::new(), status: String::new(),
             hour: None, action: None, dialog: None, option: 0, mutating: false,
             selection: None, progress: None,
-            settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false },
+            settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0 },
             settings_job: None, settings_started: false,
             pending: None, scanning: None, next_scan: now, last_tick: now,
             details_job: None, details: None,
+            facts: None, facts_job: None, prepared: None, ready: None, playing: None,
+            progress_job: None, queued_progress: Default::default(), countdown_display: 0,
         }
     }
 
@@ -160,12 +210,24 @@ impl Browser {
         }
     }
 
-    fn update(&mut self) -> Option<(File, plx_play_feed::LocalMedia, String)> {
+    fn update(&mut self) -> Option<PreparedVideo> {
         let now = Instant::now();
         let dt = (now - self.last_tick).as_secs_f32().min(0.05);
         self.last_tick = now;
         let mut changed = false;
-        let mut video = None;
+        let mut video = self.ready.take();
+        if let Some(Dialog::Next { deadline, .. }) = self.dialog {
+            let seconds = deadline.saturating_duration_since(now).as_millis().div_ceil(1000) as u64;
+            if self.countdown_display != seconds {
+                self.countdown_display = seconds;
+                changed = true;
+            }
+            if seconds == 0 {
+                self.option = 0;
+                self.choose_option();
+            }
+        }
+        self.flush_progress(false);
         changed |= self.update_settings();
         if let Some((processed, total)) = self.progress.as_ref().and_then(|progress| progress.try_iter().last()) {
             self.status = format!("{} {processed}/{total}", tr("Carpetas procesadas", "Carpetes processades"));
@@ -178,7 +240,8 @@ impl Browser {
                 self.progress = None;
                 changed = true;
                 match result {
-                    DiskResult::Folder(volume, path, Ok(entries)) => {
+                    DiskResult::Folder(volume, path, Ok(mut entries)) => {
+                        disk::sort_entries_by(&mut entries, self.settings.sort);
                         if let Some(folder) = self.folders.last_mut() { folder.selected = self.selected; }
                         let collection = path.strip_prefix(&volume.path).ok().and_then(art::collection);
                         self.folders.push(Folder { volume, path, entries, collection, selected: 0 });
@@ -190,7 +253,11 @@ impl Browser {
                         self.status = tr("No se pudo abrir la carpeta.", "No s’ha pogut obrir la carpeta.").into();
                     }
                     DiskResult::Video(Ok(media)) => {
-                        video = Some(media);
+                        if media.resume > 0 {
+                            self.dialog = Some(Dialog::Resume(media.resume));
+                            self.option = 0;
+                            self.prepared = Some(media);
+                        } else { video = Some(media); }
                         self.status.clear();
                     }
                     DiskResult::Video(Err(error)) => {
@@ -198,6 +265,7 @@ impl Browser {
                         self.status = tr("No se pudo abrir el vídeo.", "No s’ha pogut obrir el vídeo.").into();
                     }
                     DiskResult::Delete(path, result) => {
+                        self.facts = None;
                         if result.is_ok() {
                             if let Some(folder) = self.folders.last_mut() {
                                 folder.entries.retain(|entry| path.file_name() != Some(entry.name.as_os_str()));
@@ -209,9 +277,13 @@ impl Browser {
                                 "No s’ha pogut esborrar el fitxer. Comprova si es pot escriure al disc."));
                     }
                     DiskResult::DeleteFolders { removed, total, error, entries } => {
+                        self.facts = None;
                         if let Some(folder) = self.folders.last_mut() {
                             match entries {
-                                Ok(entries) => folder.entries = entries,
+                                Ok(mut entries) => {
+                                    disk::sort_entries_by(&mut entries, self.settings.sort);
+                                    folder.entries = entries;
+                                }
                                 Err(_) => folder.entries.retain(|entry| !removed.contains(&entry.name)),
                             }
                         }
@@ -289,6 +361,7 @@ impl Browser {
                 }
             }
         }
+        changed |= self.update_volume_facts();
         changed |= self.update_video_details();
         if self.action.is_some_and(|action| !self.action_available(action)) {
             self.action = None;
@@ -309,7 +382,7 @@ impl Browser {
     }
 
     fn scroll_target(&self) -> f32 {
-        let grid = grid_geometry(self.len());
+        let grid = grid_geometry(self.len(), self.settings.cards);
         let row = self.selected / grid.cols;
         let viewport = GRID_BOTTOM - TOP - 22.0;
         let top = row as f32 * grid.pitch();
@@ -317,12 +390,86 @@ impl Browser {
     }
 
     fn tile_rect(&self, index: usize) -> Rect {
-        let mut grid = grid_geometry(self.len());
+        let mut grid = grid_geometry(self.len(), self.settings.cards);
         let first = index / grid.cols * grid.cols;
         let count = self.len().saturating_sub(first).min(grid.cols).max(1);
         let row_width = count as f32 * grid.w + (count - 1) as f32 * grid.gap;
         grid.left = (1920.0 - row_width) * 0.5;
         poster_grid::cell_in(&grid, index, TOP, self.scroll.pos, &[])
+    }
+
+    fn update_volume_facts(&mut self) -> bool {
+        let mut changed = false;
+        if let Some((volume, job)) = &self.facts_job {
+            match job.try_recv() {
+                Err(TryRecvError::Empty) => return false,
+                result => {
+                    self.facts = Some((volume.clone(), result.unwrap_or_default()));
+                    self.facts_job = None;
+                    changed = true;
+                }
+            }
+        }
+        let Some(volume) = self.volume().cloned() else { self.facts = None; return changed };
+        if self.facts.as_ref().is_some_and(|(last, _)| *last == volume) { return changed; }
+        let requested = volume.clone();
+        let (send, receive) = mpsc::sync_channel(1);
+        if plx_base::task::spawn_off_frame("cineusb-volume-details", move |_| {
+            let _ = send.send(volume_facts(&requested));
+        }) {
+            self.facts_job = Some((volume, receive));
+        }
+        changed
+    }
+
+    fn flush_progress(&mut self, closing: bool) {
+        if self.progress_job.as_ref().is_some_and(|job| closing || job.is_finished()) {
+            if let Some(job) = self.progress_job.take() { let _ = job.join(); }
+        }
+        if self.progress_job.is_some() || self.queued_progress.is_empty() { return; }
+        let updates = std::mem::take(&mut self.queued_progress);
+        let job = plx_base::task::spawn_off_frame_keeping("cineusb-playhead", move |_| {
+            for (key, position) in updates {
+                if let Err(error) = resume_record(&key, Some(position)) {
+                    plx_base::eventlog::log(&format!("cineusb: could not save local playhead: {error}"));
+                }
+            }
+        });
+        if closing {
+            if let Some(job) = job { let _ = job.join(); }
+        } else {
+            self.progress_job = job;
+        }
+    }
+
+    fn store_playhead(&mut self, completed: bool, leaving: bool) {
+        let Some(playing) = &mut self.playing else { return };
+        let now = Instant::now();
+        if !leaving && now < playing.next_save { return; }
+        playing.next_save = now + Duration::from_secs(30);
+        let position = if !completed && continuity::resumable(playing.position, playing.duration) {
+            playing.position
+        } else { 0 };
+        if position != playing.saved {
+            if let Some(key) = &playing.key { self.queued_progress.insert(key.clone(), position); }
+            playing.saved = position;
+        }
+        self.flush_progress(false);
+    }
+
+    fn finish_video(&mut self, completed: bool) {
+        self.store_playhead(completed, true);
+        let Some(playing) = self.playing.take() else { return };
+        if !completed || !self.settings.auto_next { return; }
+        let Some(folder) = self.folders.last().filter(|folder|
+            folder.volume == playing.volume && playing.path.parent() == Some(folder.path.as_path())) else { return };
+        let Some(next) = playing.path.file_name().and_then(|name| continuity::next_episode(name, &folder.entries)) else { return };
+        self.countdown_display = 10;
+        self.dialog = Some(Dialog::Next { volume: playing.volume, path: folder.path.join(next),
+            deadline: Instant::now() + Duration::from_secs(10) });
+        self.option = 1;
+        self.action = None;
+        plx_machine::idle::invalidate();
     }
 
     fn update_video_details(&mut self) -> bool {
@@ -379,15 +526,29 @@ impl Browser {
         self.settings_job = None;
         match result {
             Ok(Some(settings)) => {
+                let sort_changed = self.settings.sort != settings.sort;
+                let size_changed = self.settings.cards != settings.cards;
                 self.settings = settings;
+                if sort_changed {
+                    let last = self.folders.len().saturating_sub(1);
+                    for (index, folder) in self.folders.iter_mut().enumerate() {
+                        let old = if index == last { self.selected } else { folder.selected };
+                        folder.selected = disk::resort(&mut folder.entries, old, settings.sort);
+                        if index == last { self.selected = folder.selected; }
+                    }
+                }
+                if size_changed || sort_changed { self.select(self.selected, true); }
                 i18n::apply_usb_language(settings.language);
                 if saving {
                     self.option = match self.dialog {
                         Some(Dialog::ForcedSubtitles) => 1,
                         Some(Dialog::Audio) => 2,
+                        Some(Dialog::AutoNext) => 3,
+                        Some(Dialog::Sort) => 5,
+                        Some(Dialog::Cards) => 1,
                         _ => 0,
                     };
-                    self.dialog = Some(Dialog::Settings);
+                    self.dialog = Some(if matches!(self.dialog, Some(Dialog::Accent | Dialog::Cards)) { Dialog::Appearance } else { Dialog::Settings });
                     self.status.clear();
                 }
             }
@@ -469,12 +630,15 @@ impl Browser {
             Some(Dialog::Settings) => {
                 self.status.clear();
                 let (dialog, selected) = match self.option {
-                    0 => (Dialog::Language, self.settings.language == Preference::Ca),
-                    1 => (Dialog::ForcedSubtitles, self.settings.forced_subtitles),
-                    _ => (Dialog::Audio, self.settings.spanish_audio),
+                    0 => (Dialog::Language, usize::from(self.settings.language == Preference::Ca)),
+                    1 => (Dialog::ForcedSubtitles, usize::from(self.settings.forced_subtitles)),
+                    2 => (Dialog::Audio, usize::from(self.settings.spanish_audio)),
+                    3 => (Dialog::AutoNext, usize::from(self.settings.auto_next)),
+                    4 => (Dialog::Appearance, 0),
+                    _ => (Dialog::Sort, self.settings.sort),
                 };
                 self.dialog = Some(dialog);
-                self.option = usize::from(selected);
+                self.option = selected;
             }
             Some(Dialog::Language) => {
                 let language = if self.option == 0 { Preference::Es } else { Preference::Ca };
@@ -488,6 +652,36 @@ impl Browser {
             Some(Dialog::Audio) => {
                 self.dialog = Some(Dialog::Audio);
                 self.change_settings(Settings { spanish_audio: self.option == 1, ..self.settings });
+            }
+            Some(Dialog::Appearance) => {
+                (self.dialog, self.option) = if self.option == 0 {
+                    (Some(Dialog::Accent), self.settings.accent)
+                } else { (Some(Dialog::Cards), self.settings.cards) };
+            }
+            Some(dialog @ (Dialog::AutoNext | Dialog::Accent | Dialog::Cards | Dialog::Sort)) => {
+                let mut settings = self.settings;
+                match dialog {
+                    Dialog::AutoNext => settings.auto_next = self.option == 1,
+                    Dialog::Accent => settings.accent = self.option,
+                    Dialog::Cards => settings.cards = self.option,
+                    Dialog::Sort => settings.sort = self.option,
+                    _ => unreachable!(),
+                }
+                self.dialog = Some(dialog);
+                self.change_settings(settings);
+            }
+            Some(Dialog::Resume(_)) => {
+                if let Some(mut media) = self.prepared.take() {
+                    if self.option == 1 { media.resume = 0; }
+                    self.ready = Some(media);
+                }
+            }
+            Some(Dialog::Next { volume, path, .. }) if self.option == 0 && self.scan.volumes.contains(&volume) => {
+                if let Some(index) = self.folders.last().and_then(|folder| folder.entries.iter()
+                    .position(|entry| Some(entry.name.as_os_str()) == path.file_name())) {
+                    self.select(index, true);
+                }
+                self.play_video_at(&volume, path, false);
             }
             Some(Dialog::DeleteFolders) if self.option == 1 => self.delete_marked_folders(),
             Some(Dialog::Video { volume, path }) => {
@@ -601,12 +795,24 @@ impl Browser {
     }
 
     fn play_video(&mut self, volume: &Volume, path: PathBuf) {
+        self.play_video_at(volume, path, true);
+    }
+
+    fn play_video_at(&mut self, volume: &Volume, path: PathBuf, offer_resume: bool) {
         let title = path.file_stem().or_else(|| path.file_name()).unwrap_or_default().to_string_lossy().into_owned();
         let mount_id = system_mount(volume);
         let spanish = self.settings.spanish_audio;
+        let known_uuid = self.facts.as_ref().filter(|(disk, _)| disk == volume).and_then(|(_, (_, uuid))| uuid.clone());
+        let volume = volume.clone();
         self.status = tr("Abriendo vídeo…", "Obrint el vídeo…").into();
         self.request(move || {
-            let result = inspect_video(&path, mount_id, spanish).map(|(file, info)| (file, info, title));
+            let result = inspect_video(&path, mount_id, spanish).map(|(file, info)| {
+                let uuid = known_uuid.or_else(|| volume_facts(&volume).1);
+                let key = uuid.and_then(|uuid| progress_key(&uuid, &volume, &path, &file));
+                let saved = key.as_ref().and_then(|key| resume_record(key, None).ok().flatten()).unwrap_or(0);
+                let resume = if offer_resume && continuity::resumable(saved, info.duration_secs) { saved } else { 0 };
+                PreparedVideo { file, info, volume, path, title, key, resume, saved }
+            });
             DiskResult::Video(result)
         });
     }
@@ -622,8 +828,10 @@ impl Browser {
     fn back(&mut self) {
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if let Some(dialog) = self.dialog.take() {
+            self.prepared = None;
             self.dialog = match dialog {
-                Dialog::Language | Dialog::ForcedSubtitles | Dialog::Audio => Some(Dialog::Settings),
+                Dialog::Language | Dialog::ForcedSubtitles | Dialog::Audio | Dialog::AutoNext | Dialog::Appearance | Dialog::Sort => Some(Dialog::Settings),
+                Dialog::Accent | Dialog::Cards => Some(Dialog::Appearance),
                 Dialog::Delete { volume, path } => Some(Dialog::Video { volume, path }),
                 _ => None,
             };
@@ -647,10 +855,20 @@ impl Browser {
         self.status.clear();
     }
 
+    fn vertical_options(&self) -> usize {
+        match self.dialog {
+            Some(Dialog::Settings) => 6,
+            Some(Dialog::Appearance) => 2,
+            Some(Dialog::Accent | Dialog::Cards | Dialog::Sort) => 3,
+            _ => 0,
+        }
+    }
+
     fn click(&mut self, x: f32, y: f32) {
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if self.dialog.is_some() {
-            let options = if matches!(self.dialog, Some(Dialog::Settings)) { &SETTINGS_OPTIONS[..] } else { &OPTIONS[..] };
+            let vertical = self.vertical_options();
+            let options = if vertical > 0 { &SETTINGS_OPTIONS[..vertical] } else { &OPTIONS[..] };
             if let Some(index) = options.iter().position(|rect| hit(*rect, x, y)) {
                 if index == 1 && !self.second_option_available() { return; }
                 self.option = index;
@@ -667,7 +885,7 @@ impl Browser {
         // browser has no shared hit-map. Pick the clicked card when possible,
         // or activate the focused card (the physical OK button may arrive with
         // the pointer parked outside the cards).
-        let grid = grid_geometry(self.len());
+        let grid = grid_geometry(self.len(), self.settings.cards);
         let visible = poster_grid::visible_in(&grid, self.len(), TOP, self.scroll.pos);
         if let Some(index) = visible.into_iter().find(|&index| {
             y >= TOP - 14.0 && y < GRID_BOTTOM && hit(self.tile_rect(index), x, y)
@@ -685,10 +903,11 @@ impl Browser {
     fn key(&mut self, key: Key, repeat: bool) {
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if self.dialog.is_some() {
-            let settings = matches!(self.dialog, Some(Dialog::Settings));
+            let vertical = self.vertical_options();
+            let settings = vertical > 0;
             match key {
                 Key::Up if settings => self.option = self.option.saturating_sub(1),
-                Key::Down if settings => self.option = (self.option + 1).min(2),
+                Key::Down if settings => self.option = (self.option + 1).min(vertical - 1),
                 Key::Left { alt: false } if !settings => self.option = 0,
                 Key::Right { alt: false } if !settings && self.second_option_available() => self.option = 1,
                 Key::Ok if !repeat => self.choose_option(),
@@ -712,7 +931,7 @@ impl Browser {
             return;
         }
         let dir = match key {
-            Key::Up if self.selected < grid_geometry(self.len()).cols => {
+            Key::Up if self.selected < grid_geometry(self.len(), self.settings.cards).cols => {
                 self.action = ACTIONS.iter().find(|(action, _)| self.action_available(*action)).map(|(action, _)| *action);
                 return;
             }
@@ -724,7 +943,7 @@ impl Browser {
             Key::Back if !repeat => return self.back(),
             _ => return,
         };
-        if let Some(index) = poster_grid::neighbour(self.selected, self.len(), grid_geometry(self.len()).cols, dir) {
+        if let Some(index) = poster_grid::neighbour(self.selected, self.len(), grid_geometry(self.len(), self.settings.cards).cols, dir) {
             self.select(index, false);
         }
     }
@@ -771,7 +990,7 @@ impl Browser {
                     Action::DeleteFolders => Some(Glyph::Trash),
 
                 };
-                draw_button(p, rect, label, self.action == Some(action), action == Action::DeleteFolders, glyph);
+                self.draw_button(p, rect, label, self.action == Some(action), action == Action::DeleteFolders, glyph);
             }
         }
         let breadcrumb = self.folders.last().map(|folder| {
@@ -797,9 +1016,24 @@ impl Browser {
             format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"))
         });
         let section = breadcrumb.as_deref().unwrap_or(tr("Discos conectados", "Discos connectats"));
-        draw_line(p, section, Rect::new(x, 181.0, width * 0.68, 45.0), theme::size::BODY, false);
-        draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x + width * 0.7, 181.0, width * 0.3, 45.0), theme::size::CAPTION, false);
+        draw_line(p, section, Rect::new(x, 181.0, width * 0.43, 45.0), theme::size::BODY, false);
+        draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x + width * 0.44, 181.0, width * 0.14, 45.0), theme::size::CAPTION, false);
 
+        if let Some((volume, (Some((total, used, free, readonly)), _))) = self.facts.as_ref()
+            .filter(|(disk, _)| self.volume() == Some(disk)) {
+            let rect = Rect::new(1110.0, 180.0, 714.0, 46.0);
+            p.rect_sheened(rect, 18.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+            let name = format!("{} · {}{}", volume_name(volume), video_size(*total),
+                if *readonly { tr(" · Solo lectura", " · Només lectura") } else { "" });
+            draw_line(p, &name, Rect::new(rect.x + 14.0, rect.y, 312.0, rect.h), theme::size::MICRO, true);
+            let bar = Rect::new(rect.x + 334.0, rect.y + 20.0, 95.0, 7.0);
+            p.rect_sheened(bar, 3.0, theme::MENU_GLASS_TOP, theme::MENU_GLASS_TOP);
+            let fill = Rect::new(bar.x, bar.y, bar.w * (*used as f64 / *total as f64).clamp(0.0, 1.0) as f32, bar.h);
+            if fill.w > 0.0 { p.rect_sheened(fill, 3.0, self.accent(), self.accent()); }
+            let space = format!("{} {} · {} {}", video_size(*used), tr("usados", "ocupats"),
+                video_size(*free), tr("libres", "lliures"));
+            draw_line(p, &space, Rect::new(rect.x + 443.0, rect.y, 259.0, rect.h), theme::size::MICRO, false);
+        }
         if self.len() == 0 {
             let message = if self.folders.last().is_some() {
                 tr("Esta carpeta no contiene subcarpetas ni vídeos compatibles.",
@@ -813,7 +1047,7 @@ impl Browser {
             draw_line(p, message, Rect::new(x, 380.0, width, 70.0), theme::size::BODY, false);
         } else {
             p.clip(Rect::new(0.0, TOP - 14.0, 1920.0, GRID_BOTTOM - TOP + 14.0));
-            let grid = grid_geometry(self.len());
+            let grid = grid_geometry(self.len(), self.settings.cards);
             let cells = poster_grid::visible_in(&grid, self.len(), TOP, self.scroll.pos);
             for i in cells.filter(|index| *index != self.selected) { self.draw_tile(p, i, false); }
             self.draw_tile(p, self.selected, true);
@@ -856,6 +1090,13 @@ impl Browser {
         };
         let (title, subject, detail, options) = match dialog {
             Dialog::Settings => (tr("Ajustes", "Ajustos"), String::new(), "", ["", ""]),
+            Dialog::Appearance => (tr("Apariencia", "Aparença"), String::new(), "", ["", ""]),
+            Dialog::Accent => (tr("Color de acento", "Color de destacat"), String::new(), "", ["", ""]),
+            Dialog::Cards => (tr("Tamaño de tarjetas", "Mida de les targetes"), String::new(), "", ["", ""]),
+            Dialog::Sort => (tr("Biblioteca USB · Orden", "Biblioteca USB · Ordre"), String::new(), "", ["", ""]),
+            Dialog::AutoNext => (tr("Siguiente episodio automático", "Episodi següent automàtic"), String::new(),
+                save_status(tr("Se aplica a episodios consecutivos de la misma carpeta.", "S’aplica a episodis seguits de la mateixa carpeta.")),
+                [tr("Desactivado", "Desactivat"), tr("Activado", "Activat")]),
             Dialog::Language => (tr("Idioma de CineUSB", "Idioma del CineUSB"), String::new(),
                 save_status(tr("Elige el idioma de la app.", "Tria en quin idioma vols fer servir l’app.")),
                 ["Castellano", "Català"]),
@@ -866,6 +1107,12 @@ impl Browser {
             Dialog::Audio => (tr("Idioma de audio predeterminado", "Idioma d’àudio per defecte"), String::new(),
                 save_status(tr("Se aplica al abrir cada vídeo.", "S’aplica quan obres un vídeo.")),
                 [tr("Automático", "Automàtic"), tr("Español", "Castellà")]),
+            Dialog::Resume(_) => (tr("Reanudar reproducción", "Continua mirant"),
+                self.prepared.as_ref().map_or_else(String::new, |media| media.title.clone()), "",
+                ["", tr("Empezar desde el principio", "Torna a començar")]),
+            Dialog::Next { path, .. } => (tr("Siguiente episodio", "Episodi següent"),
+                path.file_stem().unwrap_or_default().to_string_lossy().into_owned(), "",
+                [tr("Reproducir ahora", "Reprodueix ara"), cancel]),
             Dialog::Video { path, .. } => (tr("Opciones del vídeo", "Opcions del vídeo"),
                 path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
                 "",
@@ -894,11 +1141,23 @@ impl Browser {
         if eject { draw_glyph(p, Glyph::Eject, glyph_rect, theme::TEXT_PRIMARY); }
         let title_y = if destructive || eject { 414.0 } else { 343.0 };
         draw_line(p, title, Rect::new(x, title_y, w, 60.0), theme::size::HEADLINE, true);
-        if matches!(dialog, Dialog::Settings) {
-            let settings_labels = [tr("Idioma", "Idioma"), tr("Subtítulos forzados", "Subtítols forçats"),
-                tr("Idioma de audio predeterminado", "Idioma d’àudio per defecte")];
-            for (index, (rect, label)) in SETTINGS_OPTIONS.into_iter().zip(settings_labels).enumerate() {
-                draw_button(p, rect, label, self.option == index, false, None);
+        let labels: &[&str] = match dialog {
+            Dialog::Settings => &[tr("Idioma", "Idioma"), tr("Subtítulos forzados", "Subtítols forçats"),
+                tr("Idioma de audio predeterminado", "Idioma d’àudio per defecte"),
+                tr("Siguiente episodio automático", "Episodi següent automàtic"),
+                tr("Apariencia", "Aparença"), tr("Biblioteca USB", "Biblioteca USB")],
+            Dialog::Appearance => &[tr("Color de acento", "Color de destacat"), tr("Tamaño de tarjetas", "Mida de les targetes")],
+            Dialog::Accent => &[tr("Morado", "Lila"), tr("Azul", "Blau"), tr("Gris neutro", "Gris neutre")],
+            Dialog::Cards => &[tr("Normal", "Normal"), tr("Compacto", "Compacte"), tr("Grande", "Gran")],
+            Dialog::Sort => &[tr("Nombre", "Nom"), tr("Fecha de modificación", "Data de modificació"), tr("Tamaño", "Mida")],
+            _ => &[],
+        };
+        if !labels.is_empty() {
+            for (index, (rect, &label)) in SETTINGS_OPTIONS.into_iter().zip(labels).enumerate() {
+                self.draw_button(p, rect, label, self.option == index, false, None);
+            }
+            if !self.status.is_empty() {
+                draw_line(p, &self.status, Rect::new(x, 737.0, w, 40.0), theme::size::MICRO, false);
             }
             return;
         }
@@ -909,7 +1168,16 @@ impl Browser {
                 draw_video_details(p, *details, x, 490.0);
             }
         }
+        let resume_label = match dialog {
+            Dialog::Resume(seconds) => format!("{} {}", tr("Continuar desde", "Continua a partir de"), playback_time(*seconds)),
+            _ => String::new(),
+        };
+        if matches!(dialog, Dialog::Next { .. }) {
+            let countdown = format!("{} {} s", tr("Empieza en", "Comença d’aquí a"), self.countdown_display);
+            draw_line(p, &countdown, Rect::new(x, 488.0, w, 48.0), theme::size::BODY, false);
+        }
         for (index, (rect, label)) in OPTIONS.into_iter().zip(options).enumerate() {
+            let label = if index == 0 && !resume_label.is_empty() { &resume_label } else { label };
             if index == 1 && !self.second_option_available() { continue; }
             let glyph = match (dialog, index) {
                 (Dialog::Video { .. }, 0) => Some(Glyph::Play),
@@ -917,8 +1185,16 @@ impl Browser {
                 (Dialog::Eject(_), 1) => Some(Glyph::Eject),
                 _ => None,
             };
-            draw_button(p, rect, label, self.option == index, destructive && index == 1, glyph);
+            self.draw_button(p, rect, label, self.option == index, destructive && index == 1, glyph);
         }
+    }
+
+    fn accent(&self) -> [f32; 4] {
+        theme::usb_accent(self.settings.accent)
+    }
+
+    fn draw_button(&self, p: Painter, rect: Rect, label: &str, focused: bool, danger: bool, glyph: Option<Glyph>) {
+        draw_button(p, rect, label, focused, danger, glyph, self.accent());
     }
 
     fn draw_tile(&self, p: Painter, index: usize, focused: bool) {
@@ -930,17 +1206,17 @@ impl Browser {
         let lift = ((scale - 1.0) / (STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
         cover.draw(p, card, radius, lift);
         if focused && self.action.is_none() {
-            p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, theme::CONTROL_FOCUS_RING);
+            p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, if self.settings.accent == 0 { theme::CONTROL_FOCUS_RING } else { self.accent() });
         }
         if let Some(marked) = &self.selection {
             if let Some(entry) = self.folders.last().and_then(|folder| folder.entries.get(index)).filter(|entry| entry.kind == Kind::Folder) {
                 let checked = marked.contains(&entry.name);
                 let mark = Rect::new(card.x + card.w - 57.0, card.y + 17.0, 40.0, 40.0);
-                let fill = if checked { theme::ACCENT } else { theme::scrim_black(0.6) };
+                let fill = if checked { self.accent() } else { theme::scrim_black(0.6) };
                 p.rect(mark, 20.0, fill, fill, 0.0);
                 p.rring(mark, 20.0, 2.0, theme::TEXT_PRIMARY);
                 if checked {
-                    p.rring(card, radius, 3.0, theme::ACCENT);
+                    p.rring(card, radius, 3.0, self.accent());
                     icons::draw(p, Icon::Check, Rect::new(mark.x + 6.0, mark.y + 6.0, 28.0, 28.0), theme::ACCENT_INK);
                 }
             }
@@ -989,6 +1265,11 @@ fn video_size(bytes: u64) -> String {
     format!("{number} {unit}")
 }
 
+fn playback_time(seconds: u64) -> String {
+    if seconds >= 3600 { format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60) }
+    else { format!("{}:{:02}", seconds / 60, seconds % 60) }
+}
+
 fn video_duration(seconds: u64) -> String {
     let minutes = seconds / 60;
     if minutes == 0 {
@@ -1002,21 +1283,30 @@ fn video_duration(seconds: u64) -> String {
 
 fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, mut x: f32, y: f32) {
     use plx_play_feed::VideoRange;
-    let range = details.range.map(|range| match range {
-        VideoRange::Sdr => "SDR",
-        VideoRange::Hdr10 => "HDR10",
-        VideoRange::Hdr10Plus => "HDR10+",
-        VideoRange::DolbyVision => "Dolby Vision",
-        VideoRange::DolbyVisionHdr10 => "Dolby Vision + HDR10",
-    });
+    let dolby = matches!(details.range, Some(VideoRange::DolbyVision | VideoRange::DolbyVisionHdr10));
+    let formats = [
+        dolby.then_some("Dolby Vision"),
+        details.hdr10_plus.then_some("HDR10+"),
+        details.hdr10_base.then_some("HDR10"),
+        (details.range == Some(VideoRange::Sdr)).then_some("SDR"),
+    ];
     let size = details.bytes.map(video_size);
     let duration = details.duration_secs.map(video_duration);
-    for text in [range, size.as_deref(), duration.as_deref()].into_iter().flatten() {
-        let (run, width) = TtfMeasure.fit_line_measured(text, 360.0, theme::size::CAPTION, true);
-        let rect = Rect::new(x, y, width + 32.0, 43.0);
-        p.rect_sheened(rect, 12.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
-        Label::new(run.as_ptr(), theme::size::CAPTION, theme::TEXT_READING).h(HAlign::Center).bold().draw(p, rect);
-        x += rect.w + 12.0;
+    let labels = formats.into_iter().flatten().map(|text| (text, true)).chain(
+        [size.as_deref(), duration.as_deref()].into_iter().flatten().map(|text| (text, false)));
+    for (text, format) in labels {
+        let (run, width) = TtfMeasure.fit_line_measured(text, 360.0, theme::size::MICRO, true);
+        let icon = if format { 24.0 } else { 0.0 };
+        let rect = Rect::new(x, y, width + icon + 25.0, 43.0);
+        p.rect_sheened(rect, 10.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+        if format {
+            p.rring(rect, 10.0, 1.0, theme::TEXT_SECONDARY);
+            let svg = icons::Svg::new(include_str!("../../../assets/icons/cineusb-dynamic-range.svg"));
+            icons::draw_svg(p, svg, Rect::new(x + 10.0, y + 12.0, 19.0, 19.0), theme::TEXT_READING);
+        }
+        Label::new(run.as_ptr(), theme::size::MICRO, theme::TEXT_READING).h(HAlign::Center).bold()
+            .draw(p, Rect::new(x + icon, y, rect.w - icon, rect.h));
+        x += rect.w + 9.0;
     }
 }
 
@@ -1034,9 +1324,9 @@ fn draw_glyph(p: Painter, glyph: Glyph, rect: Rect, ink: [f32; 4]) {
     icons::draw_svg(p, icons::Svg::new(asset), rect, ink);
 }
 
-fn draw_button(p: Painter, rect: Rect, label: &str, focused: bool, danger: bool, glyph: Option<Glyph>) {
+fn draw_button(p: Painter, rect: Rect, label: &str, focused: bool, danger: bool, glyph: Option<Glyph>, accent: [f32; 4]) {
     let (fill, ink) = if danger { (theme::CONTROL_DELETE_FILL, theme::CONTROL_IDLE_INK) }
-        else if focused { (theme::ACCENT, theme::ACCENT_INK) }
+        else if focused { (accent, theme::ACCENT_INK) }
         else { (theme::CONTROL_IDLE_FILL, theme::TEXT_PRIMARY) };
     widgets::draw_control_face(p, rect, fill, focused, widgets::ControlGround::Keyed);
     if focused && danger { p.rring(rect, rect.h * 0.5, 3.0, theme::CONTROL_FOCUS_RING); }
@@ -1073,22 +1363,25 @@ fn load_settings() -> Result<Option<Settings>, String> {
     };
     let forced_subtitles = flag(fields.next())?;
     let spanish_audio = flag(fields.next().or(Some("0")))?;
+    let auto_next = flag(fields.next().or(Some("1")))?;
+    let choice = |field: Option<&str>| field.unwrap_or("0").parse::<usize>()
+        .ok().filter(|value| *value < 3).ok_or_else(|| "invalid settings choice".to_owned());
+    let accent = choice(fields.next())?;
+    let cards = choice(fields.next())?;
+    let sort = choice(fields.next())?;
     if fields.next().is_some() { return Err("invalid settings record".into()); }
-    Ok(Some(Settings { language, forced_subtitles, spanish_audio }))
+    Ok(Some(Settings { language, forced_subtitles, spanish_audio, auto_next, accent, cards, sort }))
 }
 
 fn save_settings(settings: Settings) -> Result<(), String> {
-    let catalan = settings.language == Preference::Ca;
+    let record = format!("{} {} {} {} {} {} {}", if settings.language == Preference::Ca { "ca" } else { "es" },
+        u8::from(settings.forced_subtitles), u8::from(settings.spanish_audio), u8::from(settings.auto_next),
+        settings.accent, settings.cards, settings.sort);
     #[cfg(not(feature = "hostsim"))]
-    return crate::port::save_usb_preferences(catalan, settings.forced_subtitles, settings.spanish_audio)
-        .map_err(|error| format!("{error:?}"));
+    return crate::port::save_usb_preferences(&record).map_err(|error| format!("{error:?}"));
     #[cfg(feature = "hostsim")]
-    {
-        let record = format!("{} {} {}", if catalan { "ca" } else { "es" },
-            u8::from(settings.forced_subtitles), u8::from(settings.spanish_audio));
-        plx_plex::plex::session::write_atomic(&plx_base::paths::in_runtime_dir("cineusb-settings"), record.as_bytes())
-            .map_err(|error| format!("{error:?}"))
-    }
+    plx_plex::plex::session::write_atomic(&plx_base::paths::in_runtime_dir("cineusb-settings"), record.as_bytes())
+        .map_err(|error| format!("{error:?}"))
 }
 
 fn mutate_usb(action: Mutation, volume: &Volume, path: &std::path::Path) -> Result<(), String> {
@@ -1136,12 +1429,60 @@ fn scan_volumes() -> Scan {
     disk::volumes()
 }
 
+fn volume_facts(volume: &Volume) -> VolumeFacts {
+    #[cfg(not(feature = "hostsim"))]
+    if let Some(mount) = system_mount(volume) {
+        return crate::port::usb_volume_details(&volume.path, mount).unwrap_or_default();
+    }
+    #[cfg(feature = "hostsim")]
+    return (None, Some(volume.path.to_string_lossy().into_owned()));
+    #[cfg(not(feature = "hostsim"))]
+    Default::default()
+}
+
+fn progress_key(uuid: &str, volume: &Volume, path: &std::path::Path, file: &File) -> Option<String> {
+    use std::fmt::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let relative = path.strip_prefix(&volume.path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let mut key = String::new();
+    for byte in uuid.bytes().chain([0]).chain(relative.as_os_str().as_encoded_bytes().iter().copied())
+        .chain([0]).chain(metadata.len().to_le_bytes()).chain(metadata.mtime().to_le_bytes()) {
+        write!(key, "{byte:02x}").ok()?;
+    }
+    Some(key)
+}
+
+fn resume_record(key: &str, position: Option<u64>) -> Result<Option<u64>, String> {
+    #[cfg(not(feature = "hostsim"))]
+    return crate::port::usb_resume(key, position).map_err(|error| format!("{error:?}"));
+    #[cfg(feature = "hostsim")]
+    {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let path = plx_base::paths::in_runtime_dir(&format!("cineusb-resume-{:016x}", hasher.finish()));
+        if let Some(position) = position {
+            let record = format!("{key} {position}");
+            plx_plex::plex::session::write_atomic(&path, record.as_bytes()).map_err(|error| format!("{error:?}"))?;
+            return Ok(None);
+        }
+        let record = std::fs::read_to_string(path).unwrap_or_default();
+        Ok(record.split_once(' ').filter(|(saved, _)| *saved == key).and_then(|(_, seconds)| seconds.parse().ok()))
+    }
+}
+
 fn list_folder(path: &std::path::Path, _mount_id: Option<u64>) -> io::Result<Vec<Entry>> {
     #[cfg(not(feature = "hostsim"))]
     if let Some(id) = _mount_id {
         let entries = crate::port::list_usb_folder(path, id)
             .map_err(|error| io::Error::other(format!("Homebrew USB ({error:?})")))?;
-        let mut entries: Vec<_> = entries.into_iter().filter_map(|(name, dir)| disk::media_entry(name, dir)).collect();
+        let mut entries: Vec<_> = entries.into_iter().filter_map(|(name, dir, modified, size)| {
+            let mut entry = disk::media_entry(name, dir)?;
+            entry.modified = modified;
+            entry.size = size;
+            Some(entry)
+        }).collect();
         disk::sort_entries(&mut entries);
         return Ok(entries);
     }
@@ -1258,7 +1599,7 @@ fn local_playing_item(info: &plx_play_feed::LocalMedia, dovi: plx_data::metadata
         // the ordinary subtitle-selection path from issuing Plex PUT requests.
         sid: plx_plex::plex::ServerId::from_raw(0),
         rk: String::new(), show_rk: String::new(), kind: String::new(),
-        duration_ms: None, audio, subs, video_fps: info.fps,
+        duration_ms: info.duration_secs.and_then(|seconds| i64::try_from(seconds.saturating_mul(1000)).ok()), audio, subs, video_fps: info.fps,
         width: i64::from(info.width), height: i64::from(info.height), bitrate: 0,
         dovi, markers: Vec::new(), chapters: Vec::new(), hdr: dovi.present,
     }
@@ -1275,7 +1616,8 @@ fn initial_forced_subtitle(item: &plx_data::metadata::PlayingItem, enabled: bool
 }
 
 pub(super) fn tick(app: &mut App) {
-    let Some((file, info, title)) = app.usb.update() else { return };
+    let Some(PreparedVideo { file, info, title, volume, path, key, resume, saved }) = app.usb.update() else { return };
+    if !app.usb.scan.volumes.contains(&volume) { return; }
     let ps = &mut app.player.session;
     let dovi = info.dovi.map_or(plx_data::metadata::Dovi::NONE, |record| plx_data::metadata::Dovi {
         present: record.dv_profile > 0, profile: i64::from(record.dv_profile),
@@ -1297,8 +1639,10 @@ pub(super) fn tick(app: &mut App) {
         && plx_media::route::set_local_source(ps, file, &title, audio, forced, &item, playback::start_caps());
     if ok {
         plx_media::route::set_stream_source_raster(ps, info.width, info.height);
-        if playback::start_playback(ps, &mut app.adapters.player, 0, playback::Origin::Here,
+        if playback::start_playback(ps, &mut app.adapters.player, resume.saturating_mul(1_000_000_000).min(i64::MAX as u64) as i64, playback::Origin::Here,
             4500, None, &mut app.pages, &mut app.bridge) {
+            app.usb.playing = Some(PlayingVideo { volume, path, key, position: resume, duration: info.duration_secs,
+                saved, next_save: Instant::now() + Duration::from_secs(30), seen_player: false });
             app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(
                 Some(item)));
             return;
@@ -1306,6 +1650,32 @@ pub(super) fn tick(app: &mut App) {
         plx_media::route::clear_url(ps);
     }
     app.usb.status = tr("No se pudo iniciar el reproductor con este vídeo.", "No s’ha pogut reproduir aquest vídeo.").into();
+}
+
+pub(super) fn observe_playback(app: &mut App) {
+    let Some(playing) = &mut app.usb.playing else { return };
+    if super::bridge::player(&app.pages).is_some() {
+        playing.seen_player = true;
+        if let Some(position) = plx_media::player::observed_position_ns(&app.player.session) {
+            playing.position = position.max(0) as u64 / 1_000_000_000;
+        }
+        if let Some(duration) = plx_media::player::duration_ns(&app.player.session).filter(|duration| *duration > 0) {
+            playing.duration = Some(duration as u64 / 1_000_000_000);
+        }
+        app.usb.store_playhead(false, false);
+    } else if playing.seen_player {
+        app.usb.finish_video(false);
+    }
+}
+
+pub(super) fn playback_completed(app: &mut App) {
+    app.usb.finish_video(true);
+}
+
+pub(super) fn flush_playback(app: &mut App) {
+    observe_playback(app);
+    app.usb.finish_video(false);
+    app.usb.flush_progress(true);
 }
 
 #[cfg(test)]
@@ -1318,7 +1688,7 @@ mod usb_browser_tests {
         let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: Some(42), system: true };
         let folder = |path, selected, names: &[&str]| Folder {
             volume: volume.clone(), path, selected, collection: None,
-            entries: names.iter().map(|name| Entry { name: (*name).into(), kind: Kind::Folder }).collect(),
+            entries: names.iter().map(|name| Entry { name: (*name).into(), kind: Kind::Folder, modified: None, size: None }).collect(),
         };
         browser.scan.volumes.push(volume.clone());
         browser.folders.push(folder(volume.path.clone(), 1, &["Pel·lícules", "Sèries"]));
@@ -1338,7 +1708,7 @@ mod usb_browser_tests {
         browser.scan.volumes = (0..9).map(|index| Volume {
             path: format!("/tmp/usb/sda/sda{index}").into(), label: None, mount_id: None, system: false,
         }).collect();
-        assert_eq!(grid_geometry(browser.len()).cols, 5);
+        assert_eq!(grid_geometry(browser.len(), 0).cols, 5);
         for (first, last) in [(0, 4), (5, 8)] {
             let left = browser.tile_rect(first);
             let right = browser.tile_rect(last);
@@ -1354,7 +1724,7 @@ mod usb_browser_tests {
         browser.scan.volumes.push(volume.clone());
         browser.folders.push(Folder {
             path: volume.path.clone(), volume, collection: None, selected: 0,
-            entries: vec![Entry { kind: Kind::Video, name: "Pel·lícula.mkv".into() }],
+            entries: vec![disk::media_entry("Pel·lícula.mkv".into(), false).unwrap()],
         });
         browser.open();
         assert!(matches!(browser.dialog.as_ref(), Some(Dialog::Video { path: selected, .. }) if *selected == path));
@@ -1371,6 +1741,7 @@ mod usb_browser_tests {
 
     fn media() -> plx_play_feed::LocalMedia {
         plx_play_feed::LocalMedia {
+            duration_secs: None,
             video: "hevc".into(), audio: "eac3".into(), audio_channels: 6,
             audio_rate: 48_000, audio_depth: 16, audio_stream_index: 1,
             audio_language: Some("eng".into()), audio_title: "English 5.1".into(),

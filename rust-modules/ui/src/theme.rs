@@ -1504,3 +1504,8 @@ const PURPLE_700: [f32; 4] = rgb8(0x70, 0x30, 0xa0);
 /// Opaque main-thread checker warning surface (developer builds only).
 #[cfg(feature = "threadcheck")]
 pub const RUNTIME_WARNING: [f32; 4] = PURPLE_700;
+
+/// Accent choices for the local USB library. Index zero preserves the shared default.
+pub fn usb_accent(index: usize) -> [f32; 4] {
+    [ACCENT, rgb8(0x91, 0xbc, 0xff), rgb8(0xc2, 0xc6, 0xcc)][index]
+}

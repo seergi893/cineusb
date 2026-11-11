@@ -37,11 +37,15 @@ fn main() {
             let result = match (mode.as_str(), parameters) {
                 ("--cineusb-open", [pid, slot, id, path]) => Some(usb_open::run(pid, slot, id, path)),
                 ("--cineusb-volumes", []) => Some(usb_open::list_volumes()),
+                ("--cineusb-volume-details", [id, path]) => Some(usb_open::volume_details(id, path)),
                 ("--cineusb-list", [id, path]) => Some(usb_open::list_folder(id, path)),
                 ("--cineusb-delete", [id, path]) => Some(usb_open::delete(id, path)),
                 ("--cineusb-delete-folder", [id, path]) => Some(usb_open::delete_folder(id, path)),
                 ("--cineusb-eject", [id, path]) => Some(usb_open::eject(id, path)),
+                ("--cineusb-resume", [key]) => Some(usb_preferences::resume(key, None)),
+                ("--cineusb-resume", [key, position]) => Some(usb_preferences::resume(key, Some(position))),
                 ("--cineusb-preferences", []) => Some(usb_preferences::read()),
+                ("--cineusb-preferences", fields) if fields.len() == 7 => Some(usb_preferences::write_extended(fields)),
                 ("--cineusb-preferences", [language, forced, audio]) => Some(usb_preferences::write(language, forced, audio)),
                 ("--cineusb-open" | "--cineusb-volumes" | "--cineusb-list" | "--cineusb-delete" | "--cineusb-eject", _) => {
                     Some(Err(std::io::Error::other("invalid CineUSB USB request")))
