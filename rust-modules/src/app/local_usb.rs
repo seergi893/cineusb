@@ -88,6 +88,24 @@ fn video_badge_slots(card: Rect) -> [Rect; 3] {
     ]
 }
 
+/// Compact clock notation for the fixed-width metadata badge. Never elide
+/// the minutes of an hour-long movie (e.g. 1h55, not 1 h 55...).
+fn card_duration(seconds: u64, available_width: f32) -> String {
+    let minutes = seconds / 60;
+    if minutes < 1 { return "<1m".into(); }
+    if minutes < 60 {
+        return if available_width < 95.0 { format!("{minutes}m") }
+            else { format!("{minutes} min") };
+    }
+    let hours = minutes / 60;
+    let remainder = minutes % 60;
+    if available_width < 125.0 {
+        format!("{hours}h{remainder:02}")
+    } else {
+        format!("{hours} h {remainder:02} min")
+    }
+}
+
 fn compact_badge_text(value: &str, compact: bool) -> String {
     if !compact { return value.to_owned(); }
     if value == "4K UHD" { return "4K".into(); }
@@ -2464,10 +2482,11 @@ impl Browser {
         if let Some((folder, entry)) = current.filter(|(_, entry)| entry.kind == Kind::Video) {
             let details = self.details.get(&Self::detail_key(folder, entry));
             let episode = continuity::episode(&entry.name).map(|(_, season, episode)| format!("{season}×{episode:02}"));
-            let duration = details.and_then(|details| details.duration_secs).map(video_duration);
+            let slots = video_badge_slots(card);
+            let duration = details.and_then(|details| details.duration_secs)
+                .map(|seconds| card_duration(seconds, slots[1].w - 6.0));
             let quality = details.and_then(|details| details.resolution)
                 .map(|(width, height)| resolution_label(width, height));
-            let slots = video_badge_slots(card);
             let compact = video_card_size(card) == VideoCardSize::Compact;
             for (text, badge) in [episode, duration, quality].into_iter().zip(slots) {
                 let Some(text) = text else { continue };
@@ -3127,6 +3146,18 @@ pub(super) fn flush_playback(app: &mut App) {
 mod usb_browser_tests {
     use super::*;
 
+
+    #[test]
+    fn hour_long_movies_fit_card_duration_badges_without_ellipsis() {
+        for width in [58.0, 70.0, 90.0, 120.0] {
+            assert_eq!(card_duration(115 * 60, width), "1h55");
+            assert_eq!(card_duration(135 * 60, width), "2h15");
+            assert_eq!(card_duration(125 * 60, width), "2h05");
+        }
+        assert_eq!(card_duration(35 * 60, 65.0), "35m");
+        assert_eq!(card_duration(35 * 60, 110.0), "35 min");
+        assert_eq!(card_duration(115 * 60, 140.0), "1 h 55 min");
+    }
 
     #[test]
     fn adaptive_metadata_uses_footer_without_overlaps() {
