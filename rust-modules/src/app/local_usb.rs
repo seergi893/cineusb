@@ -118,7 +118,7 @@ fn folder_fold(name: &str) -> String {
 fn media_folder_score(name: &str, kind: usize) -> u8 {
     let name = folder_fold(name);
     let exact: &[&str] = if kind == 1 {
-        &["pelis", "peliculas", "movies", "films", "film", "cine", "cinema", "moviecollection", "pelicules"]
+        &["pelis", "peliculas", "movies", "films", "film", "cine", "cinema", "moviecollection", "pelicules", "pellicules"]
     } else {
         &["series", "seriestv", "tvseries", "tvshows", "shows", "temporadas", "episodios", "temporades", "episodis"]
     };
@@ -524,6 +524,9 @@ impl Browser {
                         let success = result.is_ok();
                         if success {
                             self.scan.volumes.retain(|item| *item != volume);
+                            self.discovery_cache.retain(|(path, _, _), _| *path != volume.path);
+                            if self.media_view.as_ref().is_some_and(|view| view.volume == volume) { self.leave_media(); }
+                            if self.search_view.as_ref().is_some_and(|view| view.volume == volume) { self.leave_search(); }
                             self.leave_favorites();
                             self.folders.clear();
                             self.action = None;
@@ -559,6 +562,14 @@ impl Browser {
                         let selected = self.scan.volumes.get(self.selected).cloned();
                         self.details.clear();
                         self.scan = scan;
+                        self.discovery_cache.retain(|(path, id, _), _| self.scan.volumes.iter()
+                            .any(|volume| volume.path == *path && volume.mount_id.unwrap_or(0) == *id));
+                        if self.media_view.as_ref().is_some_and(|view| !self.scan.volumes.contains(&view.volume)) {
+                            self.leave_media();
+                        }
+                        if self.search_view.as_ref().is_some_and(|view| !self.scan.volumes.contains(&view.volume)) {
+                            self.leave_search();
+                        }
                         if self.favorite_view.as_ref().is_some_and(|view| !self.scan.volumes.contains(&view.volume))
                             || self.folders.last().is_some_and(|folder| !self.scan.volumes.contains(&folder.volume)) {
                             self.leave_favorites();
