@@ -1756,6 +1756,9 @@ impl Browser {
                 Key::Back if !repeat => self.back(),
                 _ => {}
             }
+            if matches!(self.dialog, Some(Dialog::Settings)) && self.option != previous_setting {
+                self.settings_focus_motion = Some((previous_setting, self.option, Instant::now()));
+            }
             return;
         }
         if let Some(action) = self.action {
