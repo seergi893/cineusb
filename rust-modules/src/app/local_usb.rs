@@ -100,7 +100,7 @@ const SETTINGS_OPTIONS: [Rect; 6] = [
 
 const UNIFIED_SETTINGS_COUNT: usize = 8;
 fn unified_setting_rect(index: usize) -> Rect {
-    Rect::new(815.0, 179.0 + index as f32 * 91.0, 940.0, 68.0)
+    Rect::new(825.0, 168.0 + index as f32 * 98.0, 975.0, 58.0)
 }
 
 fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'static str, String) {
@@ -1662,37 +1662,54 @@ impl Browser {
     }
 
     fn draw_unified_settings(&self, p: Painter) {
-        let alpha = self.dialog_started.map_or(1.0, motion_alpha);
-        let p = p.alpha(0.8 + 0.2 * alpha);
-        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.93), theme::scrim_black(0.93), 0.0);
-        draw_line(p, tr("Ajustes", "Ajustos"), Rect::new(115.0, 138.0, 610.0, 78.0), theme::size::HEADLINE, true);
+        // Full-page PlxNative-like view, not the alert/modal glass surface.
+        let p = p.alpha(self.dialog_started.map_or(1.0, |at| 0.86 + motion_alpha(at) * 0.14));
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.98), theme::scrim_black(0.98), 0.0);
+        draw_line(p, tr("Configuración", "Configuració"),
+            Rect::new(110.0, 169.0, 650.0, 80.0), theme::size::HEADLINE, true);
         let (_, description, _) = unified_setting_text(self.option, &self.settings);
-        draw_line(p, description, Rect::new(115.0, 250.0, 585.0, 165.0), theme::size::BODY, false);
-        draw_line(p, tr("Usa izquierda y derecha para cambiar el valor.", "Fes servir esquerra i dreta per canviar el valor."),
-            Rect::new(115.0, 480.0, 600.0, 100.0), theme::size::CAPTION, false);
+        plx_ui::text_view::TextView::new(description, theme::size::BODY, theme::TEXT_SECONDARY)
+            .with_measure(&TtfMeasure).break_long_words().leading(34.0).max_lines(5)
+            .draw(p, Rect::new(110.0, 281.0, 590.0, 240.0));
+        draw_line(p, tr("← → Cambiar · OK Seleccionar · Atrás Cerrar",
+                "← → Canvia · OK Selecciona · Enrere Tanca"),
+            Rect::new(110.0, 879.0, 650.0, 50.0), theme::size::CAPTION, false);
+        // All eight current settings fit without scrolling at 1920×1080.
+        // Leave a separate heading in the gutter between grouped rows.
         for i in 0..UNIFIED_SETTINGS_COUNT {
             let rect = unified_setting_rect(i);
             let focused = self.option == i;
-            if focused {
-                p.rect_sheened(rect, 18.0, self.accent(), self.accent());
-            } else {
-                p.rect_sheened(rect, 18.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
-            }
-            let (label, _, value) = unified_setting_text(i, &self.settings);
-            draw_line(p, label, Rect::new(rect.x + 20.0, rect.y + 10.0, 560.0, 47.0), theme::size::CAPTION, focused);
-            draw_line(p, &value, Rect::new(rect.x + 602.0, rect.y + 10.0, 305.0, 47.0), theme::size::CAPTION, focused);
             if matches!(i, 0 | 2 | 5 | 6) {
-                let category = match i {
+                let heading = match i {
                     0 => tr("BIBLIOTECA / USB", "BIBLIOTECA / USB"),
                     2 => tr("REPRODUCCIÓN", "REPRODUCCIÓ"),
                     5 => tr("SISTEMA", "SISTEMA"),
                     _ => tr("APARIENCIA", "APARENÇA"),
                 };
-                draw_line(p, category, Rect::new(rect.x, rect.y - 22.0, 600.0, 21.0), theme::size::MICRO, true);
+                draw_line(p, heading, Rect::new(rect.x + 10.0, rect.y - 28.0, rect.w - 20.0, 25.0),
+                    theme::size::MICRO, true);
+            }
+            if focused {
+                p.rect_sheened(rect, 14.0, theme::TEXT_PRIMARY, theme::TEXT_PRIMARY);
+            }
+            let (name, _, value) = unified_setting_text(i, &self.settings);
+            let foreground = if focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
+            let value_ink = if focused { theme::ACCENT_INK } else { theme::TEXT_SECONDARY };
+            let label = TtfMeasure.fit_line(name, 630.0, theme::size::CAPTION, focused);
+            Label::new(label.as_ptr(), theme::size::CAPTION, foreground)
+                .h(HAlign::Left).draw(p, Rect::new(rect.x + 24.0, rect.y + 6.0, 630.0, 46.0));
+            let fit = TtfMeasure.fit_line(&value, 280.0, theme::size::CAPTION, focused);
+            Label::new(fit.as_ptr(), theme::size::CAPTION, value_ink)
+                .h(HAlign::Right).draw(p, Rect::new(rect.x + rect.w - 322.0, rect.y + 6.0, 292.0, 46.0));
+            // The selected color appears as a swatch while focus remains white.
+            if i == 6 {
+                let swatch = theme::usb_accent(self.settings.accent);
+                p.rect_sheened(Rect::new(rect.x + rect.w - 344.0, rect.y + 18.0, 17.0, 17.0),
+                    8.0, swatch, swatch);
             }
         }
         if !self.status.is_empty() {
-            draw_line(p, &self.status, Rect::new(115.0, 940.0, 1600.0, 51.0), theme::size::CAPTION, false);
+            draw_line(p, &self.status, Rect::new(110.0, 941.0, 1630.0, 53.0), theme::size::CAPTION, false);
         }
     }
 
@@ -1906,7 +1923,7 @@ impl Browser {
             p.rect_sheened(fill, 2.5, self.accent(), self.accent());
         }
         if focused && self.action.is_none() {
-            let focus = if self.settings.accent == 0 { theme::CONTROL_FOCUS_RING } else { self.accent() };
+            let focus = self.accent();
             if record == WATCHED { p.rring(card.scaled(0.96), radius, 1.5, focus); }
             else { p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, focus); }
         }
