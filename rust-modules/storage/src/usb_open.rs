@@ -354,6 +354,52 @@ fn device_partitions_mounted(table: &[u8], drives: &[&str]) -> bool {
     })
 }
 
+/// A webOS PDM eject can report success while the tntfs/NTFS mount remains
+/// live. Only then try a regular, synchronous unmount. Never force/lazy-unmount,
+/// and never touch a partition outside the selected physical USB device.
+fn unmount_still_live_ntfs(table: &[u8], drives: &[&str]) -> io::Result<usize> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for line in table.split(|byte| *byte == b'\\n') {
+        let mut fields = line.split(|byte| *byte == b' ');
+        let _ = fields.next();
+        let _ = fields.next();
+        let _ = fields.next();
+        let mount_root = fields.next().unwrap_or_default();
+        let mount_path = decode_mount(fields.next().unwrap_or_default());
+        let mut tail = line.split(|byte| *byte == b' ').skip_while(|field| *field != b"-").skip(1);
+        let filesystem = tail.next().unwrap_or_default();
+        let source = tail.next().unwrap_or_default();
+        let Some(source) = source.strip_prefix(b"/dev/") else { continue };
+        let partition = source.rsplit(|byte| *byte == b'/').next().unwrap_or(source);
+        if !drives.iter().any(|drive| drive.as_bytes().rsplit(|byte| *byte == b'/').next() == Some(partition)) {
+            continue;
+        }
+        // If another partition is mounted elsewhere or uses a different
+        // filesystem, do not claim the whole physical drive is safely ejected.
+        if mount_root != b"/" || !mount_path.starts_with("/tmp/usb")
+            || !matches!(filesystem, b"ntfs" | b"ntfs3" | b"tntfs" | b"fuseblk") {
+            return Err(io::Error::other("safe eject unconfirmed: a USB partition still has an unsupported or external mount"));
+        }
+        candidates.push(mount_path);
+    }
+    // Child mountpoints must be unmounted before their parents.
+    candidates.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for mount in &candidates {
+        let handle = File::open(mount)?;
+        if unsafe { libc::syncfs(handle.as_raw_fd()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        drop(handle);
+        let path = CString::new(mount.as_os_str().as_bytes()).map_err(|_| invalid())?;
+        if unsafe { libc::umount2(path.as_ptr(), 0) } != 0 {
+            return Err(io::Error::new(io::Error::last_os_error().kind(),
+                format!("safe eject unconfirmed: NTFS partition is busy or could not be unmounted: {}",
+                    mount.display())));
+        }
+    }
+    Ok(candidates.len())
+}
+
 fn eject_checked(mount_id: &str, path_hex: &str) -> io::Result<()> {
     if unsafe { libc::geteuid() } != 0 { return Err(invalid()); }
     let path = decode_path(path_hex)?;
@@ -373,13 +419,21 @@ fn eject_checked(mount_id: &str, path_hex: &str) -> io::Result<()> {
     let (device, drives) = pdm_device(&status, partition)?;
     require_mount(&path, id)?;
     pdm("eject", &serde_json::json!({"deviceNum": device}))?;
-    // USB bridges and multi-partition disks can update mountinfo much later
-    // than the PDM reply. This runs in the existing off-frame helper.
-    // Never treat a disappearing UI entry or a successful PDM request as proof.
-    for attempt in 0..30 {
+    // Give webOS time to detach the disk itself. The TV's NTFS driver can
+    // leave tntfs mounted even after PDM accepts the eject request.
+    for _ in 0..6 {
         let table = fs::read("/proc/self/mountinfo")?;
         if !device_partitions_mounted(&table, &drives) { return Ok(()); }
-        if attempt < 29 { std::thread::sleep(std::time::Duration::from_millis(500)); }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let table = fs::read("/proc/self/mountinfo")?;
+    // Fall back ONLY for verified NTFS partitions. A regular unmount waits
+    // for dirty writes and refuses busy volumes; never use MNT_FORCE or DETACH.
+    let _ = unmount_still_live_ntfs(&table, &drives)?;
+    for attempt in 0..16 {
+        let table = fs::read("/proc/self/mountinfo")?;
+        if !device_partitions_mounted(&table, &drives) { return Ok(()); }
+        if attempt < 15 { std::thread::sleep(std::time::Duration::from_millis(500)); }
     }
     Err(io::Error::other("safe eject unconfirmed: webOS still reports USB partitions mounted; do not disconnect the disk yet"))
 }
@@ -550,6 +604,16 @@ mod tests {
         assert!(!device_partitions_mounted(after, &["sdb1", "sdb2"]));
         let other_mount = b"52 1 8:17 / /media/other rw - tntfs /dev/sdb1 rw\n";
         assert!(device_partitions_mounted(other_mount, &["sdb1", "sdb2"]));
+    }
+
+    #[test]
+    fn ntfs_unmount_candidates_reject_other_devices_and_unsupported_mounts() {
+        // Pure parsing of a mount table; no unmount calls are performed here.
+        let table = b"45 1 8:17 / /tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\\n46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\\n";
+        assert!(device_partitions_mounted(table, &["sdb1"]));
+        assert!(!device_partitions_mounted(table, &["sdc1"]));
+        let unsupported = b"46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\\n";
+        assert!(unmount_still_live_ntfs(unsupported, &["sdb2"]).is_err());
     }
 
     #[test]
