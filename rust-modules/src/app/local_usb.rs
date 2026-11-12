@@ -3553,7 +3553,9 @@ mod usb_browser_tests {
         assert_eq!(browser.volume(), Some(&volume));
         assert_eq!(browser.selected, 0);
         assert!(browser.pending.is_none());
-        assert_eq!(browser.next_scan, scan_at);
+        // Home invalidates stale NTFS paths and requests an immediate rescan.
+        // Compare ordering, not exact Instant equality: Instant::now() advances.
+        assert!(browser.next_scan >= scan_at);
     }
 
     #[test]
