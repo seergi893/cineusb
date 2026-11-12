@@ -1797,7 +1797,7 @@ impl Browser {
         if let Some(view) = self.favorite_cards() {
             let path = view.paths.get(index)?;
             if is_video_path(path) {
-                return Some((path.file_stem()?.to_string_lossy().into_owned(), tr("Vídeo", "Vídeo"), Cover::Movie));
+                return Some((clean_video_title(&path.file_stem()?.to_string_lossy()), tr("Vídeo", "Vídeo"), Cover::Movie));
             }
             let name = path.file_name()?.to_string_lossy().into_owned();
             let cover = path.strip_prefix(&view.volume.path).ok().and_then(art::collection).unwrap_or(Cover::Folder);
@@ -2342,7 +2342,8 @@ impl Browser {
                 }
             }
         }
-        let video = current.is_some_and(|(_, entry)| entry.kind == Kind::Video);
+        let video = current.is_some_and(|(_, entry)| entry.kind == Kind::Video)
+            || self.favorite_cards().and_then(|view| view.paths.get(index)).is_some_and(|path| is_video_path(path));
         if video { widgets::art_scrim(p, card, radius, 68.0, widgets::STILL_SCRIM_A); }
         let caption = if video {
             // Fixed two-line title zone: a long filename never moves the
@@ -3182,6 +3183,7 @@ mod usb_browser_tests {
         browser.enter_favorites(volume.clone(), vec![movie.clone()]);
         assert_eq!(browser.len(), 1);
         assert_eq!(browser.item(0).unwrap().1, tr("Vídeo", "Vídeo"));
+        assert_eq!(browser.item(0).unwrap().0, "Crash");
         browser.open();
         assert!(matches!(browser.dialog, Some(Dialog::Video { ref volume, ref path })
             if volume == &browser.scan.volumes[0] && path == &movie));
