@@ -74,10 +74,11 @@ const OPTIONS: [Rect; 2] = [
     Rect::new(555.0, 676.0, 390.0, 66.0),
     Rect::new(975.0, 676.0, 390.0, 66.0),
 ];
-const VIDEO_OPTIONS: [Rect; 3] = [
-    Rect::new(551.0, 676.0, 220.0, 66.0),
-    Rect::new(782.0, 676.0, 240.0, 66.0),
-    Rect::new(1033.0, 676.0, 336.0, 66.0),
+const VIDEO_OPTIONS: [Rect; 4] = [
+    Rect::new(530.0, 676.0, 190.0, 66.0),
+    Rect::new(731.0, 676.0, 190.0, 66.0),
+    Rect::new(932.0, 676.0, 206.0, 66.0),
+    Rect::new(1149.0, 676.0, 241.0, 66.0),
 ];
 const SETTINGS_OPTIONS: [Rect; 6] = [
     Rect::new(550.0, 401.0, 820.0, 49.0),
@@ -1272,7 +1273,17 @@ impl Browser {
                         let watched = self.history_value(&key) == Some(WATCHED);
                         self.change_history(key, if watched { 0 } else { WATCHED });
                     }
-                } else if system_mount(&volume).is_some() {
+                } else if self.option == 3 {
+                    if let Some(key) = self.video_favorite_key(&volume, &path) {
+                        let marked = self.history_value(&key) == Some(FAVORITE);
+                        self.change_history(key, if marked { 0 } else { FAVORITE });
+                        self.status = if marked { tr("Película quitada de favoritos.", "Pel·lícula treta dels favorits.") }
+                            else { tr("Película añadida a favoritos.", "Pel·lícula afegida als favorits.") }.into();
+                        if marked {
+                            if let Some(view) = self.favorite_view.as_mut() { view.paths.retain(|item| item != &path); }
+                        }
+                    }
+                } else if self.option == 1 && system_mount(&volume).is_some() {
                     self.dialog = Some(Dialog::Delete { volume, path });
                     self.option = 0;
                 }
@@ -1575,7 +1586,12 @@ impl Browser {
             match key {
                 Key::Left { alt: false } => self.nav_focus = Some(tab.saturating_sub(1)),
                 Key::Right { alt: false } => self.nav_focus = Some((tab + 1).min(NAV_TABS.len() - 1)),
-                Key::Down | Key::Back => self.nav_focus = None,
+                Key::Down => {
+                    self.nav_focus = None;
+                    self.action = ACTIONS.iter().find(|(action, _)| self.action_available(*action))
+                        .map(|(action, _)| *action);
+                }
+                Key::Back => self.nav_focus = None,
                 Key::Ok if !repeat => self.open_nav_tab(tab),
                 _ => {}
             }
@@ -1667,6 +1683,7 @@ impl Browser {
                 self.identity(volume).is_some_and(|identity| self.history_loaded.contains(&history_prefix(identity)))
                     && self.video_history_key(volume, path).is_some()
             }
+            Some(Dialog::Video { volume, path }) if index == 3 => self.video_favorite_key(volume, path).is_some(),
             _ => true,
         }
     }
@@ -2054,8 +2071,14 @@ impl Browser {
             Some(if watched { (tr("Marcar como no visto", "Marcar com a no vist"), Glyph::Shared(Icon::CircleSlash)) }
                 else { (tr("Marcar como visto", "Marcar com a vist"), Glyph::Shared(Icon::Check)) })
         } else { None };
+        let favorite_label = if let Dialog::Video { volume, path } = dialog {
+            let marked = self.video_favorite_key(volume, path).and_then(|key| self.history_value(&key)) == Some(FAVORITE);
+            Some(if marked { (tr("Quitar de favoritos", "Treu dels favorits"), Glyph::Star(true)) }
+                else { (tr("Añadir a favoritos", "Afegeix als favorits"), Glyph::Star(false)) })
+        } else { None };
         for (index, (&rect, label)) in self.horizontal_options().iter().zip(options.into_iter()
-            .chain(watched_label.map(|(label, _)| label))).enumerate() {
+            .chain(watched_label.map(|(label, _)| label))
+            .chain(favorite_label.map(|(label, _)| label))).enumerate() {
             let label = if index == 0 && !resume_label.is_empty() { &resume_label } else { label };
             if !self.option_available(index) { continue; }
             let glyph = match (dialog, index) {
@@ -2063,6 +2086,7 @@ impl Browser {
                 (Dialog::Video { .. } | Dialog::Delete { .. } | Dialog::DeleteFolders, 1) => Some(Glyph::Trash),
                 (Dialog::Eject(_), 1) => Some(Glyph::Eject),
                 (Dialog::Video { .. }, 2) => watched_label.map(|(_, glyph)| glyph),
+                (Dialog::Video { .. }, 3) => favorite_label.map(|(_, glyph)| glyph),
                 _ => None,
             };
             self.draw_button(p, rect, label, self.option == index, destructive && index == 1, glyph);
@@ -2073,7 +2097,7 @@ impl Browser {
         let marked = self.folder_favorite_key().and_then(|key| self.history_value(&key)) == Some(FAVORITE);
         let focused = self.action == Some(Action::ToggleFavorite);
         let animation = self.favorite_motion.as_ref().filter(|(path, _, started)|
-            started.elapsed() < MOTION && self.folders.last().is_some_and(|folder| folder.path == *path));
+            started.elapsed() < MOTION && self.series_root().as_ref() == Some(path));
         let Some((_, _, started)) = animation else {
             self.draw_button(p, rect, label, focused, false, Some(Glyph::Star(marked)));
             return;
