@@ -356,7 +356,8 @@ fn eject_checked(mount_id: &str, path_hex: &str) -> io::Result<()> {
     }).and_then(|source| source.strip_prefix(b"/dev/"))
         .and_then(|source| std::str::from_utf8(source).ok()).ok_or_else(invalid)?;
     let status = pdm("getAttachedDeviceStatus", &serde_json::json!({"subscribe": true}))?;
-    let (device, drives) = pdm_device(&status, source)?;
+    let partition = source.rsplit('/').next().ok_or_else(invalid)?;
+    let (device, drives) = pdm_device(&status, partition)?;
     require_mount(&path, id)?;
     pdm("eject", &serde_json::json!({"deviceNum": device}))?;
     // Some USB bridges take several seconds to unmount after PDM accepts eject.
