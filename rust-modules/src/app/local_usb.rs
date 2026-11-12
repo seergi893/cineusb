@@ -2873,6 +2873,20 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn favorite_actions_live_in_the_video_dialog_not_the_folder_header() {
+        // Header actions are only selection and deletion; no favorite button
+        // overlaps them or appears on a series/category folder.
+        assert_eq!(ACTIONS.len(), 2);
+        assert!(matches!(ACTIONS[0].0, Action::Select));
+        assert!(matches!(ACTIONS[1].0, Action::DeleteFolders));
+        assert!(ACTIONS[0].1.x + ACTIONS[0].1.w < ACTIONS[1].1.x);
+        assert!(ACTIONS[1].1.x + ACTIONS[1].1.w <= 1920.0);
+        // The fourth video-dialog action is the dedicated favorite chip.
+        assert_eq!(VIDEO_OPTIONS.len(), 4);
+        assert!(VIDEO_OPTIONS[3].x + VIDEO_OPTIONS[3].w <= PANEL.x + PANEL.w);
+    }
+
+    #[test]
     fn series_favorites_use_one_root_from_episode_and_season_views() {
         let volume = Volume { path: "/tmp/usb/sdb/sdb1".into(), label: None, mount_id: Some(42), system: true };
         let series = volume.path.join("SERIES/Breaking Bad");
