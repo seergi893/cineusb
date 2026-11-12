@@ -2845,7 +2845,7 @@ fn clean_video_title(stem: &str) -> String {
         let rest = &stem[index + separator.len_utf8()..];
         let token = rest.split(|ch: char| !ch.is_ascii_alphanumeric()).next().unwrap_or_default();
         if technical.iter().any(|tag| tag.eq_ignore_ascii_case(token)) {
-            let cleaned = stem[..index].trim_end_matches(['.', '_', ' ', '-']);
+            let cleaned = stem[..index].trim_end_matches(|ch: char| matches!(ch, '.' | '_' | ' ' | '-'));
             if !cleaned.is_empty() { return cleaned.to_owned(); }
         }
     }
