@@ -2284,7 +2284,10 @@ impl Browser {
                 == Some(FAVORITE);
             let animation = self.favorite_motion.as_ref().filter(|(changed, _, at)|
                 at.elapsed() < MOTION && *changed == target);
-            if marked || animation.is_some() {
+            // The series folder owns the favorite; its episodes must not each
+            // receive a misleading star badge (nor a favorite action).
+            let show_badge = entry.kind != Kind::Video || !self.video_is_episode(&folder.volume, &path);
+            if show_badge && (marked || animation.is_some()) {
                 let badge = Rect::new(card.x + card.w - 46.0, card.y + 10.0, 36.0, 36.0);
                 p.rect_sheened(badge, 18.0, theme::scrim_black(0.72), theme::scrim_black(0.72));
                 let star = Rect::new(badge.x + 6.0, badge.y + 6.0, 24.0, 24.0);
