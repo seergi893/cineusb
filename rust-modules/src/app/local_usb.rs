@@ -65,7 +65,7 @@ fn tr(es: &'static str, ca: &'static str) -> &'static str {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Action { ToggleFavorite, Select, DeleteFolders }
+enum Action { Select, DeleteFolders }
 
 enum Mutation { Delete, Eject }
 
@@ -167,10 +167,9 @@ const NAV_TABS: [Rect; 6] = [
     Rect::new(1265.0, 42.0, 290.0, 48.0),
 ];
 // Folder-specific controls sit in the content header, not the navigation.
-const ACTIONS: [(Action, Rect); 3] = [
-    (Action::ToggleFavorite, Rect::new(1300.0, 222.0, 520.0, 45.0)),
-    (Action::Select, Rect::new(1030.0, 222.0, 185.0, 45.0)),
-    (Action::DeleteFolders, Rect::new(1225.0, 222.0, 185.0, 45.0)),
+const ACTIONS: [(Action, Rect); 2] = [
+    (Action::Select, Rect::new(1430.0, 222.0, 185.0, 45.0)),
+    (Action::DeleteFolders, Rect::new(1625.0, 222.0, 185.0, 45.0)),
 ];
 
 const UNIFIED_SETTINGS_COUNT: usize = 8;
@@ -1014,14 +1013,6 @@ impl Browser {
             .then(|| folder.path.clone())
     }
 
-    fn folder_favorite_key(&self) -> Option<String> {
-        let folder = self.folders.last()?;
-        let root = self.series_root()?;
-        let identity = self.identity(&folder.volume)?;
-        self.history_loaded.contains(&history_prefix(identity)).then_some(())?;
-        favorite_key(identity, &folder.volume, &root)
-    }
-
     fn video_favorite_target(&self, volume: &Volume, path: &std::path::Path) -> PathBuf {
         // Opening a series episode must never create an episode-level favorite.
         self.folders.last().filter(|folder| &folder.volume == volume)
@@ -1034,25 +1025,6 @@ impl Browser {
         let identity = self.identity(volume)?;
         self.history_loaded.contains(&history_prefix(identity)).then_some(())?;
         favorite_key(identity, volume, &self.video_favorite_target(volume, path))
-    }
-
-    fn toggle_folder_favorite(&mut self) {
-        let Some(key) = self.folder_favorite_key() else { return };
-        let marked = self.history_value(&key) == Some(FAVORITE);
-        let path = self.series_root();
-        self.change_history(key, if marked { 0 } else { FAVORITE });
-        if let Some(path) = path {
-            if let Some(view) = &mut self.favorite_view {
-                if marked { view.paths.retain(|item| *item != path); }
-                else if !view.paths.contains(&path) {
-                    view.paths.push(path.clone());
-                    view.paths.sort();
-                }
-            }
-            self.favorite_motion = Some((path, !marked, Instant::now()));
-        }
-        self.status = if marked { tr("Serie quitada de favoritos.", "Sèrie treta dels favorits.") }
-            else { tr("Serie añadida a favoritos.", "Sèrie afegida als favorits.") }.into();
     }
 
     fn detail_key(folder: &Folder, entry: &Entry) -> DetailKey {
@@ -1191,7 +1163,6 @@ impl Browser {
 
     fn action_available(&self, action: Action) -> bool {
         match action {
-            Action::ToggleFavorite => self.selection.is_none() && self.folder_favorite_key().is_some(),
             Action::Select => self.selection.is_some() || (self.favorite_cards().is_none() && self.folders.last().is_some_and(|folder| {
                 folder.path != folder.volume.path && system_mount(&folder.volume).is_some() && folder.entries.iter().any(|entry| entry.kind == Kind::Folder)
             })),
@@ -1205,7 +1176,6 @@ impl Browser {
         self.status.clear();
         self.loading_favorites = false;
         self.dialog = match action {
-            Action::ToggleFavorite => { self.toggle_folder_favorite(); None }
             Action::Select => {
                 self.selection = self.selection.is_none().then(BTreeSet::new);
                 self.action = None;
@@ -1287,6 +1257,7 @@ impl Browser {
                         let series = target != path;
                         let marked = self.history_value(&key) == Some(FAVORITE);
                         self.change_history(key, if marked { 0 } else { FAVORITE });
+                        self.favorite_motion = Some((target.clone(), !marked, Instant::now()));
                         self.status = match (series, marked) {
                             (true, true) => tr("Serie quitada de favoritos.", "Sèrie treta dels favorits."),
                             (true, false) => tr("Serie añadida a favoritos.", "Sèrie afegida als favorits."),
@@ -1741,26 +1712,19 @@ impl Browser {
         let x = plx_ui::consts::MARGIN_X;
         let width = 1920.0 - 2.0 * x;
         self.draw_nav_pill(p);
-        draw_line(p, "CineUSB", Rect::new(x, 45.0, 260.0, 50.0), theme::size::HEADLINE, true);
+        art::draw_brand(p, Rect::new(x, 29.0, 76.0, 76.0));
         for (action, rect) in ACTIONS {
             if self.action_available(action) {
                 let label = match action {
-                    Action::ToggleFavorite => if self.folder_favorite_key().and_then(|key| self.history_value(&key)) == Some(FAVORITE) {
-                        tr("Quitar de favoritos", "Treure dels favorits")
-                    } else { tr("Añadir a favoritos", "Afegir als favorits") },
                     Action::Select if self.selection.is_some() => tr("Cancelar", "Cancel·la"),
                     Action::Select => tr("Seleccionar", "Selecciona"),
                     Action::DeleteFolders => tr("Eliminar", "Esborra"),
                 };
                 let glyph = match action {
-                    Action::ToggleFavorite => None,
                     Action::Select => Some(Glyph::Shared(Icon::CheckCircleFill)),
                     Action::DeleteFolders => Some(Glyph::Trash),
-
                 };
-                if action == Action::ToggleFavorite {
-                    self.draw_favorite_toggle(p, rect, label);
-                } else if self.action != Some(action) && action != Action::DeleteFolders {
+                if self.action != Some(action) && action != Action::DeleteFolders {
                     draw_button_content(p, rect, label, glyph, theme::TEXT_PRIMARY);
                 } else {
                     self.draw_button(p, rect, label, self.action == Some(action), action == Action::DeleteFolders, glyph);
@@ -2100,8 +2064,8 @@ impl Browser {
         } else { None };
         let favorite_label = if let Dialog::Video { volume, path } = dialog {
             let marked = self.video_favorite_key(volume, path).and_then(|key| self.history_value(&key)) == Some(FAVORITE);
-            Some(if marked { (tr("Quitar de favoritos", "Treu dels favorits"), Glyph::Star(true)) }
-                else { (tr("Añadir a favoritos", "Afegeix als favorits"), Glyph::Star(false)) })
+            Some(if marked { (tr("Quitar", "Treu"), Glyph::Star(true)) }
+                else { (tr("Añadir", "Afegeix"), Glyph::Star(false)) })
         } else { None };
         for (index, (&rect, label)) in self.horizontal_options().iter().zip(options.into_iter()
             .chain(watched_label.map(|(label, _)| label))
@@ -2116,33 +2080,40 @@ impl Browser {
                 (Dialog::Video { .. }, 3) => favorite_label.map(|(_, glyph)| glyph),
                 _ => None,
             };
-            self.draw_button(p, rect, label, self.option == index, destructive && index == 1, glyph);
+            if matches!(dialog, Dialog::Video { .. }) && index == 3 {
+                let marked = matches!(glyph, Some(Glyph::Star(true)));
+                self.draw_favorite_chip(p, rect, label, marked, self.option == index);
+            } else {
+                self.draw_button(p, rect, label, self.option == index, destructive && index == 1, glyph);
+            }
         }
     }
 
-    fn draw_favorite_toggle(&self, p: Painter, rect: Rect, label: &str) {
-        let marked = self.folder_favorite_key().and_then(|key| self.history_value(&key)) == Some(FAVORITE);
-        let focused = self.action == Some(Action::ToggleFavorite);
-        let animation = self.favorite_motion.as_ref().filter(|(path, _, started)|
-            started.elapsed() < MOTION && self.series_root().as_ref() == Some(path));
-        let Some((_, _, started)) = animation else {
-            self.draw_button(p, rect, label, focused, false, Some(Glyph::Star(marked)));
-            return;
-        };
-        let t = motion_alpha(*started);
-        let pulse = (t * std::f32::consts::PI).sin();
-        let rect = rect.scaled(1.0 + 0.025 * pulse);
+    /// A compact, clearly stateful favorite action in the video's own menu.
+    /// Series favorites are still resolved from an episode to the series root.
+    fn draw_favorite_chip(&self, p: Painter, rect: Rect, label: &str, marked: bool, focused: bool) {
+        let scale = self.button_motion.filter(|(pressed, at)| *pressed == rect && at.elapsed() < MOTION)
+            .map_or(1.0, |(_, at)| 0.975 + motion_alpha(at) * 0.025);
+        let rect = rect.scaled(scale);
+        let radius = 24.0;
         let fill = if focused { self.accent() } else { theme::CONTROL_IDLE_FILL };
+        p.rect_sheened(rect, radius, fill, fill);
+        if focused {
+            p.rring(rect, radius, 2.0, theme::CONTROL_FOCUS_RING);
+        } else if marked {
+            p.rring(rect, radius, 1.5, self.accent());
+        }
+        let badge = Rect::new(rect.x + 15.0, rect.y + 15.0, 36.0, 36.0);
+        let badge_fill = if focused { theme::scrim_black(0.14) }
+            else if marked { self.accent() } else { theme::CONTROL_IDLE_FILL };
+        p.rect_sheened(badge, 18.0, badge_fill, badge_fill);
+        if !marked && !focused { p.rring(badge, 18.0, 1.0, theme::TEXT_SECONDARY); }
+        let star_ink = if focused || marked { theme::ACCENT_INK } else { self.accent() };
+        draw_glyph(p, Glyph::Star(marked), Rect::new(badge.x + 7.0, badge.y + 7.0, 22.0, 22.0), star_ink);
         let ink = if focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
-        widgets::draw_control_face(p, rect, fill, focused, widgets::ControlGround::Keyed);
-        p.alpha(pulse).rring(rect, rect.h * 0.5, 2.0, theme::USB_FAVORITES);
-        let (run, width) = TtfMeasure.fit_line_measured(label, rect.w - 67.0, theme::size::CAPTION, true);
-        let x = rect.x + (rect.w - width - 39.0) * 0.5;
-        let star = Rect::new(x, rect.y + (rect.h - 26.0) * 0.5, 26.0, 26.0).scaled(1.0 + 0.16 * pulse);
-        draw_glyph(p.alpha(1.0 - t), Glyph::Star(!marked), star, ink);
-        draw_glyph(p.alpha(t), Glyph::Star(marked), star, ink);
-        Label::new(run.as_ptr(), theme::size::CAPTION, ink).h(HAlign::Center).bold()
-            .draw(p, Rect::new(x + 39.0, rect.y, width, rect.h));
+        let text = TtfMeasure.fit_line(label, rect.w - 76.0, theme::size::CAPTION, true);
+        Label::new(text.as_ptr(), theme::size::CAPTION, ink).h(HAlign::Center).bold()
+            .draw(p, Rect::new(rect.x + 63.0, rect.y, rect.w - 73.0, rect.h));
     }
 
     fn accent(&self) -> [f32; 4] {
