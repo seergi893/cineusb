@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 os.chdir(ROOT)
@@ -91,7 +92,29 @@ Datos de compilación pendientes de publicación.
 """, encoding="utf-8")
 
 
+
+def validate_metadata(expected):
+    """Validate all tracked version sources, including the actual Cargo.lock package."""
+    control = Path("ipkroot/ctl/control").read_text(encoding="utf-8")
+    cargo = tomllib.loads(Path("rust-modules/Cargo.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads(Path("rust-modules/Cargo.lock").read_text(encoding="utf-8"))
+    if f"Version: {expected}" not in control.splitlines():
+        raise SystemExit(f"IPK control version mismatch: expected {expected}")
+    if cargo.get("package", {}).get("version") != expected:
+        raise SystemExit(f"Cargo.toml version mismatch: expected {expected}")
+    matches = [p for p in lock.get("package", []) if p.get("name") == "plxnative-modules"]
+    if len(matches) != 1 or matches[0].get("version") != expected:
+        actual = [p.get("version") for p in matches]
+        raise SystemExit(f"Cargo.lock plxnative-modules version mismatch: expected {expected}, found {actual}")
+    print(f"Release metadata is consistent at {expected}")
+
+
 def main():
+    if sys.argv[1:] == ["--check-metadata"]:
+        validate_metadata(version())
+        return
+    if sys.argv[1:]:
+        raise SystemExit("Usage: prepare-automatic-release.py [--check-metadata]")
     if os.environ.get("GITHUB_REF") != "refs/heads/main":
         raise SystemExit("Automatic release preparation is allowed only on main")
     current = version()
@@ -101,15 +124,9 @@ def main():
     else:
         # An unpublished version may have been prepared by a maintainer already.
         # Refuse a partial bump rather than silently overwriting inconsistent metadata.
-        expected = current
-        control = Path("ipkroot/ctl/control").read_text()
-        cargo = Path("rust-modules/Cargo.toml").read_text()
-        lock = Path("rust-modules/Cargo.lock").read_text()
-        assert f"Version: {expected}" in control, "IPK control version mismatch"
-        assert f'version = "{expected}"' in cargo, "Cargo.toml version mismatch"
-        assert f'name = "plxnative-modules"\\nversion = "{expected}"' in lock, "Cargo.lock version mismatch"
         print(f"CineUSB {current} has not been published; retaining its version")
     v = version()
+    validate_metadata(v)
     create_documents(v)
     # Lint documents before committing or building.
     for kind, path in (("--lint-note", f"docs/release-notes/v{v}.md"),
