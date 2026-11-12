@@ -190,7 +190,9 @@ fn volume_identity(device: &Path) -> Option<String> {
     // On rooted webOS, /dev/disk/by-uuid and blkid may both be missing.
     // Read the filesystem's own serial number rather than using the unstable
     // /dev/sdX name, which can change after reconnecting a USB drive.
-    filesystem_serial(&device).or_else(|| alias("/dev/disk/by-id").map(|id| format!("disk:{id}")))
+    filesystem_serial(&device)
+        .or_else(|| alias("/dev/disk/by-partuuid").map(|id| format!("partuuid:{id}")))
+        .or_else(|| alias("/dev/disk/by-id").map(|id| format!("disk:{id}")))
 }
 
 /// Stable, filesystem-scoped identity for volumes with no blkid/udev links.
