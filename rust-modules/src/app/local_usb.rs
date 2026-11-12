@@ -216,7 +216,7 @@ fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'s
             tr("Cambia el orden de archivos y carpetas.", "Canvia l'ordre dels fitxers i les carpetes."),
             [tr("Nombre", "Nom"), tr("Fecha", "Data"), tr("Tamaño", "Mida")][settings.sort].into()),
         1 => (tr("Mostrar extensiones", "Mostra les extensions"),
-            tr("Muestra el tipo de archivo en los títulos.", "Mostra el tipus de fitxer als títols."),
+            tr("Muestra extensiones en los diálogos de archivo.", "Mostra les extensions als diàlegs de fitxer."),
             on(settings.extensions).into()),
         2 => (tr("Siguiente episodio automático", "Episodi següent automàtic"),
             tr("Reproduce el siguiente episodio de la carpeta.", "Reprodueix l'episodi següent de la carpeta."),
@@ -2117,7 +2117,8 @@ impl Browser {
                 path.file_stem().unwrap_or_default().to_string_lossy().into_owned(), "",
                 [tr("Reproducir ahora", "Reprodueix ara"), cancel]),
             Dialog::Video { path, .. } => (tr("Opciones del vídeo", "Opcions del vídeo"),
-                path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                if self.settings.extensions { path.file_name() } else { path.file_stem() }
+                    .unwrap_or_default().to_string_lossy().into_owned(),
                 "",
                 [tr("Reproducir", "Reprodueix"), tr("Eliminar archivo", "Esborra el fitxer")]),
             Dialog::Delete { path, .. } => (tr("¿Eliminar este archivo?", "Vols esborrar aquest fitxer?"),
@@ -2818,12 +2819,29 @@ fn open_for_details(path: &std::path::Path, _mount_id: Option<u64>) -> Result<Fi
     direct
 }
 
+/// Remove trailing release tags without inventing technical metadata.
+fn clean_video_title(stem: &str) -> String {
+    let technical = ["2160p", "1080p", "720p", "480p", "hdr10", "hdr10plus", "hdr",
+        "dovi", "dolbyvision", "webdl", "webrip", "bluray", "bdrip", "remux",
+        "x264", "x265", "h264", "h265", "hevc", "av1"];
+    for (index, separator) in stem.char_indices() {
+        if index == 0 || !matches!(separator, '.' | '_' | ' ' | '[' | '(') { continue; }
+        let rest = &stem[index + separator.len_utf8()..];
+        let token = rest.split(|ch: char| !ch.is_ascii_alphanumeric()).next().unwrap_or_default();
+        if technical.iter().any(|tag| tag.eq_ignore_ascii_case(token)) {
+            let cleaned = stem[..index].trim_end_matches(['.', '_', ' ', '-']);
+            if !cleaned.is_empty() { return cleaned.to_owned(); }
+        }
+    }
+    stem.to_owned()
+}
+
 fn display_name(entry: &Entry, extensions: bool) -> String {
     let name = std::path::Path::new(&entry.name);
     match entry.kind {
         Kind::Folder => entry.name.to_string_lossy().into_owned(),
         Kind::Video if extensions => entry.name.to_string_lossy().into_owned(),
-        Kind::Video => name.file_stem().unwrap_or(&entry.name).to_string_lossy().into_owned(),
+        Kind::Video => clean_video_title(&name.file_stem().unwrap_or(&entry.name).to_string_lossy()),
     }
 }
 
@@ -3055,9 +3073,11 @@ mod usb_browser_tests {
     #[test]
     fn episode_titles_hide_file_extensions_independently_of_settings() {
         let entry = disk::media_entry("Serie.S01E02.2160p.mkv".into(), false).unwrap();
-        assert_eq!(display_name(&entry, false), "Serie.S01E02.2160p");
+        assert_eq!(display_name(&entry, false), "Serie.S01E02");
         let movie = disk::media_entry("Película.mp4".into(), false).unwrap();
         assert_eq!(display_name(&movie, false), "Película");
+        assert_eq!(clean_video_title("Breaking.Bad.S01E01.1080p.WEB-DL"), "Breaking.Bad.S01E01");
+        assert_eq!(clean_video_title("Película.2025"), "Película.2025");
     }
 
     #[test]
