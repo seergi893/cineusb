@@ -857,7 +857,7 @@ impl Browser {
                     let grid = grid_geometry(self.len(), self.settings.cards);
                     poster_grid::visible_in(&grid, self.len(), TOP, self.scroll.pos)
                         .filter_map(|index| folder.entries.get(index))
-                        .filter(|entry| entry.kind == Kind::Video && continuity::episode(&entry.name).is_some())
+                        .filter(|entry| entry.kind == Kind::Video)
                         .map(|entry| Self::detail_key(folder, entry))
                         .find(|key| !self.details.contains_key(key))
                         .map(|key| (folder.volume.clone(), key))
@@ -1895,27 +1895,28 @@ impl Browser {
                 }
             }
         }
-        if let Some((_, season, episode)) = current.map(|(_, entry)| entry)
-            .filter(|entry| entry.kind == Kind::Video).and_then(|entry| continuity::episode(&entry.name)) {
-            let duration = current.and_then(|(folder, entry)| self.details.get(&Self::detail_key(folder, entry)))
-                .and_then(|details| details.duration_secs).map(|seconds| {
-                    if seconds < 60 { "<1 min".to_owned() }
-                    else { format!("{} min", seconds / 60) }
-                });
-            let episode = format!("{season}×{episode:02}");
+        if let Some((folder, entry)) = current.filter(|(_, entry)| entry.kind == Kind::Video) {
+            let details = self.details.get(&Self::detail_key(folder, entry));
+            let episode = continuity::episode(&entry.name).map(|(_, season, episode)| format!("{season}×{episode:02}"));
+            let duration = details.and_then(|details| details.duration_secs).map(video_duration);
+            let quality = details.and_then(|details| details.resolution)
+                .map(|(width, height)| resolution_label(width, height));
+            let badges: Vec<String> = episode.into_iter().chain(duration).chain(quality).collect();
             let size = theme::size::DIAGNOSTIC;
             let available = card.w - 24.0;
-            let duration_budget = duration.as_ref().map_or(0.0, |text|
-                (TtfMeasure.width_str(text, size, true) + 10.0).min(available * 0.57));
-            let episode_budget = if duration.is_some() { available - duration_budget - 5.0 } else { available };
             let mut x = card.x + 12.0;
-            for (text, budget) in std::iter::once((&episode, episode_budget))
-                .chain(duration.as_ref().map(|text| (text, duration_budget))) {
-                let (run, width) = TtfMeasure.fit_line_measured(text, budget - 10.0, size, true);
-                let badge = Rect::new(x, caption.y + caption.h + 5.0, width + 10.0, 32.0);
+            let mut y = caption.y + caption.h + 5.0;
+            for text in badges {
+                let (run, width) = TtfMeasure.fit_line_measured(&text, available - 10.0, size, true);
+                let badge_width = width + 10.0;
+                if x + badge_width > card.x + card.w - 12.0 && x > card.x + 12.0 {
+                    x = card.x + 12.0;
+                    y += 37.0;
+                }
+                let badge = Rect::new(x, y, badge_width, 32.0);
                 p.rect_sheened(badge, 10.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
                 if focused && self.action.is_none() { p.rring(badge, 10.0, 1.0, self.accent()); }
-                Label::new(run.as_ptr(), theme::size::DIAGNOSTIC, theme::TEXT_PRIMARY).h(HAlign::Center).bold().draw(p, badge);
+                Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).h(HAlign::Center).bold().draw(p, badge);
                 x += badge.w + 5.0;
             }
         }
@@ -1984,10 +1985,14 @@ fn video_duration(seconds: u64) -> String {
 }
 
 fn resolution_label(width: u32, height: u32) -> String {
-    match (width, height) {
-        (3840, 2160) => "4K UHD".into(),
-        (1920, 1080) => "Full HD".into(),
-        (1280, 720) => "HD".into(),
+    // Use the encoded width for cropped cinema, not the smaller visible height.
+    // Do not promote QHD (2560 pixels wide) to 4K.
+    let wide = width.max(height);
+    let short = width.min(height);
+    match (wide, short) {
+        (3840..=4096, 1600..=2160) => "4K UHD".into(),
+        (1920, 800..=1080) => "1080p".into(),
+        (1280, 500..=720) => "720p".into(),
         (1..=1024, 1..=576) => "SD".into(),
         _ => format!("{width}×{height}"),
     }
@@ -2623,9 +2628,16 @@ mod usb_browser_tests {
     }
 
     #[test]
-    fn only_standard_uhd_is_labelled_4k() {
+    fn cinematic_quality_badges_do_not_promote_qhd_to_uhd() {
         assert_eq!(resolution_label(3840, 2160), "4K UHD");
+        assert_eq!(resolution_label(3840, 1608), "4K UHD");
+        assert_eq!(resolution_label(4096, 1716), "4K UHD");
+        assert_eq!(resolution_label(1920, 800), "1080p");
+        assert_eq!(resolution_label(1280, 536), "720p");
         assert_eq!(resolution_label(2560, 1440), "2560×1440");
+        assert_eq!(resolution_label(2560, 1080), "2560×1080");
+        assert_eq!(resolution_label(1608, 3840), "4K UHD");
+        assert_eq!(video_duration(95 * 60), "1 h 35 min");
     }
 
     #[test]
