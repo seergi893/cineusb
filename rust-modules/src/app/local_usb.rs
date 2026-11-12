@@ -1179,11 +1179,24 @@ impl Browser {
         self.request(move || {
             let result = inspect_video(&path, mount_id, spanish).map(|(file, info)| {
                 let identity = known_identity.or_else(|| volume_facts(&volume).1);
-                let key = identity.and_then(|identity| progress_key(&identity, &volume, &path, &file));
-                let saved = key.as_ref().and_then(|key| {
+                let mut key = identity.as_deref().and_then(|identity| progress_key(identity, &volume, &path, &file));
+                let mut saved = key.as_ref().and_then(|key| {
                     if let Some((_, Some(value))) = cached_record.as_ref().filter(|(cached, _)| cached == key) { return Some(*value); }
                     resume_record(key, None).ok().flatten()
                 }).unwrap_or(0);
+                // FAT/exFAT/NTFS drivers may report a different mtime after a
+                // reconnect. Keep the existing file record when its path and
+                // byte length still match, rather than losing the resume point.
+                if saved == 0 {
+                    if let (Some(identity), Some(current)) = (identity.as_deref(), key.as_ref()) {
+                        if let Some(records) = read_history(&history_prefix(identity)) {
+                            if let Some((previous, value)) = matching_size_resume(&records, current) {
+                                key = Some(previous);
+                                saved = value;
+                            }
+                        }
+                    }
+                }
                 let (position, _) = unpack_progress(saved);
                 let resume = if offer_resume && info.duration_secs.is_none_or(|seconds|
                     position / 1_000_000_000 <= seconds) { position } else { 0 };
@@ -2093,6 +2106,17 @@ fn entry_key(identity: &str, volume: &Volume, path: &std::path::Path, size: u64,
     Some(format!("{base}{}", hex([0].into_iter().chain(size.to_le_bytes()).chain(mtime.to_le_bytes()))))
 }
 
+// The encoded legacy key ends with a NUL, 8-byte length and 8-byte mtime.
+// Only ignore mtime when the full volume identity, relative path and length
+// match. This keeps existing resume entries readable across driver differences.
+fn matching_size_resume(records: &BTreeMap<String, u64>, current: &str) -> Option<(String, u64)> {
+    let prefix = current.get(..current.len().checked_sub(16)?)?;
+    records.iter().find_map(|(key, value)| {
+        (key.len() == current.len() && key.starts_with(prefix) && *value != 0 && *value != WATCHED
+            && *value != FAVORITE).then(|| (key.clone(), *value))
+    })
+}
+
 fn progress_key(identity: &str, volume: &Volume, path: &std::path::Path, file: &File) -> Option<String> {
     use std::os::unix::fs::MetadataExt as _;
     let metadata = file.metadata().ok()?;
@@ -2476,6 +2500,21 @@ mod usb_browser_tests {
         assert!(!history_matches(&key, &path_key("uuid:disk-b", &volume, &nested).unwrap()));
         assert!(!history_matches(&key, &path_key("uuid:disk-a", &volume, &structural.join("Sèri")).unwrap()));
         assert!(decode_relative("2e2e2f736563726574").is_none());
+    }
+
+    #[test]
+    fn progress_can_survive_fat_exfat_ntfs_mtime_changes() {
+        let volume = Volume { path: "/tmp/usb/sdb/sdb1".into(), label: None, mount_id: Some(42), system: true };
+        let path = volume.path.join("Series/Episode.mkv");
+        let old = entry_key("fat32:11223344", &volume, &path, 1024, 100).unwrap();
+        let current = entry_key("fat32:11223344", &volume, &path, 1024, 200).unwrap();
+        let different_size = entry_key("fat32:11223344", &volume, &path, 2048, 200).unwrap();
+        let other_disk = entry_key("fat32:99887766", &volume, &path, 1024, 200).unwrap();
+        let mut history = BTreeMap::new();
+        history.insert(old.clone(), 150);
+        assert_eq!(matching_size_resume(&history, &current), Some((old, 150)));
+        assert_eq!(matching_size_resume(&history, &different_size), None);
+        assert_eq!(matching_size_resume(&history, &other_disk), None);
     }
 
     #[test]
