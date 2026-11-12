@@ -98,6 +98,70 @@ const SETTINGS_OPTIONS: [Rect; 6] = [
     Rect::new(550.0, 686.0, 820.0, 49.0),
 ];
 
+// Rooted-webOS drives can use labels in different languages and Unicode forms.
+// Only fold for matching; the real path is never changed.
+fn folder_fold(name: &str) -> String {
+    name.chars().filter_map(|ch| match ch.to_lowercase().next()? {
+        'à' | 'á' | 'â' | 'ä' | 'ã' => Some('a'),
+        'è' | 'é' | 'ê' | 'ë' => Some('e'),
+        'ì' | 'í' | 'î' | 'ï' => Some('i'),
+        'ò' | 'ó' | 'ô' | 'ö' | 'õ' => Some('o'),
+        'ù' | 'ú' | 'û' | 'ü' => Some('u'),
+        'ç' => Some('c'),
+        'ñ' => Some('n'),
+        ch if ch.is_ascii_alphanumeric() => Some(ch),
+        _ => None,
+    }).collect()
+}
+
+fn media_folder_score(name: &str, kind: usize) -> u8 {
+    let name = folder_fold(name);
+    let exact: &[&str] = if kind == 1 {
+        &["pelis", "peliculas", "movies", "films", "film", "cine", "cinema", "moviecollection", "pelicules"]
+    } else {
+        &["series", "seriestv", "tvseries", "tvshows", "shows", "temporadas", "episodios", "temporades", "episodis"]
+    };
+    if exact.contains(&name.as_str()) { 3 }
+    else if kind == 1 && (name.starts_with("peliculas") || name.starts_with("movies") || name.starts_with("films")) { 2 }
+    else if kind == 2 && (name.starts_with("series") || name.starts_with("tvshows")) { 2 }
+    else { 0 }
+}
+
+fn discover_media_folders(volume: &Volume, kind: usize) -> Vec<PathBuf> {
+    let mut matched = Vec::new();
+    let mut level = vec![volume.path.clone()];
+    // Bounded root-first traversal, never on the drawing thread.
+    for depth in 0..3 {
+        let mut next = Vec::new();
+        for parent in level.into_iter().take(96) {
+            let Ok(entries) = list_folder(&parent, system_mount(volume)) else { continue };
+            for entry in entries.into_iter().filter(|entry| entry.kind == Kind::Folder).take(250) {
+                let path = parent.join(&entry.name);
+                let name = entry.name.to_string_lossy();
+                if media_folder_score(&name, kind) > 0 {
+                    matched.push((depth, media_folder_score(&name, kind), path.clone()));
+                }
+                // Restrict nested scanning to likely container directories.
+                if depth == 0 || (depth == 1 && ["media", "videos", "video", "multimedia", "biblioteca", "library"]
+                        .contains(&folder_fold(&parent.file_name().unwrap_or_default().to_string_lossy()).as_str())) {
+                    if next.len() < 96 { next.push(path); }
+                }
+            }
+        }
+        level = next;
+    }
+    matched.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
+    matched.into_iter().map(|(_, _, path)| path).collect()
+}
+
+const NAV_PILL: Rect = Rect::new(645.0, 32.0, 630.0, 70.0);
+const NAV_TABS: [Rect; 4] = [
+    Rect::new(656.0, 42.0, 145.0, 48.0),
+    Rect::new(812.0, 42.0, 145.0, 48.0),
+    Rect::new(968.0, 42.0, 145.0, 48.0),
+    Rect::new(1124.0, 42.0, 139.0, 48.0),
+];
+
 const UNIFIED_SETTINGS_COUNT: usize = 8;
 fn unified_setting_rect(index: usize) -> Rect {
     Rect::new(825.0, 168.0 + index as f32 * 98.0, 975.0, 58.0)
@@ -190,6 +254,7 @@ enum DiskResult {
     DeleteFolders { removed: Vec<OsString>, total: usize, error: Option<String>, entries: io::Result<Vec<Entry>> },
     Eject(Volume, Result<(), String>),
     Favorites(Volume, Vec<PathBuf>, Vec<PathBuf>),
+    Discovered(Volume, usize, Vec<PathBuf>),
 }
 
 type VolumeFacts = (Option<(u64, u64, u64, bool)>, Option<String>);
@@ -262,6 +327,10 @@ pub(super) struct Browser {
     queued_history_clears: BTreeSet<String>,
     loading_favorites: bool,
     favorite_view: Option<FavoriteView>,
+    media_view: Option<FavoriteView>,
+    nav_tab: usize,
+    nav_focus: Option<usize>,
+    discovery_cache: BTreeMap<(PathBuf, u64, usize), Vec<PathBuf>>,
     favorite_section: (bool, Instant, f32),
     dialog_started: Option<Instant>,
     button_motion: Option<(Rect, Instant)>,
@@ -291,6 +360,7 @@ impl Browser {
             progress_job: None, queued_progress: Default::default(), countdown_display: 0,
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
             queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_view: None,
+            media_view: None, nav_tab: 0, nav_focus: None, discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
             dialog_started: None, button_motion: None, favorite_motion: None,
             ejecting: None, eject_feedback: None,
@@ -299,6 +369,7 @@ impl Browser {
     }
 
     fn len(&self) -> usize {
+        if let Some(view) = self.media_cards() { return view.paths.len(); }
         self.favorite_cards().map_or_else(|| self.folders.last().map_or(self.scan.volumes.len(), |folder| folder.entries.len()), |view| view.paths.len())
     }
 
@@ -405,6 +476,16 @@ impl Browser {
                         }
                         self.scanning = None;
                         self.next_scan = Instant::now();
+                    }
+                    DiskResult::Discovered(volume, kind, paths) => {
+                        if self.scan.volumes.contains(&volume) {
+                            self.discovery_cache.insert((volume.path.clone(), volume.mount_id.unwrap_or(0), kind), paths.clone());
+                            self.enter_media(volume, kind, paths);
+                            if self.media_cards().is_some_and(|view| view.paths.is_empty()) {
+                                self.status = tr("No se encontraron carpetas. Puedes navegar desde Inicio.",
+                                    "No s'han trobat carpetes. Pots navegar des d'Inici.").into();
+                            } else { self.status.clear(); }
+                        }
                     }
                     DiskResult::Favorites(volume, paths, missing) => {
                         if self.volume() == Some(&volume) {
@@ -761,6 +842,63 @@ impl Browser {
                 if proven { paths.push(path); }
             }
             DiskResult::Favorites(volume, paths, missing)
+        });
+    }
+
+    fn media_cards(&self) -> Option<&FavoriteView> {
+        self.media_view.as_ref().filter(|view| view.depth == self.folders.len())
+    }
+
+    fn leave_media(&mut self) {
+        if let Some(view) = self.media_view.take() {
+            self.folders.truncate(view.depth);
+            self.restore_view(view.library_selected, view.library_scroll);
+        }
+        self.nav_tab = 0;
+    }
+
+    fn enter_media(&mut self, volume: Volume, kind: usize, paths: Vec<PathBuf>) {
+        self.leave_favorites();
+        self.leave_media();
+        self.nav_tab = kind;
+        let selected = self.selected;
+        let scroll = self.scroll.pos;
+        self.media_view = Some(FavoriteView {
+            volume, paths, depth: self.folders.len(), selected: 0, scroll: 0.0,
+            library_selected: selected, library_scroll: scroll,
+        });
+        self.action = None;
+        self.restore_view(0, 0.0);
+    }
+
+    fn open_nav_tab(&mut self, tab: usize) {
+        self.nav_focus = None;
+        self.action = None;
+        if tab == 0 {
+            self.leave_media();
+            self.leave_favorites();
+            self.open_library_root();
+            self.nav_tab = 0;
+            return;
+        }
+        if tab == 3 {
+            self.status = tr("Búsqueda local USB: selecciona primero Películas o Series y navega por las carpetas.",
+                "Cerca local USB: tria primer Pel·lícules o Sèries i navega per les carpetes.").into();
+            return;
+        }
+        let Some(volume) = self.volume().cloned() else {
+            self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
+            return;
+        };
+        let key = (volume.path.clone(), volume.mount_id.unwrap_or(0), tab);
+        if let Some(paths) = self.discovery_cache.get(&key).cloned() {
+            self.enter_media(volume, tab, paths);
+            return;
+        }
+        self.status = tr("Buscando carpetas multimedia…", "Buscant carpetes multimèdia…").into();
+        self.request(move || {
+            let paths = discover_media_folders(&volume, tab);
+            DiskResult::Discovered(volume, tab, paths)
         });
     }
 
@@ -1168,7 +1306,7 @@ impl Browser {
 
     fn open(&mut self) {
         if self.pending.is_some() { return; }
-        if let Some(view) = self.favorite_cards() {
+        if let Some(view) = self.media_cards().or_else(|| self.favorite_cards()) {
             if let Some(path) = view.paths.get(self.selected) {
                 self.open_folder(view.volume.clone(), path.clone());
             }
@@ -1245,7 +1383,10 @@ impl Browser {
     }
 
     fn open_folder(&mut self, volume: Volume, path: PathBuf) {
-        if let Some(view) = self.favorite_view.as_mut().filter(|view| view.depth == self.folders.len()) {
+        if let Some(view) = self.media_view.as_mut().filter(|view| view.depth == self.folders.len()) {
+            view.selected = self.selected;
+            view.scroll = self.scroll.pos;
+        } else if let Some(view) = self.favorite_view.as_mut().filter(|view| view.depth == self.folders.len()) {
             view.selected = self.selected;
             view.scroll = self.scroll.pos;
         } else if let Some(folder) = self.folders.last_mut() {
@@ -1286,11 +1427,16 @@ impl Browser {
             self.status.clear();
             return;
         }
+        if self.media_cards().is_some() {
+            self.leave_media();
+            self.status.clear();
+            return;
+        }
         let Some(folder) = self.folders.pop() else {
             plx_platform::tv::home::go_home();
             return;
         };
-        let (index, scroll) = if let Some(view) = self.favorite_cards() {
+        let (index, scroll) = if let Some(view) = self.media_cards().or_else(|| self.favorite_cards()) {
             (view.selected, view.scroll)
         } else if let Some(parent) = self.folders.last() {
             (parent.selected, parent.scroll)
@@ -1458,6 +1604,12 @@ impl Browser {
     }
 
     fn item(&self, index: usize) -> Option<(String, &'static str, Cover)> {
+        if let Some(view) = self.media_cards() {
+            let path = view.paths.get(index)?;
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let cover = path.strip_prefix(&view.volume.path).ok().and_then(art::collection).unwrap_or(Cover::Folder);
+            return Some((name, tr("Carpeta", "Carpeta"), cover));
+        }
         if let Some(view) = self.favorite_cards() {
             let path = view.paths.get(index)?;
             let name = path.file_name()?.to_string_lossy().into_owned();
