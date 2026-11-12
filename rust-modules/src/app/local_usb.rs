@@ -395,7 +395,9 @@ impl Browser {
     }
 
     fn len(&self) -> usize {
-        if let Some(view) = self.media_cards() { return view.paths.len(); }
+        // A direct media tab is a navigation floor, not a list of category
+        // folders. Its pending first directory is never painted as a card.
+        if self.media_cards().is_some() { return 0; }
         self.favorite_cards().map_or_else(|| self.folders.last().map_or(self.scan.volumes.len(), |folder| folder.entries.len()), |view| view.paths.len())
     }
 
@@ -1847,7 +1849,9 @@ impl Browser {
         draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, 226.0, 920.0, 37.0), theme::size::CAPTION, false);
 
         if self.len() == 0 {
-            let message = if self.media_cards().is_some() {
+            let message = if self.media_cards().is_some() && self.pending.is_some() {
+                tr("Cargando el contenido del disco…", "Carregant el contingut del disc…")
+            } else if self.media_cards().is_some() {
                 tr("No hay carpetas de esta categoría. Pulsa Inicio para navegar manualmente.",
                     "No hi ha carpetes d'aquesta categoria. Prem Inici per navegar manualment.")
             } else if self.favorite_cards().is_some() {
