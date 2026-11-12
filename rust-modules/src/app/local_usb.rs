@@ -98,16 +98,46 @@ const SETTINGS_OPTIONS: [Rect; 6] = [
     Rect::new(550.0, 686.0, 820.0, 49.0),
 ];
 
+const UNIFIED_SETTINGS_COUNT: usize = 8;
+fn unified_setting_rect(index: usize) -> Rect {
+    Rect::new(815.0, 179.0 + index as f32 * 91.0, 940.0, 68.0)
+}
+
+fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'static str, String) {
+    let on = |enabled: bool| if enabled { tr("Activado", "Activat") } else { tr("Desactivado", "Desactivat") };
+    match index {
+        0 => (tr("Ordenar biblioteca", "Ordena la biblioteca"),
+            tr("Cambia el orden de archivos y carpetas.", "Canvia l'ordre dels fitxers i les carpetes."),
+            [tr("Nombre", "Nom"), tr("Fecha", "Data"), tr("Tamaño", "Mida")][settings.sort].into()),
+        1 => (tr("Mostrar extensiones", "Mostra les extensions"),
+            tr("Muestra el tipo de archivo en los títulos.", "Mostra el tipus de fitxer als títols."),
+            on(settings.extensions).into()),
+        2 => (tr("Siguiente episodio automático", "Episodi següent automàtic"),
+            tr("Reproduce el siguiente episodio de la carpeta.", "Reprodueix l'episodi següent de la carpeta."),
+            on(settings.auto_next).into()),
+        3 => (tr("Subtítulos forzados", "Subtítols forçats"),
+            tr("Activa las pistas forzadas disponibles.", "Activa els subtítols forçats disponibles."),
+            on(settings.forced_subtitles).into()),
+        4 => (tr("Idioma de audio", "Idioma de l'àudio"),
+            tr("Elige el idioma al comenzar cada vídeo.", "Tria l'idioma quan comences un vídeo."),
+            if settings.spanish_audio { tr("Español", "Castellà") } else { tr("Automático", "Automàtic") }.into()),
+        5 => (tr("Idioma de CineUSB", "Idioma de CineUSB"),
+            tr("Cambia el idioma de la interfaz.", "Canvia l'idioma de la interfície."),
+            if settings.language == Preference::Ca { "Català" } else { "Español" }.into()),
+        6 => (tr("Color de acento", "Color de ressaltat"),
+            tr("Personaliza el color de selección.", "Personalitza el color de selecció."),
+            [tr("Morado", "Lila"), tr("Azul", "Blau"), tr("Gris neutro", "Gris neutre")][settings.accent].into()),
+        _ => (tr("Tamaño de tarjetas", "Mida de les targetes"),
+            tr("Ajusta el tamaño de los pósteres.", "Ajusta la mida dels pòsters."),
+            [tr("Normal", "Normal"), tr("Compacto", "Compacte"), tr("Grande", "Gran")][settings.cards].into()),
+    }
+}
+
 enum Dialog {
     Settings,
-    Language,
-    ForcedSubtitles,
-    Audio,
-    AutoNext,
     Appearance,
     Accent,
     Cards,
-    Sort,
     Extensions,
     Resume(u64),
     Next { volume: Volume, path: PathBuf, deadline: Instant },
@@ -236,6 +266,8 @@ pub(super) struct Browser {
     dialog_started: Option<Instant>,
     button_motion: Option<(Rect, Instant)>,
     favorite_motion: Option<(PathBuf, bool, Instant)>,
+    ejecting: Option<(Volume, Instant)>,
+    eject_feedback: Option<(Volume, bool, Instant)>,
     estimate: Option<(i64, plx_appkit::player_hud::model::FinishClock)>,
     next_estimate: Option<Instant>,
     estimate_anchor: Option<(i64, i32)>,
@@ -260,7 +292,9 @@ impl Browser {
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
             queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_view: None,
             favorite_section: (false, now, 0.0),
-            dialog_started: None, button_motion: None, favorite_motion: None, estimate: None, next_estimate: None, estimate_anchor: None,
+            dialog_started: None, button_motion: None, favorite_motion: None,
+            ejecting: None, eject_feedback: None,
+            estimate: None, next_estimate: None, estimate_anchor: None,
         }
     }
 
@@ -382,16 +416,19 @@ impl Browser {
                         }
                     }
                     DiskResult::Eject(volume, result) => {
-                        if result.is_ok() {
+                        let success = result.is_ok();
+                        if success {
                             self.scan.volumes.retain(|item| *item != volume);
                             self.leave_favorites();
                             self.folders.clear();
                             self.action = None;
                             self.select(0, true);
                         }
-                        self.finish_mutation(result, tr("Ya puedes retirar el disco USB.", "Ja pots treure el disc USB."),
+                        self.finish_mutation(result, tr("USB expulsado correctamente.", "USB expulsat correctament."),
                             tr("No se pudo expulsar el USB. Cierra las apps que lo usan y vuelve a intentarlo.",
-                                "No s’ha pogut expulsar l’USB. Tanca les aplicacions que el fan servir i torna-ho a provar."));
+                                "No s'ha pogut expulsar l'USB. Tanca les aplicacions que el fan servir i torna-ho a provar."));
+                        self.ejecting = None;
+                        self.eject_feedback = Some((volume, success, Instant::now()));
                     }
                 }
             }
@@ -399,6 +436,9 @@ impl Browser {
                 self.pending = None;
                 self.mutating = false;
                 self.progress = None;
+                if let Some((volume, _)) = self.ejecting.take() {
+                    self.eject_feedback = Some((volume, false, Instant::now()));
+                }
                 self.status = tr("Se interrumpió la operación.", "L’operació s’ha interromput.").into();
                 changed = true;
             }
@@ -465,6 +505,13 @@ impl Browser {
         changed |= self.button_motion.is_some_and(|(_, started)| now.duration_since(started) < MOTION);
         changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < MOTION);
         changed |= self.favorite_section.1.elapsed() < MOTION;
+        if self.eject_feedback.as_ref().is_some_and(|(_, success, start)| *success && start.elapsed() >= Duration::from_secs(3)) {
+            self.eject_feedback = None;
+            changed = true;
+        }
+        changed |= self.eject_feedback.as_ref().is_some_and(|(_, success, start)|
+            *success && start.elapsed() < Duration::from_secs(3));
+        changed |= self.ejecting.as_ref().is_some_and(|(_, start)| start.elapsed() < Duration::from_millis(800));
         changed |= self.update_video_details();
         if self.action.is_some_and(|action| !self.action_available(action)) {
             self.action = None;
@@ -822,7 +869,7 @@ impl Browser {
                     let grid = grid_geometry(self.len(), self.settings.cards);
                     poster_grid::visible_in(&grid, self.len(), TOP, self.scroll.pos)
                         .filter_map(|index| folder.entries.get(index))
-                        .filter(|entry| entry.kind == Kind::Video && continuity::episode(&entry.name).is_some())
+                        .filter(|entry| entry.kind == Kind::Video)
                         .map(|entry| Self::detail_key(folder, entry))
                         .find(|key| !self.details.contains_key(key))
                         .map(|key| (folder.volume.clone(), key))
@@ -883,16 +930,11 @@ impl Browser {
                 if size_changed || sort_changed { self.select(self.selected, true); }
                 i18n::apply_usb_language(settings.language);
                 if saving {
-                    self.option = match self.dialog {
-                        Some(Dialog::ForcedSubtitles) => 1,
-                        Some(Dialog::Audio) => 2,
-                        Some(Dialog::AutoNext) => 3,
-                        Some(Dialog::Sort) => 5,
-                        Some(Dialog::Cards) => 1,
-                        Some(Dialog::Extensions) => 2,
-                        _ => 0,
-                    };
-                    self.dialog = Some(if matches!(self.dialog, Some(Dialog::Accent | Dialog::Cards | Dialog::Extensions)) { Dialog::Appearance } else { Dialog::Settings });
+                    // The unified screen keeps its current focus when a value is saved.
+                    // Do not resurrect obsolete per-setting dialogs or reset the selection.
+                    if matches!(self.dialog, Some(Dialog::Accent | Dialog::Cards | Dialog::Extensions)) {
+                        self.dialog = Some(Dialog::Appearance);
+                    }
                     self.status.clear();
                 }
             }
@@ -975,35 +1017,30 @@ impl Browser {
         }
     }
 
+    fn cycle_unified_setting(&mut self, direction: i32) {
+        let mut next = self.settings;
+        let step = |value: usize, count: usize| (value as i32 + direction).rem_euclid(count as i32) as usize;
+        match self.option {
+            0 => next.sort = step(next.sort, 3),
+            1 => next.extensions = !next.extensions,
+            2 => next.auto_next = !next.auto_next,
+            3 => next.forced_subtitles = !next.forced_subtitles,
+            4 => next.spanish_audio = !next.spanish_audio,
+            5 => next.language = if next.language == Preference::Ca { Preference::Es } else { Preference::Ca },
+            6 => next.accent = step(next.accent, 3),
+            7 => next.cards = step(next.cards, 3),
+            _ => return,
+        }
+        self.change_settings(next);
+    }
+
     fn choose_option(&mut self) {
         if self.settings_job.is_some() { return; }
         self.dialog_started = None;
         match self.dialog.take() {
             Some(Dialog::Settings) => {
-                self.status.clear();
-                let (dialog, selected) = match self.option {
-                    0 => (Dialog::Language, usize::from(self.settings.language == Preference::Ca)),
-                    1 => (Dialog::ForcedSubtitles, usize::from(self.settings.forced_subtitles)),
-                    2 => (Dialog::Audio, usize::from(self.settings.spanish_audio)),
-                    3 => (Dialog::AutoNext, usize::from(self.settings.auto_next)),
-                    4 => (Dialog::Appearance, 0),
-                    _ => (Dialog::Sort, self.settings.sort),
-                };
-                self.dialog = Some(dialog);
-                self.option = selected;
-            }
-            Some(Dialog::Language) => {
-                let language = if self.option == 0 { Preference::Es } else { Preference::Ca };
-                self.dialog = Some(Dialog::Language);
-                self.change_settings(Settings { language, ..self.settings });
-            }
-            Some(Dialog::ForcedSubtitles) => {
-                self.dialog = Some(Dialog::ForcedSubtitles);
-                self.change_settings(Settings { forced_subtitles: self.option == 1, ..self.settings });
-            }
-            Some(Dialog::Audio) => {
-                self.dialog = Some(Dialog::Audio);
-                self.change_settings(Settings { spanish_audio: self.option == 1, ..self.settings });
+                self.dialog = Some(Dialog::Settings);
+                self.cycle_unified_setting(1);
             }
             Some(Dialog::Appearance) => {
                 (self.dialog, self.option) = match self.option {
@@ -1012,13 +1049,11 @@ impl Browser {
                     _ => (Some(Dialog::Extensions), usize::from(self.settings.extensions)),
                 };
             }
-            Some(dialog @ (Dialog::AutoNext | Dialog::Accent | Dialog::Cards | Dialog::Sort | Dialog::Extensions)) => {
+            Some(dialog @ (Dialog::Accent | Dialog::Cards | Dialog::Extensions)) => {
                 let mut settings = self.settings;
                 match dialog {
-                    Dialog::AutoNext => settings.auto_next = self.option == 1,
                     Dialog::Accent => settings.accent = self.option,
                     Dialog::Cards => settings.cards = self.option,
-                    Dialog::Sort => settings.sort = self.option,
                     Dialog::Extensions => settings.extensions = self.option == 1,
                     _ => unreachable!(),
                 }
@@ -1069,11 +1104,14 @@ impl Browser {
             Some(Dialog::Eject(volume)) if self.option == 1 => {
                 if !self.scan.volumes.contains(&volume) { return; }
                 self.status = tr("Expulsando disco…", "Expulsant el disc…").into();
+                self.ejecting = Some((volume.clone(), Instant::now()));
+                self.eject_feedback = None;
                 self.request(move || {
                     let result = mutate_usb(Mutation::Eject, &volume, &volume.path);
                     DiskResult::Eject(volume, result)
                 });
                 self.mutating = self.pending.is_some();
+                if !self.mutating { self.ejecting = None; }
             }
             _ => {}
         }
@@ -1227,7 +1265,7 @@ impl Browser {
         if let Some(dialog) = self.dialog.take() {
             self.prepared = None;
             self.dialog = match dialog {
-                Dialog::Language | Dialog::ForcedSubtitles | Dialog::Audio | Dialog::AutoNext | Dialog::Appearance | Dialog::Sort => Some(Dialog::Settings),
+                Dialog::Appearance => Some(Dialog::Settings),
                 Dialog::Accent | Dialog::Cards | Dialog::Extensions => Some(Dialog::Appearance),
                 Dialog::Delete { volume, path } => Some(Dialog::Video { volume, path }),
                 _ => None,
@@ -1265,9 +1303,9 @@ impl Browser {
 
     fn vertical_options(&self) -> usize {
         match self.dialog {
-            Some(Dialog::Settings) => 6,
+            Some(Dialog::Settings) => UNIFIED_SETTINGS_COUNT,
             Some(Dialog::Appearance) => 3,
-            Some(Dialog::Accent | Dialog::Cards | Dialog::Sort) => 3,
+            Some(Dialog::Accent | Dialog::Cards) => 3,
             _ => 0,
         }
     }
@@ -1277,10 +1315,19 @@ impl Browser {
     }
 
     fn click(&mut self, x: f32, y: f32) {
+        if self.eject_feedback.is_some() {
+            if hit(Rect::new(510.0, 292.0, 900.0, 496.0), x, y) {
+                self.eject_feedback = None;
+            }
+            return;
+        }
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
-            let options = if vertical > 0 { &SETTINGS_OPTIONS[..vertical] } else { self.horizontal_options() };
+            let unified = matches!(self.dialog, Some(Dialog::Settings));
+            let options: Vec<Rect> = if unified { (0..UNIFIED_SETTINGS_COUNT).map(unified_setting_rect).collect() }
+                else if vertical > 0 { SETTINGS_OPTIONS[..vertical].to_vec() }
+                else { self.horizontal_options().to_vec() };
             if let Some(index) = options.iter().position(|rect| hit(*rect, x, y)) {
                 if !self.option_available(index) { return; }
                 self.press_button(options[index]);
@@ -1315,6 +1362,17 @@ impl Browser {
     }
 
     fn key(&mut self, key: Key, repeat: bool) {
+        if self.eject_feedback.is_some() {
+            if !repeat && matches!(key, Key::Ok | Key::Back) {
+                if let Some((volume, success, _)) = self.eject_feedback.take() {
+                    if !success && matches!(key, Key::Ok) && self.scan.volumes.contains(&volume) {
+                        self.dialog = Some(Dialog::Eject(volume));
+                        self.option = 1;
+                    }
+                }
+            }
+            return;
+        }
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
@@ -1322,6 +1380,8 @@ impl Browser {
             match key {
                 Key::Up if settings => self.option = self.option.saturating_sub(1),
                 Key::Down if settings => self.option = (self.option + 1).min(vertical - 1),
+                Key::Left { alt: false } if matches!(self.dialog, Some(Dialog::Settings)) => self.cycle_unified_setting(-1),
+                Key::Right { alt: false } if matches!(self.dialog, Some(Dialog::Settings)) => self.cycle_unified_setting(1),
                 Key::Left { alt: false } if !settings => {
                     self.option = (0..self.option).rev().find(|index| self.option_available(*index)).unwrap_or(self.option);
                 }
@@ -1331,7 +1391,8 @@ impl Browser {
                 }
                 Key::Ok if !repeat => {
                     if !self.option_available(self.option) { return; }
-                    let rect = if settings { SETTINGS_OPTIONS[self.option] } else { self.horizontal_options()[self.option] };
+                    let rect = if matches!(self.dialog, Some(Dialog::Settings)) { unified_setting_rect(self.option) }
+                        else if settings { SETTINGS_OPTIONS[self.option] } else { self.horizontal_options()[self.option] };
                     self.press_button(rect);
                     self.choose_option();
                 }
@@ -1546,6 +1607,39 @@ impl Browser {
             cursor = draw_hint(p, cursor, HintKey::Ok, primary);
             draw_hint(p, cursor, HintKey::Icon(Icon::ChevronLeft), back);
         }
+        self.draw_eject_feedback(p);
+    }
+
+    fn draw_eject_feedback(&self, p: Painter) {
+        let state = self.eject_feedback.as_ref().map(|(volume, success, at)| (volume, Some(*success), *at))
+            .or_else(|| self.ejecting.as_ref().map(|(volume, started)| (volume, None, *started)));
+        let Some((volume, result, started)) = state else { return };
+        let progress = (started.elapsed().as_secs_f32() / 0.75).clamp(0.0, 1.0);
+        let smooth = progress * progress * (3.0 - 2.0 * progress);
+        let panel = Rect::new(550.0, 300.0, 820.0, 480.0);
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.72), theme::scrim_black(0.72), 0.0);
+        p.shadow_outside(panel, 28.0, theme::MENU_SHADOW_BLUR, theme::MENU_SHADOW_DY, theme::MENU_SHADOW);
+        p.rect_sheened(panel, 28.0, theme::MENU_GLASS_TOP, theme::MENU_GLASS_BOT);
+        let center = Rect::new(906.0, 344.0 - smooth * 16.0, 106.0, 106.0).scaled(0.9 + 0.1 * smooth);
+        match result {
+            Some(true) if smooth > 0.65 => icons::draw(p, Icon::Check, center, theme::USB_FAVORITES),
+            Some(false) => icons::draw(p, Icon::Alert, center, theme::DANGER),
+            _ => draw_glyph(p, Glyph::Eject, center, theme::TEXT_PRIMARY),
+        }
+        let headline = match result {
+            Some(true) => tr("USB expulsado correctamente", "USB expulsat correctament"),
+            Some(false) => tr("No se pudo expulsar el USB", "No s'ha pogut expulsar l'USB"),
+            None => tr("Expulsando USB…", "Expulsant l'USB…"),
+        };
+        draw_line(p, headline, Rect::new(630.0, 477.0, 660.0, 58.0), theme::size::HEADLINE, true);
+        draw_line(p, &volume_name(volume), Rect::new(655.0, 539.0, 610.0, 48.0), theme::size::BODY, false);
+        let description = match result {
+            Some(true) => tr("Ya puedes desconectar el dispositivo con seguridad.", "Ja pots desconnectar el dispositiu amb seguretat."),
+            Some(false) => tr("Comprueba que no haya archivos en uso. Pulsa OK para reintentar o Atrás para cerrar.",
+                "Comprova que no hi hagi fitxers oberts. Prem OK per reintentar o Enrere per tancar."),
+            None => tr("Espera a que termine la operación.", "Espera que acabi l'operació."),
+        };
+        draw_line(p, description, Rect::new(620.0, 602.0, 690.0, 85.0), theme::size::CAPTION, false);
     }
 
     fn draw_storage(&self, p: Painter, volume: &Volume, (total, used, free, readonly): (u64, u64, u64, bool)) {
@@ -1567,7 +1661,46 @@ impl Browser {
         }
     }
 
+    fn draw_unified_settings(&self, p: Painter) {
+        let alpha = self.dialog_started.map_or(1.0, motion_alpha);
+        let p = p.alpha(0.8 + 0.2 * alpha);
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.93), theme::scrim_black(0.93), 0.0);
+        draw_line(p, tr("Ajustes", "Ajustos"), Rect::new(115.0, 138.0, 610.0, 78.0), theme::size::HEADLINE, true);
+        let (_, description, _) = unified_setting_text(self.option, &self.settings);
+        draw_line(p, description, Rect::new(115.0, 250.0, 585.0, 165.0), theme::size::BODY, false);
+        draw_line(p, tr("Usa izquierda y derecha para cambiar el valor.", "Fes servir esquerra i dreta per canviar el valor."),
+            Rect::new(115.0, 480.0, 600.0, 100.0), theme::size::CAPTION, false);
+        for i in 0..UNIFIED_SETTINGS_COUNT {
+            let rect = unified_setting_rect(i);
+            let focused = self.option == i;
+            if focused {
+                p.rect_sheened(rect, 18.0, self.accent(), self.accent());
+            } else {
+                p.rect_sheened(rect, 18.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+            }
+            let (label, _, value) = unified_setting_text(i, &self.settings);
+            draw_line(p, label, Rect::new(rect.x + 20.0, rect.y + 10.0, 560.0, 47.0), theme::size::CAPTION, focused);
+            draw_line(p, &value, Rect::new(rect.x + 602.0, rect.y + 10.0, 305.0, 47.0), theme::size::CAPTION, focused);
+            if matches!(i, 0 | 2 | 5 | 6) {
+                let category = match i {
+                    0 => tr("BIBLIOTECA / USB", "BIBLIOTECA / USB"),
+                    2 => tr("REPRODUCCIÓN", "REPRODUCCIÓ"),
+                    5 => tr("SISTEMA", "SISTEMA"),
+                    _ => tr("APARIENCIA", "APARENÇA"),
+                };
+                draw_line(p, category, Rect::new(rect.x, rect.y - 22.0, 600.0, 21.0), theme::size::MICRO, true);
+            }
+        }
+        if !self.status.is_empty() {
+            draw_line(p, &self.status, Rect::new(115.0, 940.0, 1600.0, 51.0), theme::size::CAPTION, false);
+        }
+    }
+
     fn draw_dialog(&self, p: Painter, dialog: &Dialog) {
+        if matches!(dialog, Dialog::Settings) {
+            self.draw_unified_settings(p);
+            return;
+        }
         let cancel = tr("Cancelar", "Cancel·la");
         let save_status = |description: &'static str| {
             if matches!(self.settings_job, Some(SettingsJob::Save(_))) { tr("Guardando…", "Desant…") }
@@ -1581,20 +1714,6 @@ impl Browser {
             Dialog::Extensions => (tr("Mostrar extensiones", "Mostra les extensions"), String::new(),
                 save_status(""), [tr("Ocultar", "Amaga-les"), tr("Mostrar", "Mostra-les")]),
             Dialog::Cards => (tr("Tamaño de tarjetas", "Mida de les targetes"), String::new(), "", ["", ""]),
-            Dialog::Sort => (tr("Biblioteca USB · Orden", "Biblioteca USB · Ordre"), String::new(), "", ["", ""]),
-            Dialog::AutoNext => (tr("Siguiente episodio automático", "Episodi següent automàtic"), String::new(),
-                save_status(tr("Se aplica a episodios consecutivos de la misma carpeta.", "S’aplica a episodis seguits de la mateixa carpeta.")),
-                [tr("Desactivado", "Desactivat"), tr("Activado", "Activat")]),
-            Dialog::Language => (tr("Idioma de CineUSB", "Idioma del CineUSB"), String::new(),
-                save_status(tr("Elige el idioma de la app.", "Tria en quin idioma vols fer servir l’app.")),
-                ["Castellano", "Català"]),
-            Dialog::ForcedSubtitles => (tr("Subtítulos forzados", "Subtítols forçats"), String::new(),
-                save_status(tr("Se activan al reproducir si hay una pista compatible.",
-                    "S’activen quan poses un vídeo si hi ha una pista compatible.")),
-                [tr("Desactivados", "Desactivats"), tr("Activados", "Activats")]),
-            Dialog::Audio => (tr("Idioma de audio predeterminado", "Idioma d’àudio per defecte"), String::new(),
-                save_status(tr("Se aplica al abrir cada vídeo.", "S’aplica quan obres un vídeo.")),
-                [tr("Automático", "Automàtic"), tr("Español", "Castellà")]),
             Dialog::Resume(_) => (tr("Reanudar reproducción", "Continua mirant"),
                 self.prepared.as_ref().map_or_else(String::new, |media| media.title.clone()), "",
                 ["", tr("Empezar desde el principio", "Torna a començar")]),
@@ -1639,7 +1758,6 @@ impl Browser {
             Dialog::Appearance => &[tr("Color de acento", "Color de ressaltat"), tr("Tamaño de tarjetas", "Mida de les targetes"), tr("Mostrar extensiones", "Mostra les extensions")],
             Dialog::Accent => &[tr("Morado", "Lila"), tr("Azul", "Blau"), tr("Gris neutro", "Gris neutre")],
             Dialog::Cards => &[tr("Normal", "Normal"), tr("Compacto", "Compacte"), tr("Grande", "Gran")],
-            Dialog::Sort => &[tr("Nombre", "Nom"), tr("Fecha de modificación", "Data de modificació"), tr("Tamaño", "Mida")],
             _ => &[],
         };
         if !labels.is_empty() {
@@ -1805,27 +1923,28 @@ impl Browser {
                 }
             }
         }
-        if let Some((_, season, episode)) = current.map(|(_, entry)| entry)
-            .filter(|entry| entry.kind == Kind::Video).and_then(|entry| continuity::episode(&entry.name)) {
-            let duration = current.and_then(|(folder, entry)| self.details.get(&Self::detail_key(folder, entry)))
-                .and_then(|details| details.duration_secs).map(|seconds| {
-                    if seconds < 60 { "<1 min".to_owned() }
-                    else { format!("{} min", seconds / 60) }
-                });
-            let episode = format!("{season}×{episode:02}");
+        if let Some((folder, entry)) = current.filter(|(_, entry)| entry.kind == Kind::Video) {
+            let details = self.details.get(&Self::detail_key(folder, entry));
+            let episode = continuity::episode(&entry.name).map(|(_, season, episode)| format!("{season}×{episode:02}"));
+            let duration = details.and_then(|details| details.duration_secs).map(video_duration);
+            let quality = details.and_then(|details| details.resolution)
+                .map(|(width, height)| resolution_label(width, height));
+            let badges: Vec<String> = episode.into_iter().chain(duration).chain(quality).collect();
             let size = theme::size::DIAGNOSTIC;
             let available = card.w - 24.0;
-            let duration_budget = duration.as_ref().map_or(0.0, |text|
-                (TtfMeasure.width_str(text, size, true) + 10.0).min(available * 0.57));
-            let episode_budget = if duration.is_some() { available - duration_budget - 5.0 } else { available };
             let mut x = card.x + 12.0;
-            for (text, budget) in std::iter::once((&episode, episode_budget))
-                .chain(duration.as_ref().map(|text| (text, duration_budget))) {
-                let (run, width) = TtfMeasure.fit_line_measured(text, budget - 10.0, size, true);
-                let badge = Rect::new(x, caption.y + caption.h + 5.0, width + 10.0, 32.0);
+            let mut y = caption.y + caption.h + 5.0;
+            for text in badges {
+                let (run, width) = TtfMeasure.fit_line_measured(&text, available - 10.0, size, true);
+                let badge_width = width + 10.0;
+                if x + badge_width > card.x + card.w - 12.0 && x > card.x + 12.0 {
+                    x = card.x + 12.0;
+                    y += 37.0;
+                }
+                let badge = Rect::new(x, y, badge_width, 32.0);
                 p.rect_sheened(badge, 10.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
                 if focused && self.action.is_none() { p.rring(badge, 10.0, 1.0, self.accent()); }
-                Label::new(run.as_ptr(), theme::size::DIAGNOSTIC, theme::TEXT_PRIMARY).h(HAlign::Center).bold().draw(p, badge);
+                Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).h(HAlign::Center).bold().draw(p, badge);
                 x += badge.w + 5.0;
             }
         }
@@ -1894,10 +2013,14 @@ fn video_duration(seconds: u64) -> String {
 }
 
 fn resolution_label(width: u32, height: u32) -> String {
-    match (width, height) {
-        (3840, 2160) => "4K UHD".into(),
-        (1920, 1080) => "Full HD".into(),
-        (1280, 720) => "HD".into(),
+    // Use the encoded width for cropped cinema, not the smaller visible height.
+    // Do not promote QHD (2560 pixels wide) to 4K.
+    let wide = width.max(height);
+    let short = width.min(height);
+    match (wide, short) {
+        (3840..=4096, 1600..=2160) => "4K UHD".into(),
+        (1920, 800..=1080) => "1080p".into(),
+        (1280, 500..=720) => "720p".into(),
         (1..=1024, 1..=576) => "SD".into(),
         _ => format!("{width}×{height}"),
     }
@@ -2533,9 +2656,16 @@ mod usb_browser_tests {
     }
 
     #[test]
-    fn only_standard_uhd_is_labelled_4k() {
+    fn cinematic_quality_badges_do_not_promote_qhd_to_uhd() {
         assert_eq!(resolution_label(3840, 2160), "4K UHD");
+        assert_eq!(resolution_label(3840, 1608), "4K UHD");
+        assert_eq!(resolution_label(4096, 1716), "4K UHD");
+        assert_eq!(resolution_label(1920, 800), "1080p");
+        assert_eq!(resolution_label(1280, 536), "720p");
         assert_eq!(resolution_label(2560, 1440), "2560×1440");
+        assert_eq!(resolution_label(2560, 1080), "2560×1080");
+        assert_eq!(resolution_label(1608, 3840), "4K UHD");
+        assert_eq!(video_duration(95 * 60), "1 h 35 min");
     }
 
     #[test]
