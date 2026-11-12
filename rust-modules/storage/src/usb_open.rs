@@ -391,7 +391,9 @@ fn unmount_still_live_ntfs(table: &[u8], drives: &[&str]) -> io::Result<usize> {
     let candidates = ntfs_mountpoints(table, drives)?;
     for mount in &candidates {
         let handle = File::open(mount)?;
-        if unsafe { libc::syncfs(handle.as_raw_fd()) } != 0 {
+        // The webOS ARM sysroot does not export the libc syncfs symbol.
+        // Invoke the Linux syncfs syscall directly, scoped to this NTFS mount.
+        if unsafe { libc::syscall(libc::SYS_syncfs as libc::c_long, handle.as_raw_fd()) } != 0 {
             return Err(io::Error::last_os_error());
         }
         drop(handle);
