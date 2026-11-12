@@ -5,11 +5,6 @@ on:
     branches: [main]
   push:
     branches: [main]
-    paths:
-      - .github/workflows/cineusb-ipk.yml
-      - ci/check-package.py
-      - pkg/appinfo.json
-      - ipkroot/ctl/control
       # Rebuild for all Rust sources, including local_usb.rs and the privileged
       # storage helper usb_open.rs (not just the local_usb/ directory).
       - rust-modules/**
@@ -143,6 +138,24 @@ jobs:
       PLX_POSTHOG_KEY_DEV: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare and commit the automatic release version
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Checkout is detached by default for push events. Work on main so the
+          # generated version/docs are committed as part of the published source.
+          git checkout -B main "$GITHUB_SHA"
+          python3 ci/prepare-automatic-release.py
+          git add pkg/appinfo.json ipkroot/ctl/control rust-modules/Cargo.toml rust-modules/Cargo.lock docs/release-notes docs/release-audits
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore(release): prepare automatic CineUSB release"
+            # The workflow token does not trigger another push workflow, so
+            # the current run builds the committed version exactly once.
+            git push origin HEAD:main
+          fi
       - uses: ./.github/actions/rust-toolchain
       - uses: ./.github/actions/webos-ndk
         id: ndk
@@ -210,7 +223,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="cineusb-v$CINEUSB_VERSION"
-          gh release create "$tag" --target "$GITHUB_SHA" --draft \
+          gh release create "$tag" --target "$(git rev-parse HEAD)" --draft \
             --title "CineUSB $CINEUSB_VERSION · Biblioteca USB" \
             --notes "Biblioteca USB para webOS con navegación por carpetas y reproductor integrado. El código fuente correspondiente y la receta de compilación acompañan al paquete." \
             pkg/com.seergi893.cineusb_*_arm.ipk pkg/com.seergi893.cineusb.manifest.json \
