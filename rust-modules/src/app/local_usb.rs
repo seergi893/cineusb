@@ -66,20 +66,10 @@ fn tr(es: &'static str, ca: &'static str) -> &'static str {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Action { Library, Favorites, ToggleFavorite, Select, DeleteFolders, Settings, Eject }
+enum Action { ToggleFavorite, Select, DeleteFolders }
 
 enum Mutation { Delete, Eject }
 
-const TOOLBAR: Rect = Rect::new(475.0, 36.0, 1349.0, 67.0);
-const ACTIONS: [(Action, Rect); 7] = [
-    (Action::Library, Rect::new(486.0, 45.0, 150.0, 49.0)),
-    (Action::Favorites, Rect::new(1283.0, 45.0, 105.0, 49.0)),
-    (Action::ToggleFavorite, Rect::new(1404.0, 222.0, 420.0, 45.0)),
-    (Action::Select, Rect::new(1392.0, 45.0, 100.0, 49.0)),
-    (Action::DeleteFolders, Rect::new(1496.0, 45.0, 100.0, 49.0)),
-    (Action::Settings, Rect::new(1600.0, 45.0, 102.0, 49.0)),
-    (Action::Eject, Rect::new(1706.0, 45.0, 108.0, 49.0)),
-];
 const PANEL: Rect = Rect::new(510.0, 292.0, 900.0, 496.0);
 const OPTIONS: [Rect; 2] = [
     Rect::new(555.0, 676.0, 390.0, 66.0),
@@ -155,12 +145,21 @@ fn discover_media_folders(volume: &Volume, kind: usize) -> Vec<PathBuf> {
     matched.into_iter().map(|(_, _, path)| path).collect()
 }
 
-const NAV_PILL: Rect = Rect::new(645.0, 32.0, 630.0, 70.0);
-const NAV_TABS: [Rect; 4] = [
-    Rect::new(656.0, 42.0, 145.0, 48.0),
-    Rect::new(812.0, 42.0, 145.0, 48.0),
-    Rect::new(968.0, 42.0, 145.0, 48.0),
-    Rect::new(1124.0, 42.0, 139.0, 48.0),
+// Stable six-action PlxNative-style navigation track.
+const NAV_PILL: Rect = Rect::new(352.0, 32.0, 1216.0, 70.0);
+const NAV_TABS: [Rect; 6] = [
+    Rect::new(365.0, 42.0, 125.0, 48.0),
+    Rect::new(500.0, 42.0, 205.0, 48.0),
+    Rect::new(715.0, 42.0, 155.0, 48.0),
+    Rect::new(880.0, 42.0, 195.0, 48.0),
+    Rect::new(1085.0, 42.0, 170.0, 48.0),
+    Rect::new(1265.0, 42.0, 290.0, 48.0),
+];
+// Folder-specific controls sit in the content header, not the navigation.
+const ACTIONS: [(Action, Rect); 3] = [
+    (Action::ToggleFavorite, Rect::new(1300.0, 222.0, 520.0, 45.0)),
+    (Action::Select, Rect::new(1030.0, 222.0, 185.0, 45.0)),
+    (Action::DeleteFolders, Rect::new(1225.0, 222.0, 185.0, 45.0)),
 ];
 
 const SEARCH_KEYS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -343,6 +342,7 @@ pub(super) struct Browser {
     search_key: usize,
     nav_tab: usize,
     nav_focus: Option<usize>,
+    nav_strip: widgets::TabStrip,
     discovery_cache: BTreeMap<(PathBuf, u64, usize), Vec<PathBuf>>,
     favorite_section: (bool, Instant, f32),
     dialog_started: Option<Instant>,
@@ -375,7 +375,7 @@ impl Browser {
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
             queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_view: None,
             media_view: None, search_view: None, search_target: None, search_query: String::new(),
-            search_key: 0, nav_tab: 0, nav_focus: None, discovery_cache: BTreeMap::new(),
+            search_key: 0, nav_tab: 0, nav_focus: None, nav_strip: widgets::TabStrip::new(), discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
             dialog_started: None, button_motion: None, favorite_motion: None,
             ejecting: None, eject_feedback: None, eject_uncertain: false,
@@ -624,6 +624,11 @@ impl Browser {
         changed |= self.button_motion.is_some_and(|(_, started)| now.duration_since(started) < MOTION);
         changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < MOTION);
         changed |= self.favorite_section.1.elapsed() < MOTION;
+        let selected_tab = if self.favorite_section.0 { 3 } else { self.nav_tab };
+        let focused_tab = self.nav_focus.unwrap_or(selected_tab);
+        self.nav_strip.update(selected_tab as i32, focused_tab as i32,
+            |index| NAV_TABS.get(index).map(|rect| (rect.x, rect.w)), widgets::SelMark::Travels, dt);
+        changed |= self.nav_strip.moving();
         if self.eject_feedback.as_ref().is_some_and(|(_, success, start)| *success && start.elapsed() >= Duration::from_secs(3)) {
             self.eject_feedback = None;
             changed = true;
@@ -1203,15 +1208,11 @@ impl Browser {
 
     fn action_available(&self, action: Action) -> bool {
         match action {
-            Action::Library => self.selection.is_none() && self.volume().is_some(),
-            Action::Favorites => self.selection.is_none() && self.volume().is_some(),
             Action::ToggleFavorite => self.selection.is_none() && self.folder_favorite_key().is_some(),
-            Action::Settings => self.selection.is_none(),
             Action::Select => self.selection.is_some() || (self.favorite_cards().is_none() && self.folders.last().is_some_and(|folder| {
                 folder.path != folder.volume.path && system_mount(&folder.volume).is_some() && folder.entries.iter().any(|entry| entry.kind == Kind::Folder)
             })),
             Action::DeleteFolders => self.selection.as_ref().is_some_and(|marked| !marked.is_empty()),
-            Action::Eject => self.selection.is_none() && self.volume().and_then(system_mount).is_some(),
         }
     }
 
@@ -1221,15 +1222,7 @@ impl Browser {
         self.status.clear();
         self.loading_favorites = false;
         self.dialog = match action {
-            Action::Library => {
-                self.leave_favorites();
-                self.open_library_root();
-                None
-            }
-            Action::Favorites => { self.set_favorite_section(true); self.show_favorites(); None }
             Action::ToggleFavorite => { self.toggle_folder_favorite(); None }
-            Action::Settings => Some(Dialog::Settings),
-            Action::Eject => self.volume().cloned().map(Dialog::Eject),
             Action::Select => {
                 self.selection = self.selection.is_none().then(BTreeSet::new);
                 self.action = None;
@@ -1237,20 +1230,6 @@ impl Browser {
             }
             Action::DeleteFolders => Some(Dialog::DeleteFolders),
         };
-    }
-
-    fn open_library_root(&mut self) {
-        self.action = None;
-        if self.folders.first().is_none_or(|folder| folder.path != folder.volume.path) {
-            if let Some(volume) = self.volume().cloned() {
-                self.folders.clear();
-                self.open_folder(volume.clone(), volume.path.clone());
-            }
-        } else if self.folders.len() > 1 {
-            self.folders.truncate(1);
-            let selected = self.folders[0].selected;
-            self.restore_view(selected, self.folders[0].scroll);
-        }
     }
 
     fn cycle_unified_setting(&mut self, direction: i32) {
@@ -1635,7 +1614,7 @@ impl Browser {
         if let Some(tab) = self.nav_focus {
             match key {
                 Key::Left { alt: false } => self.nav_focus = Some(tab.saturating_sub(1)),
-                Key::Right { alt: false } => self.nav_focus = Some((tab + 1).min(3)),
+                Key::Right { alt: false } => self.nav_focus = Some((tab + 1).min(NAV_TABS.len() - 1)),
                 Key::Down | Key::Back => self.nav_focus = None,
                 Key::Ok if !repeat => self.open_nav_tab(tab),
                 _ => {}
@@ -1782,36 +1761,25 @@ impl Browser {
         let p = Painter::root().alpha(plx_ui::nav::page_alpha());
         let x = plx_ui::consts::MARGIN_X;
         let width = 1920.0 - 2.0 * x;
-        p.rect(TOOLBAR, 24.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL, 0.0);
         self.draw_nav_pill(p);
-        draw_line(p, "CineUSB", Rect::new(x, 45.0, 345.0, 50.0), theme::size::HEADLINE, true);
+        draw_line(p, "CineUSB", Rect::new(x, 45.0, 260.0, 50.0), theme::size::HEADLINE, true);
         for (action, rect) in ACTIONS {
             if self.action_available(action) {
                 let label = match action {
-                    Action::Library => tr("Biblioteca", "Biblioteca"),
-                    Action::Favorites => tr("Favoritos", "Favorits"),
                     Action::ToggleFavorite => if self.folder_favorite_key().and_then(|key| self.history_value(&key)) == Some(FAVORITE) {
                         tr("Quitar de favoritos", "Treure dels favorits")
                     } else { tr("Añadir a favoritos", "Afegir als favorits") },
-                    Action::Settings => tr("Ajustes", "Ajustos"),
                     Action::Select if self.selection.is_some() => tr("Cancelar", "Cancel·la"),
                     Action::Select => tr("Seleccionar", "Selecciona"),
                     Action::DeleteFolders => tr("Eliminar", "Esborra"),
-                    Action::Eject => tr("Expulsar USB", "Expulsa l’USB"),
                 };
                 let glyph = match action {
-                    Action::Library => Some(Glyph::Shared(Icon::Collection)),
-                    Action::Favorites => Some(Glyph::Star(false)),
                     Action::ToggleFavorite => None,
                     Action::Select => Some(Glyph::Shared(Icon::CheckCircleFill)),
-                    Action::Settings => Some(Glyph::Settings),
-                    Action::Eject => Some(Glyph::Eject),
                     Action::DeleteFolders => Some(Glyph::Trash),
 
                 };
-                if action == Action::Favorites {
-                    self.draw_favorites_button(p, rect, label);
-                } else if action == Action::ToggleFavorite {
+                if action == Action::ToggleFavorite {
                     self.draw_favorite_toggle(p, rect, label);
                 } else if self.action != Some(action) && action != Action::DeleteFolders {
                     draw_button_content(p, rect, label, glyph, theme::TEXT_PRIMARY);
@@ -1962,22 +1930,21 @@ impl Browser {
     fn draw_nav_pill(&self, p: Painter) {
         p.rect_sheened(NAV_PILL, 35.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
         p.rring(NAV_PILL, 35.0, 1.0, theme::TEXT_SECONDARY);
+        // Same spring capsules as PlxNative; labels and track stay in place.
+        self.nav_strip.draw(p, NAV_TABS[0].y, NAV_TABS[0].h, widgets::TabGround::Tracked { glass: false });
         for (index, rect) in NAV_TABS.into_iter().enumerate() {
-            let active = self.nav_tab == index;
-            let focused = self.nav_focus == Some(index);
-            if active || focused {
-                p.rect_sheened(rect, 24.0, theme::TEXT_PRIMARY, theme::TEXT_PRIMARY);
-            }
-            let title = match index {
-                0 => tr("Inicio", "Inici"),
-                1 => tr("Películas", "Pel·lícules"),
-                2 => tr("Series", "Sèries"),
-                _ => tr("Buscar", "Cerca"),
+            let (title, glyph) = match index {
+                0 => (tr("Inicio", "Inici"), None),
+                1 => (tr("Películas", "Pel·lícules"), None),
+                2 => (tr("Series", "Sèries"), None),
+                3 => (tr("Favoritos", "Favorits"), Some(Glyph::Star(false))),
+                4 => (tr("Ajustes", "Ajustos"), Some(Glyph::Settings)),
+                _ => (tr("Expulsar disco", "Expulsa el disc"), Some(Glyph::Eject)),
             };
-            let color = if active || focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
-            let run = TtfMeasure.fit_line(title, rect.w - 10.0, theme::size::CAPTION, true);
-            Label::new(run.as_ptr(), theme::size::CAPTION, color).h(HAlign::Center).bold().draw(p, rect);
-            if focused && !active { p.rring(rect, 24.0, 2.0, self.accent()); }
+            let (focus, selected) = self.nav_strip.mixes((rect.x, rect.w));
+            let ink = widgets::TabPill::mixed_ink(focus, selected);
+            draw_button_content(p, rect, title, glyph, ink);
+            if self.nav_focus == Some(index) { p.rring(rect, 24.0, 1.5, self.accent()); }
         }
     }
 
@@ -2215,29 +2182,6 @@ impl Browser {
         draw_glyph(p.alpha(t), Glyph::Star(marked), star, ink);
         Label::new(run.as_ptr(), theme::size::CAPTION, ink).h(HAlign::Center).bold()
             .draw(p, Rect::new(x + 39.0, rect.y, width, rect.h));
-    }
-
-    fn draw_favorites_button(&self, p: Painter, rect: Rect, label: &str) {
-        let focus = self.action == Some(Action::Favorites);
-        let blend = self.favorite_highlight();
-        if focus && blend <= 0.0 {
-            self.draw_button(p, rect, label, true, false, Some(Glyph::Star(false)));
-        } else {
-            draw_button_content(p, rect, label, Some(Glyph::Star(false)), theme::TEXT_PRIMARY);
-        }
-        if blend > 0.0 {
-            let gold = theme::USB_FAVORITES;
-            let q = p.alpha(blend);
-            q.rect_sheened(rect, 24.0, theme::USB_FAVORITES_GROUND, theme::USB_FAVORITES_GROUND);
-            q.rring(rect, 24.0, if focus { 3.0 } else { 1.5 }, gold);
-            let pulse = 1.0 + 0.08 * (blend * std::f32::consts::PI).sin();
-            let (run, width) = TtfMeasure.fit_line_measured(label, rect.w - 67.0, theme::size::CAPTION, true);
-            let x = rect.x + (rect.w - width - 39.0) * 0.5;
-            let star = Rect::new(x, rect.y + (rect.h - 26.0) * 0.5, 26.0, 26.0).scaled(pulse);
-            draw_glyph(q, Glyph::Star(true), star, gold);
-            Label::new(run.as_ptr(), theme::size::CAPTION, theme::TEXT_PRIMARY).h(HAlign::Center).bold()
-                .draw(q, Rect::new(x + 39.0, rect.y, width, rect.h));
-        }
     }
 
     fn accent(&self) -> [f32; 4] {
