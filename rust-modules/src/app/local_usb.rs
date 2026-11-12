@@ -1194,8 +1194,10 @@ impl Browser {
     }
 
     fn volume(&self) -> Option<&Volume> {
-        self.search_cards().map(|view| &view.volume).or_else(|| self.media_cards().map(|view| &view.volume))
-            .or_else(|| self.favorite_cards().map(|view| &view.volume).or_else(|| self.folders.last().map(|folder| &folder.volume))
+        self.search_cards().map(|view| &view.volume)
+            .or_else(|| self.media_cards().map(|view| &view.volume))
+            .or_else(|| self.favorite_cards().map(|view| &view.volume))
+            .or_else(|| self.folders.last().map(|folder| &folder.volume))
             .or_else(|| self.scan.volumes.get(self.selected))
     }
 
