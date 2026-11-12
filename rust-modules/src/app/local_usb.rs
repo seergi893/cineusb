@@ -1180,7 +1180,8 @@ impl Browser {
     }
 
     fn volume(&self) -> Option<&Volume> {
-        self.favorite_cards().map(|view| &view.volume).or_else(|| self.folders.last().map(|folder| &folder.volume))
+        self.search_cards().map(|view| &view.volume).or_else(|| self.media_cards().map(|view| &view.volume))
+            .or_else(|| self.favorite_cards().map(|view| &view.volume).or_else(|| self.folders.last().map(|folder| &folder.volume))
             .or_else(|| self.scan.volumes.get(self.selected))
     }
 
@@ -1567,6 +1568,13 @@ impl Browser {
             return;
         }
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
+        if matches!(self.dialog, Some(Dialog::Search)) {
+            if let Some(index) = (0..SEARCH_KEY_COUNT).find(|index| hit(search_key_rect(*index), x, y)) {
+                self.search_key = index;
+                self.choose_search_key();
+            }
+            return;
+        }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
             let unified = matches!(self.dialog, Some(Dialog::Settings));
@@ -1629,6 +1637,18 @@ impl Browser {
             return;
         }
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
+        if matches!(self.dialog, Some(Dialog::Search)) {
+            match key {
+                Key::Left { alt: false } => self.search_key = self.search_key.saturating_sub(1),
+                Key::Right { alt: false } => self.search_key = (self.search_key + 1).min(SEARCH_KEY_COUNT - 1),
+                Key::Up => self.search_key = self.search_key.saturating_sub(10),
+                Key::Down => self.search_key = (self.search_key + 10).min(SEARCH_KEY_COUNT - 1),
+                Key::Ok if !repeat => self.choose_search_key(),
+                Key::Back if !repeat => { self.dialog = None; self.search_target = None; },
+                _ => {}
+            }
+            return;
+        }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
             let settings = vertical > 0;
@@ -1958,6 +1978,33 @@ impl Browser {
             let fill = Rect::new(bar.x, bar.y, bar.w * fraction as f32, bar.h);
             p.rect(fill, 2.5, self.accent(), self.accent(), 0.0);
         }
+    }
+
+    fn draw_search_keyboard(&self, p: Painter) {
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.98), theme::scrim_black(0.98), 0.0);
+        draw_line(p, tr("Buscar en el disco USB", "Cerca al disc USB"),
+            Rect::new(350.0, 130.0, 1260.0, 72.0), theme::size::HEADLINE, true);
+        p.rect_sheened(Rect::new(350.0, 233.0, 1202.0, 78.0), 17.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+        draw_line(p, &self.search_query, Rect::new(385.0, 239.0, 1120.0, 63.0), theme::size::BODY, true);
+        for index in 0..SEARCH_KEY_COUNT {
+            let rect = search_key_rect(index);
+            let selected = index == self.search_key;
+            let fill = if selected { theme::TEXT_PRIMARY } else { theme::CONTROL_IDLE_FILL };
+            p.rect_sheened(rect, 14.0, fill, fill);
+            let name = match index {
+                0..=35 => SEARCH_KEYS.get(index..index+1).unwrap_or(""),
+                36 => tr("Espacio", "Espai"),
+                37 => tr("Limpiar", "Neteja"),
+                38 => tr("Borrar", "Esborra"),
+                _ => tr("Buscar", "Cerca"),
+            };
+            let fg = if selected { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
+            let run = TtfMeasure.fit_line(name, rect.w-8.0, theme::size::CAPTION, true);
+            Label::new(run.as_ptr(), theme::size::CAPTION, fg).h(HAlign::Center).bold().draw(p, rect);
+        }
+        draw_line(p, tr("Usa las flechas y OK para escribir. Atrás cancela.",
+                "Fes servir les fletxes i OK per escriure. Enrere cancel·la."),
+            Rect::new(350.0, 824.0, 1250.0, 60.0), theme::size::CAPTION, false);
     }
 
     fn draw_unified_settings(&self, p: Painter) {
