@@ -98,6 +98,41 @@ const SETTINGS_OPTIONS: [Rect; 6] = [
     Rect::new(550.0, 686.0, 820.0, 49.0),
 ];
 
+const UNIFIED_SETTINGS_COUNT: usize = 8;
+fn unified_setting_rect(index: usize) -> Rect {
+    Rect::new(815.0, 179.0 + index as f32 * 91.0, 940.0, 68.0)
+}
+
+fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'static str, String) {
+    let on = |enabled: bool| if enabled { tr("Activado", "Activat") } else { tr("Desactivado", "Desactivat") };
+    match index {
+        0 => (tr("Ordenar biblioteca", "Ordena la biblioteca"),
+            tr("Cambia el orden de archivos y carpetas.", "Canvia l'ordre dels fitxers i les carpetes."),
+            [tr("Nombre", "Nom"), tr("Fecha", "Data"), tr("Tamaño", "Mida")][settings.sort].into()),
+        1 => (tr("Mostrar extensiones", "Mostra les extensions"),
+            tr("Muestra el tipo de archivo en los títulos.", "Mostra el tipus de fitxer als títols."),
+            on(settings.extensions).into()),
+        2 => (tr("Siguiente episodio automático", "Episodi següent automàtic"),
+            tr("Reproduce el siguiente episodio de la carpeta.", "Reprodueix l'episodi següent de la carpeta."),
+            on(settings.auto_next).into()),
+        3 => (tr("Subtítulos forzados", "Subtítols forçats"),
+            tr("Activa las pistas forzadas disponibles.", "Activa els subtítols forçats disponibles."),
+            on(settings.forced_subtitles).into()),
+        4 => (tr("Idioma de audio", "Idioma de l'àudio"),
+            tr("Elige el idioma al comenzar cada vídeo.", "Tria l'idioma quan comences un vídeo."),
+            if settings.spanish_audio { tr("Español", "Castellà") } else { tr("Automático", "Automàtic") }.into()),
+        5 => (tr("Idioma de CineUSB", "Idioma de CineUSB"),
+            tr("Cambia el idioma de la interfaz.", "Canvia l'idioma de la interfície."),
+            if settings.language == Preference::Ca { "Català" } else { "Español" }.into()),
+        6 => (tr("Color de acento", "Color de ressaltat"),
+            tr("Personaliza el color de selección.", "Personalitza el color de selecció."),
+            [tr("Morado", "Lila"), tr("Azul", "Blau"), tr("Gris neutro", "Gris neutre")][settings.accent].into()),
+        _ => (tr("Tamaño de tarjetas", "Mida de les targetes"),
+            tr("Ajusta el tamaño de los pósteres.", "Ajusta la mida dels pòsters."),
+            [tr("Normal", "Normal"), tr("Compacto", "Compacte"), tr("Grande", "Gran")][settings.cards].into()),
+    }
+}
+
 enum Dialog {
     Settings,
     Language,
@@ -975,22 +1010,30 @@ impl Browser {
         }
     }
 
+    fn cycle_unified_setting(&mut self, direction: i32) {
+        let mut next = self.settings;
+        let step = |value: usize, count: usize| (value as i32 + direction).rem_euclid(count as i32) as usize;
+        match self.option {
+            0 => next.sort = step(next.sort, 3),
+            1 => next.extensions = !next.extensions,
+            2 => next.auto_next = !next.auto_next,
+            3 => next.forced_subtitles = !next.forced_subtitles,
+            4 => next.spanish_audio = !next.spanish_audio,
+            5 => next.language = if next.language == Preference::Ca { Preference::Es } else { Preference::Ca },
+            6 => next.accent = step(next.accent, 3),
+            7 => next.cards = step(next.cards, 3),
+            _ => return,
+        }
+        self.change_settings(next);
+    }
+
     fn choose_option(&mut self) {
         if self.settings_job.is_some() { return; }
         self.dialog_started = None;
         match self.dialog.take() {
             Some(Dialog::Settings) => {
-                self.status.clear();
-                let (dialog, selected) = match self.option {
-                    0 => (Dialog::Language, usize::from(self.settings.language == Preference::Ca)),
-                    1 => (Dialog::ForcedSubtitles, usize::from(self.settings.forced_subtitles)),
-                    2 => (Dialog::Audio, usize::from(self.settings.spanish_audio)),
-                    3 => (Dialog::AutoNext, usize::from(self.settings.auto_next)),
-                    4 => (Dialog::Appearance, 0),
-                    _ => (Dialog::Sort, self.settings.sort),
-                };
-                self.dialog = Some(dialog);
-                self.option = selected;
+                self.dialog = Some(Dialog::Settings);
+                self.cycle_unified_setting(1);
             }
             Some(Dialog::Language) => {
                 let language = if self.option == 0 { Preference::Es } else { Preference::Ca };
@@ -1265,7 +1308,7 @@ impl Browser {
 
     fn vertical_options(&self) -> usize {
         match self.dialog {
-            Some(Dialog::Settings) => 6,
+            Some(Dialog::Settings) => UNIFIED_SETTINGS_COUNT,
             Some(Dialog::Appearance) => 3,
             Some(Dialog::Accent | Dialog::Cards | Dialog::Sort) => 3,
             _ => 0,
@@ -1280,7 +1323,10 @@ impl Browser {
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
-            let options = if vertical > 0 { &SETTINGS_OPTIONS[..vertical] } else { self.horizontal_options() };
+            let unified = matches!(self.dialog, Some(Dialog::Settings));
+            let options: Vec<Rect> = if unified { (0..UNIFIED_SETTINGS_COUNT).map(unified_setting_rect).collect() }
+                else if vertical > 0 { SETTINGS_OPTIONS[..vertical].to_vec() }
+                else { self.horizontal_options().to_vec() };
             if let Some(index) = options.iter().position(|rect| hit(*rect, x, y)) {
                 if !self.option_available(index) { return; }
                 self.press_button(options[index]);
@@ -1322,6 +1368,8 @@ impl Browser {
             match key {
                 Key::Up if settings => self.option = self.option.saturating_sub(1),
                 Key::Down if settings => self.option = (self.option + 1).min(vertical - 1),
+                Key::Left { alt: false } if matches!(self.dialog, Some(Dialog::Settings)) => self.cycle_unified_setting(-1),
+                Key::Right { alt: false } if matches!(self.dialog, Some(Dialog::Settings)) => self.cycle_unified_setting(1),
                 Key::Left { alt: false } if !settings => {
                     self.option = (0..self.option).rev().find(|index| self.option_available(*index)).unwrap_or(self.option);
                 }
@@ -1331,7 +1379,8 @@ impl Browser {
                 }
                 Key::Ok if !repeat => {
                     if !self.option_available(self.option) { return; }
-                    let rect = if settings { SETTINGS_OPTIONS[self.option] } else { self.horizontal_options()[self.option] };
+                    let rect = if matches!(self.dialog, Some(Dialog::Settings)) { unified_setting_rect(self.option) }
+                        else if settings { SETTINGS_OPTIONS[self.option] } else { self.horizontal_options()[self.option] };
                     self.press_button(rect);
                     self.choose_option();
                 }
@@ -1567,7 +1616,48 @@ impl Browser {
         }
     }
 
+    fn draw_unified_settings(&self, p: Painter) {
+        let alpha = self.dialog_started.map_or(1.0, motion_alpha);
+        let p = p.alpha(0.8 + 0.2 * alpha);
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.93), theme::scrim_black(0.93), 0.0);
+        draw_line(p, tr("Ajustes", "Ajustos"), Rect::new(115.0, 138.0, 610.0, 78.0), theme::size::HEADLINE, true);
+        let (_, description, _) = unified_setting_text(self.option, &self.settings);
+        draw_line(p, description, Rect::new(115.0, 250.0, 585.0, 165.0), theme::size::BODY, false);
+        draw_line(p, tr("Usa izquierda y derecha para cambiar el valor.", "Fes servir esquerra i dreta per canviar el valor."),
+            Rect::new(115.0, 480.0, 600.0, 100.0), theme::size::CAPTION, false);
+        for i in 0..UNIFIED_SETTINGS_COUNT {
+            let rect = unified_setting_rect(i);
+            let focused = self.option == i;
+            if focused {
+                p.rect_sheened(rect, 18.0, self.accent(), self.accent());
+            } else {
+                p.rect_sheened(rect, 18.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+            }
+            let (label, _, value) = unified_setting_text(i, &self.settings);
+            let ink = if focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
+            draw_line(p, label, Rect::new(rect.x + 20.0, rect.y + 10.0, 560.0, 47.0), theme::size::CAPTION, focused);
+            draw_line(p, &value, Rect::new(rect.x + 602.0, rect.y + 10.0, 305.0, 47.0), theme::size::CAPTION, focused);
+            let _ = ink;
+            if matches!(i, 0 | 2 | 5 | 6) {
+                let category = match i {
+                    0 => tr("BIBLIOTECA / USB", "BIBLIOTECA / USB"),
+                    2 => tr("REPRODUCCIÓN", "REPRODUCCIÓ"),
+                    5 => tr("SISTEMA", "SISTEMA"),
+                    _ => tr("APARIENCIA", "APARENÇA"),
+                };
+                draw_line(p, category, Rect::new(rect.x, rect.y - 22.0, 600.0, 21.0), theme::size::MICRO, true);
+            }
+        }
+        if !self.status.is_empty() {
+            draw_line(p, &self.status, Rect::new(115.0, 940.0, 1600.0, 51.0), theme::size::CAPTION, false);
+        }
+    }
+
     fn draw_dialog(&self, p: Painter, dialog: &Dialog) {
+        if matches!(dialog, Dialog::Settings) {
+            self.draw_unified_settings(p);
+            return;
+        }
         let cancel = tr("Cancelar", "Cancel·la");
         let save_status = |description: &'static str| {
             if matches!(self.settings_job, Some(SettingsJob::Save(_))) { tr("Guardando…", "Desant…") }
