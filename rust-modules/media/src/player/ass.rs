@@ -950,16 +950,25 @@ impl Native {
         // path (`plx_ass_create`), which maps the file instead of copying it; as a memory font it
         // would cost a ~13 MB malloc+copy per renderer, reachable only by the family name
         // "Noto Sans CJK KR", while glyph fallback never goes through it.
+        // The default CJK font is already registered with libass by plx_ass_create.
+        // A font rejected by plx_ass_add_font must not abort the whole ASS track:
+        // forced subtitles still need to render with the installed fallback faces.
+        // In particular, the native bridge can reject a face when its cumulative
+        // font-memory budget is exhausted. Never log names from embedded attachments.
         for path in fonts::bundled(asset_dir())? {
             let bytes = std::fs::read(&path).map_err(|_| Fault::FontsUnavailable)?;
             if bytes.len() > MAX_FONT_BYTES {
                 return Err(Fault::FontTooLarge);
             }
             let name = path.file_name().and_then(|n| n.to_str()).ok_or(Fault::FontsUnavailable)?;
-            native.font(name, &bytes)?;
+            if let Err(error) = native.font(name, &bytes) {
+                plx_base::eventlog::log(&format!(
+                    "subtitle: ASS bundled font rejected ({error:?}); continuing with fallback"
+                ));
+            }
         }
-        // A font the renderer cannot take (unnamed, over the budget, rejected by the native
-        // side) is skipped: the text still shows, in the default face.
+        // Embedded font attachments are optional. A corrupt or oversized face must
+        // not turn an otherwise valid forced ASS subtitle into a fatal TrackFonts error.
         let mut budget = FontBudget::default();
         for font in fonts.iter() {
             if font.name.is_empty() || font.name.len() > 1024 || font.name.contains('\0')
@@ -967,7 +976,11 @@ impl Native {
             {
                 continue;
             }
-            let _ = native.font(&font.name, &font.data);
+            if let Err(error) = native.font(&font.name, &font.data) {
+                plx_base::eventlog::log(&format!(
+                    "subtitle: ASS embedded font rejected ({error:?}); continuing with fallback"
+                ));
+            }
         }
         if unsafe { plx_ass_load(native.0, data.as_ptr(), data.len(), script) } < 0 {
             return Err(Fault::Unreadable);
