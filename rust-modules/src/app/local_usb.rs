@@ -2108,8 +2108,10 @@ impl Browser {
                 bottom.y + bottom.h - top.y + 16.0);
             p.rect_sheened(group, 16.0, theme::MENU_GLASS_TOP, theme::MENU_GLASS_BOT);
             let accent = theme::usb_accent(self.settings.accent);
-            draw_line(p, heading, Rect::new(top.x + 12.0, top.y - 35.0, top.w - 24.0, 26.0),
-                theme::size::MICRO, true);
+            let heading_text = TtfMeasure.fit_line(heading, top.w - 24.0, theme::size::MICRO, true);
+            Label::new(heading_text.as_ptr(), theme::size::MICRO, accent).bold()
+                .h(HAlign::Left).draw(p,
+                    Rect::new(top.x + 12.0, top.y - 35.0, top.w - 24.0, 26.0));
             p.rect(Rect::new(top.x + 8.0, top.y - 9.0, 56.0, 2.0),
                 1.0, accent, accent, 0.0);
             for index in first..last {
