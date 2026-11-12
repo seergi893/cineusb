@@ -1461,6 +1461,12 @@ impl Browser {
     }
 
     fn click(&mut self, x: f32, y: f32) {
+        if self.dialog.is_none() && self.eject_feedback.is_none() && !self.mutating {
+            if let Some(tab) = NAV_TABS.iter().position(|rect| hit(*rect, x, y)) {
+                self.open_nav_tab(tab);
+                return;
+            }
+        }
         if self.eject_feedback.is_some() {
             if hit(Rect::new(510.0, 292.0, 900.0, 496.0), x, y) {
                 self.eject_feedback = None;
@@ -1508,6 +1514,16 @@ impl Browser {
     }
 
     fn key(&mut self, key: Key, repeat: bool) {
+        if let Some(tab) = self.nav_focus {
+            match key {
+                Key::Left { alt: false } => self.nav_focus = Some(tab.saturating_sub(1)),
+                Key::Right { alt: false } => self.nav_focus = Some((tab + 1).min(3)),
+                Key::Down | Key::Back => self.nav_focus = None,
+                Key::Ok if !repeat => self.open_nav_tab(tab),
+                _ => {}
+            }
+            return;
+        }
         if self.eject_feedback.is_some() {
             if !repeat && matches!(key, Key::Ok | Key::Back) {
                 if let Some((volume, success, _)) = self.eject_feedback.take() {
@@ -1555,6 +1571,7 @@ impl Browser {
                 Key::Left { alt: false } => self.action = actions.get(index.saturating_sub(1)).copied(),
                 Key::Right { alt: false } => self.action = actions.get(index + 1).copied().or(Some(action)),
                 Key::Down => self.action = None,
+                Key::Up => { self.action = None; self.nav_focus = Some(self.nav_tab); },
                 Key::Back if !repeat => self.back(),
                 Key::Ok if !repeat => {
                     if let Some((_, rect)) = ACTIONS.iter().find(|(item, _)| *item == action) { self.press_button(*rect); }
@@ -1566,7 +1583,7 @@ impl Browser {
         }
         let dir = match key {
             Key::Up if self.selected < grid_geometry(self.len(), self.settings.cards).cols => {
-                self.action = ACTIONS.iter().find(|(action, _)| self.action_available(*action)).map(|(action, _)| *action);
+                self.nav_focus = Some(self.nav_tab);
                 return;
             }
             Key::Up => Dir::Up,
@@ -1632,6 +1649,7 @@ impl Browser {
         let x = plx_ui::consts::MARGIN_X;
         let width = 1920.0 - 2.0 * x;
         p.rect(TOOLBAR, 24.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL, 0.0);
+        self.draw_nav_pill(p);
         draw_line(p, "CineUSB", Rect::new(x, 45.0, 345.0, 50.0), theme::size::HEADLINE, true);
         for (action, rect) in ACTIONS {
             if self.action_available(action) {
@@ -1675,7 +1693,9 @@ impl Browser {
             parts.join("   /   ")
         });
         let focused = self.item(self.selected);
-        let (title, detail, greeting_icon) = if self.favorite_cards().is_some() {
+        let (title, detail, greeting_icon) = if self.media_cards().is_some() {
+            (if self.nav_tab == 1 { tr("Películas", "Pel·lícules") } else { tr("Series", "Sèries") }, "", None)
+        } else if self.favorite_cards().is_some() {
             (tr("Carpetas favoritas", "Carpetes favorites"), "", None)
         } else if breadcrumb.is_none() {
             let greeting = match self.hour {
@@ -1706,7 +1726,10 @@ impl Browser {
         draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, 226.0, 920.0, 37.0), theme::size::CAPTION, false);
 
         if self.len() == 0 {
-            let message = if self.favorite_cards().is_some() {
+            let message = if self.media_cards().is_some() {
+                tr("No hay carpetas de esta categoría. Pulsa Inicio para navegar manualmente.",
+                    "No hi ha carpetes d'aquesta categoria. Prem Inici per navegar manualment.")
+            } else if self.favorite_cards().is_some() {
                 tr("No hay carpetas favoritas en este USB.", "No hi ha cap carpeta favorita en aquest USB.")
             } else if self.folders.last().is_some() {
                 tr("Esta carpeta no contiene subcarpetas ni vídeos compatibles.",
@@ -1792,6 +1815,28 @@ impl Browser {
             None => tr("Espera a que termine la operación.", "Espera que acabi l'operació."),
         };
         draw_line(p, description, Rect::new(620.0, 602.0, 690.0, 85.0), theme::size::CAPTION, false);
+    }
+
+    fn draw_nav_pill(&self, p: Painter) {
+        p.rect_sheened(NAV_PILL, 35.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+        p.rring(NAV_PILL, 35.0, 1.0, theme::TEXT_SECONDARY);
+        for (index, rect) in NAV_TABS.into_iter().enumerate() {
+            let active = self.nav_tab == index;
+            let focused = self.nav_focus == Some(index);
+            if active || focused {
+                p.rect_sheened(rect, 24.0, theme::TEXT_PRIMARY, theme::TEXT_PRIMARY);
+            }
+            let title = match index {
+                0 => tr("Inicio", "Inici"),
+                1 => tr("Películas", "Pel·lícules"),
+                2 => tr("Series", "Sèries"),
+                _ => tr("Buscar", "Cerca"),
+            };
+            let color = if active || focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
+            let run = TtfMeasure.fit_line(title, rect.w - 10.0, theme::size::CAPTION, true);
+            Label::new(run.as_ptr(), theme::size::CAPTION, color).h(HAlign::Center).bold().draw(p, rect);
+            if focused && !active { p.rring(rect, 24.0, 2.0, self.accent()); }
+        }
     }
 
     fn draw_storage(&self, p: Painter, volume: &Volume, (total, used, free, readonly): (u64, u64, u64, bool)) {
@@ -2038,7 +2083,7 @@ impl Browser {
         let card = frame.scaled(scale);
         let radius = USB_STYLE.tile_radius(card, scale);
         let lift = ((scale - 1.0) / (USB_STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
-        let current = self.folders.last().filter(|_| self.favorite_cards().is_none()).and_then(|folder| folder.entries.get(index).map(|entry| (folder, entry)));
+        let current = self.folders.last().filter(|_| self.favorite_cards().is_none() && self.media_cards().is_none()).and_then(|folder| folder.entries.get(index).map(|entry| (folder, entry)));
         let record = current.and_then(|(folder, entry)| {
             let identity = self.identity(&folder.volume)?;
             let path = folder.path.join(&entry.name);
