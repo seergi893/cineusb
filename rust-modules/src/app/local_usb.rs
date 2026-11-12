@@ -271,7 +271,7 @@ pub(super) struct Browser {
     dialog_started: Option<Instant>,
     button_motion: Option<(Rect, Instant)>,
     favorite_motion: Option<(PathBuf, bool, Instant)>,
-    ejecting: Option<Volume>,
+    ejecting: Option<(Volume, Instant)>,
     eject_feedback: Option<(Volume, bool, Instant)>,
     estimate: Option<(i64, plx_appkit::player_hud::model::FinishClock)>,
     next_estimate: Option<Instant>,
@@ -441,7 +441,7 @@ impl Browser {
                 self.pending = None;
                 self.mutating = false;
                 self.progress = None;
-                if let Some(volume) = self.ejecting.take() {
+                if let Some((volume, _)) = self.ejecting.take() {
                     self.eject_feedback = Some((volume, false, Instant::now()));
                 }
                 self.status = tr("Se interrumpió la operación.", "L’operació s’ha interromput.").into();
@@ -516,6 +516,7 @@ impl Browser {
         }
         changed |= self.eject_feedback.as_ref().is_some_and(|(_, success, start)|
             *success && start.elapsed() < Duration::from_secs(3));
+        changed |= self.ejecting.as_ref().is_some_and(|(_, start)| start.elapsed() < Duration::from_millis(800));
         changed |= self.update_video_details();
         if self.action.is_some_and(|action| !self.action_available(action)) {
             self.action = None;
@@ -1128,7 +1129,7 @@ impl Browser {
             Some(Dialog::Eject(volume)) if self.option == 1 => {
                 if !self.scan.volumes.contains(&volume) { return; }
                 self.status = tr("Expulsando disco…", "Expulsant el disc…").into();
-                self.ejecting = Some(volume.clone());
+                self.ejecting = Some((volume.clone(), Instant::now()));
                 self.eject_feedback = None;
                 self.request(move || {
                     let result = mutate_usb(Mutation::Eject, &volume, &volume.path);
@@ -1636,7 +1637,7 @@ impl Browser {
 
     fn draw_eject_feedback(&self, p: Painter) {
         let state = self.eject_feedback.as_ref().map(|(volume, success, at)| (volume, Some(*success), *at))
-            .or_else(|| self.ejecting.as_ref().map(|volume| (volume, None, Instant::now())));
+            .or_else(|| self.ejecting.as_ref().map(|(volume, started)| (volume, None, *started)));
         let Some((volume, result, started)) = state else { return };
         let progress = (started.elapsed().as_secs_f32() / 0.75).clamp(0.0, 1.0);
         let smooth = progress * progress * (3.0 - 2.0 * progress);
@@ -1703,10 +1704,8 @@ impl Browser {
                 p.rect_sheened(rect, 18.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
             }
             let (label, _, value) = unified_setting_text(i, &self.settings);
-            let ink = if focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
             draw_line(p, label, Rect::new(rect.x + 20.0, rect.y + 10.0, 560.0, 47.0), theme::size::CAPTION, focused);
             draw_line(p, &value, Rect::new(rect.x + 602.0, rect.y + 10.0, 305.0, 47.0), theme::size::CAPTION, focused);
-            let _ = ink;
             if matches!(i, 0 | 2 | 5 | 6) {
                 let category = match i {
                     0 => tr("BIBLIOTECA / USB", "BIBLIOTECA / USB"),
