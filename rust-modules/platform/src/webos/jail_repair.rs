@@ -33,7 +33,13 @@ const RTKMEM: &str = "/dev/rtkmem";
 #[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
 fn call_hbc(payload: &str) -> Result<String, Failure> {
     let registration = super::ls2::register().map_err(|_| Failure::HbcUnavailable)?;
-    let budget = if payload.contains("--cineusb-delete-folder ") { Duration::from_secs(310) } else { BUDGET };
+    // NTFS eject may need to wait for webOS and a verified sync/unmount.
+    // The old 10-second default expired before the helper's 15-second poll.
+    let budget = if payload.contains("--cineusb-delete-folder ") {
+        Duration::from_secs(310)
+    } else if payload.contains("--cineusb-eject ") {
+        Duration::from_secs(35)
+    } else { BUDGET };
     registration
         .call(EXEC_URI, payload, budget)
         .map_err(|failure| match failure {

@@ -523,9 +523,22 @@ impl Browser {
                         self.select(0, true);
                         self.status.clear();
                     }
-                    DiskResult::Folder(_, _, Err(error)) => {
+                    DiskResult::Folder(volume, path, Err(error)) => {
                         plx_base::eventlog::log(&format!("cineusb: USB folder listing failed: {error}"));
-                        self.status = tr("No se pudo abrir la carpeta.", "No s’ha pogut obrir la carpeta.").into();
+                        // A directory renamed on Windows can remain in the
+                        // navigation stack after the same USB disk is reinserted.
+                        // Recover from the live mount root, never keep a dead path.
+                        if path != volume.path && self.scan.volumes.contains(&volume) {
+                            self.discovery_cache.retain(|(root, _, _), _| *root != volume.path);
+                            self.leave_media();
+                            self.leave_favorites();
+                            self.folders.clear();
+                            self.nav_tab = 0;
+                            self.open_folder(volume.clone(), volume.path.clone());
+                        } else {
+                            self.status = tr("No se pudo abrir la carpeta. Comprueba el USB.",
+                                "No s’ha pogut obrir la carpeta. Comprova l’USB.").into();
+                        }
                     }
                     DiskResult::Video(Ok(media)) => {
                         if media.resume > 0 {
@@ -1000,6 +1013,10 @@ impl Browser {
                 self.leave_media();
                 self.leave_favorites();
                 self.folders.clear();
+                // External renames and NTFS remounts must be rediscovered.
+                // Do not reuse a previously cached PELIS/SERIES path.
+                self.discovery_cache.clear();
+                self.next_scan = Instant::now();
                 self.loading_favorites = false;
                 self.nav_tab = 0;
                 self.restore_view(selected, 0.0);
@@ -1010,13 +1027,12 @@ impl Browser {
                     self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
                     return;
                 };
-                let key = (volume.path.clone(), volume.mount_id.unwrap_or(0), tab);
-                if let Some(paths) = self.discovery_cache.get(&key).cloned() {
-                    self.enter_media(volume, tab, paths);
-                } else {
-                    self.status = tr("Buscando carpetas multimedia…", "Buscant carpetes multimèdia…").into();
-                    self.request(move || DiskResult::Discovered(volume.clone(), tab, discover_media_folders(&volume, tab)));
-                }
+                // Always discover against the current directory tree. A
+                // mount ID or USB serial can be reused after unplug/replug;
+                // caching by either one retains paths renamed on Windows.
+                self.discovery_cache.remove(&(volume.path.clone(), volume.mount_id.unwrap_or(0), tab));
+                self.status = tr("Buscando carpetas multimedia…", "Buscant carpetes multimèdia…").into();
+                self.request(move || DiskResult::Discovered(volume.clone(), tab, discover_media_folders(&volume, tab)));
             }
             3 => {
                 if self.volume().is_none() {
@@ -1439,6 +1455,13 @@ impl Browser {
                 self.ejecting = Some((volume.clone(), Instant::now()));
                 self.eject_feedback = None;
                 self.eject_uncertain = false;
+                // Release any file descriptors retained by the browser before
+                // requesting a clean NTFS unmount. An active player may still
+                // keep the disk busy, which must be reported as a failure.
+                self.prepared = None;
+                self.ready = None;
+                self.details.clear();
+                self.details_job = None;
                 self.request(move || {
                     let result = mutate_usb(Mutation::Eject, &volume, &volume.path);
                     DiskResult::Eject(volume, result)
@@ -3344,14 +3367,42 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn pelis_folder_is_recognized_as_movies_not_series() {
+        assert_eq!(media_folder_score("PELIS", 1), 3);
+        assert_eq!(media_folder_score("pelis", 1), 3);
+        assert_eq!(media_folder_score("PELIS", 2), 0);
+        let root = plx_base::testscratch::process_dir("cineusb-pelis-category");
+        std::fs::create_dir_all(root.join("PELIS")).unwrap();
+        std::fs::create_dir_all(root.join("SERIES")).unwrap();
+        let volume = Volume { path: root.clone(), label: None, mount_id: None, system: false };
+        assert_eq!(discover_media_folders(&volume, 1), vec![root.join("PELIS")]);
+        assert_eq!(discover_media_folders(&volume, 2), vec![root.join("SERIES")]);
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn opening_movie_tab_rechecks_the_current_folder_names() {
+        let volume = Volume { path: "/tmp/usb/sdb/sdb1".into(), label: None, mount_id: Some(17), system: true };
+        let mut browser = Browser::new();
+        browser.scan.volumes.push(volume.clone());
+        browser.discovery_cache.insert((volume.path.clone(), 17, 1), vec![volume.path.join("Old Movies")]);
+        browser.open_nav_tab(1);
+        assert!(browser.pending.is_some(), "category discovery must query the live disk");
+        assert!(!browser.discovery_cache.contains_key(&(volume.path.clone(), 17, 1)));
+    }
+
+    #[test]
     fn movie_navigation_returns_all_matching_folders_for_one_usb() {
         let volume = Volume { path: "/tmp/usb/sdb/sdb1".into(), label: None, mount_id: Some(121), system: true };
         let first = volume.path.join("PELIS");
         let second = volume.path.join("Películas 4K");
         let mut browser = Browser::new();
         browser.scan.volumes.push(volume.clone());
-        browser.discovery_cache.insert((volume.path.clone(), 121, 1), vec![first.clone(), second.clone()]);
+        browser.discovery_cache.insert((volume.path.clone(), 121, 1), vec![volume.path.join("Old Movies")]);
         browser.open_nav_tab(1);
+        assert!(browser.pending.is_some(), "Pelis discovers fresh paths rather than using the old cache");
+        browser.pending = None;
+        browser.enter_media(volume.clone(), 1, vec![first.clone(), second.clone()]);
         assert_eq!(browser.nav_tab, 1);
         assert_eq!(browser.media_cards().unwrap().paths, vec![first.clone(), second]);
         assert!(browser.pending.is_some(), "Pelis loads the category's files directly");
@@ -3375,14 +3426,20 @@ mod usb_browser_tests {
         let mut browser = Browser::new();
         browser.scan.volumes.push(volume.clone());
         let series = volume.path.join("SERIES");
-        browser.discovery_cache.insert((volume.path.clone(), 0, 2), vec![series]);
+        browser.discovery_cache.insert((volume.path.clone(), 0, 2), vec![series.clone()]);
         browser.open_nav_tab(2);
+        assert!(browser.pending.is_some());
+        browser.pending = None;
+        browser.enter_media(volume.clone(), 2, vec![series]);
         assert_eq!(browser.nav_tab, 2);
         assert!(browser.pending.is_some());
         browser.pending = None;
         browser.leave_media();
         browser.discovery_cache.insert((volume.path.clone(), 0, 2), vec![]);
         browser.open_nav_tab(2);
+        assert!(browser.pending.is_some(), "even empty category caches are rechecked");
+        browser.pending = None;
+        browser.enter_media(volume, 2, vec![]);
         assert!(browser.media_cards().is_some_and(|view| view.paths.is_empty()));
         assert_eq!(browser.len(), 0);
         assert!(browser.pending.is_none());
@@ -3496,7 +3553,9 @@ mod usb_browser_tests {
         assert_eq!(browser.volume(), Some(&volume));
         assert_eq!(browser.selected, 0);
         assert!(browser.pending.is_none());
-        assert_eq!(browser.next_scan, scan_at);
+        // Home invalidates stale NTFS paths and requests an immediate rescan.
+        // Compare ordering, not exact Instant equality: Instant::now() advances.
+        assert!(browser.next_scan >= scan_at);
     }
 
     #[test]
