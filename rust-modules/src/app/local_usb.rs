@@ -55,17 +55,16 @@ fn settings_ease(started: Instant) -> f32 {
 }
 
 /// The fixed metadata band never depends on how many lines a title occupies.
-fn video_badge_slots(card: Rect, count: usize) -> Vec<Rect> {
-    let left = card.x + 12.0;
-    let right = card.x + card.w - 12.0;
-    let width = (right - left).max(0.0);
-    let count = count.min(3);
-    if count == 0 { return Vec::new(); }
-    // One stable row: episode, running time, resolution. No wrapping or overflow.
-    let gap = 4.0;
-    let slot_width = ((width - gap * (count - 1) as f32) / count as f32).max(0.0);
-    let y = card.y + card.h - 87.0;
-    (0..count).map(|index| Rect::new(left + index as f32 * (slot_width + gap), y, slot_width, 25.0)).collect()
+fn video_badge_slots(card: Rect) -> [Rect; 3] {
+    let usable = (card.w - 28.0).max(0.0);
+    let half = (usable - 5.0) * 0.5;
+    // Episode number is the only label on row one; playback facts always
+    // occupy the same second row even when the episode label is missing.
+    [
+        Rect::new(card.x + 12.0, card.y + 81.0, usable, 25.0),
+        Rect::new(card.x + 12.0, card.y + 112.0, half, 25.0),
+        Rect::new(card.x + 17.0 + half, card.y + 112.0, half, 25.0),
+    ]
 }
 
 fn pack_progress(position: u64, duration: Option<u64>) -> u64 {
@@ -2041,8 +2040,10 @@ impl Browser {
         // Never place a black scrim over settings: keep one continuous surface.
         // Animate only opacity and a small content rise, not a second framebuffer.
         let p = p.alpha(progress);
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0,
+            theme::SURFACE_APP, theme::SURFACE_APP, 0.0);
         let shift = (1.0 - progress) * 12.0;
-        let p = p.translated(0.0, shift);
+        let p = p.translate(0.0, shift);
         draw_line(p, tr("Configuración", "Configuració"),
             Rect::new(110.0, 169.0, 650.0, 80.0), theme::size::HEADLINE, true);
         let (_, description, _) = unified_setting_text(self.option, &self.settings);
@@ -2343,14 +2344,15 @@ impl Browser {
         let video = current.is_some_and(|(_, entry)| entry.kind == Kind::Video);
         if video { widgets::art_scrim(p, card, radius, 68.0, widgets::STILL_SCRIM_A); }
         let caption = if video {
-            // Use a stable, two-line title block. Keep it independent of metadata.
-            let title = TtfMeasure.fit_line(&title, card.w - 24.0, theme::size::MICRO, true);
-            let frame = Rect::new(card.x + 12.0, card.y + 18.0, card.w - 24.0, 45.0);
+            // Fixed two-line title zone: a long filename never moves the
+            // episode, running time or resolution labels below it.
+            let frame = Rect::new(card.x + 12.0, card.y + 18.0, card.w - 24.0, 56.0);
             let veil = theme::scrim_black(widgets::STILL_SCRIM_A);
-            p.rect(Rect::new(card.x + 6.0, card.y + 6.0, card.w - 12.0, 65.0),
+            p.rect(Rect::new(card.x + 6.0, card.y + 6.0, card.w - 12.0, 72.0),
                 radius.min(10.0), veil, veil, 0.0);
-            Label::new(title.as_ptr(), theme::size::MICRO, theme::TEXT_PRIMARY)
-                .h(HAlign::Left).bold().draw(p, frame);
+            plx_ui::text_view::TextView::new(&title, theme::size::MICRO, theme::TEXT_PRIMARY)
+                .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2)
+                .draw(p, frame);
             frame
         } else { widgets::poster_title(p, card, radius, &title, false, &TtfMeasure) };
         let status_y = if video { card.y + card.h - 44.0 } else { caption.y - 30.0 };
@@ -2385,14 +2387,15 @@ impl Browser {
             let duration = details.and_then(|details| details.duration_secs).map(video_duration);
             let quality = details.and_then(|details| details.resolution)
                 .map(|(width, height)| resolution_label(width, height));
-            let badges: Vec<String> = episode.into_iter().chain(duration).chain(quality).collect();
-            let size = theme::size::DIAGNOSTIC;
-            for (text, badge) in badges.iter().zip(video_badge_slots(card, badges.len())) {
+            let slots = video_badge_slots(card);
+            for (text, badge) in [episode, duration, quality].into_iter().zip(slots) {
+                let Some(text) = text else { continue };
                 if badge.w < 15.0 { continue; }
-                let run = TtfMeasure.fit_line(text, badge.w - 8.0, size, true);
+                let run = TtfMeasure.fit_line(&text, badge.w - 8.0, theme::size::DIAGNOSTIC, true);
                 p.rect_sheened(badge, 8.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
                 if focused && self.action.is_none() { p.rring(badge, 8.0, 1.0, self.accent()); }
-                Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).h(HAlign::Center).bold().draw(p, badge);
+                Label::new(run.as_ptr(), theme::size::DIAGNOSTIC, theme::TEXT_PRIMARY)
+                    .h(HAlign::Center).bold().draw(p, badge);
             }
         }
         if record == WATCHED {
@@ -3023,6 +3026,39 @@ pub(super) fn flush_playback(app: &mut App) {
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
+
+
+    #[test]
+    fn fixed_video_metadata_slots_never_overlap_at_any_card_size() {
+        for cards in 0..3 {
+            let g = grid_geometry(12, cards);
+            let card = Rect::new(80.0, 340.0, g.w, g.h);
+            let slots = video_badge_slots(card);
+            assert!(slots[0].y > card.y + 74.0);
+            assert!(slots[0].y + slots[0].h < slots[1].y);
+            assert_eq!(slots[1].y, slots[2].y);
+            assert!(slots[1].x + slots[1].w <= slots[2].x);
+            assert!(slots[2].x + slots[2].w <= card.x + card.w);
+            assert!(slots[1].y + slots[1].h < card.y + card.h - 44.0);
+        }
+    }
+
+    #[test]
+    fn settings_motion_uses_a_clamped_eased_transition() {
+        assert_eq!(SETTINGS_MOTION, Duration::from_millis(220));
+        assert_eq!(theme::SURFACE_APP[3], 1.0);
+        let browser = Browser::new();
+        assert!(browser.settings_return_focus.is_none());
+        assert!(browser.settings_exit.is_none());
+    }
+
+    #[test]
+    fn episode_titles_hide_file_extensions_independently_of_settings() {
+        let entry = disk::media_entry("Serie.S01E02.2160p.mkv".into(), false).unwrap();
+        assert_eq!(display_name(&entry, false), "Serie.S01E02.2160p");
+        let movie = disk::media_entry("Película.mp4".into(), false).unwrap();
+        assert_eq!(display_name(&movie, false), "Película");
+    }
 
     #[test]
     fn media_folders_match_catalan_spanish_and_english_without_false_positives() {
