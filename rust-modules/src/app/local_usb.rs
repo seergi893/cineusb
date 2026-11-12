@@ -2363,9 +2363,13 @@ impl Browser {
             let veil = theme::scrim_black(widgets::STILL_SCRIM_A);
             p.rect(Rect::new(card.x + 6.0, card.y + 6.0, card.w - 12.0, 72.0),
                 radius.min(10.0), veil, veil, 0.0);
-            plx_ui::text_view::TextView::new(&title, theme::size::MICRO, theme::TEXT_PRIMARY)
-                .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2)
-                .draw(p, frame);
+            let normal = plx_ui::text_view::TextView::new(&title, theme::size::LABEL, theme::TEXT_PRIMARY)
+                .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2);
+            if normal.truncates(frame.w) {
+                plx_ui::text_view::TextView::new(&title, theme::size::MICRO, theme::TEXT_PRIMARY)
+                    .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2)
+                    .draw(p, frame);
+            } else { normal.draw(p, frame); }
             frame
         } else { widgets::poster_title(p, card, radius, &title, false, &TtfMeasure) };
         let status_y = if video { card.y + card.h - 44.0 } else { caption.y - 30.0 };
