@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 const MOTION: Duration = Duration::from_millis(160);
 const FAVORITE_MOTION: Duration = Duration::from_millis(340);
+const SETTINGS_MOTION: Duration = Duration::from_millis(220);
 const FAVORITE_YELLOW: [f32; 4] = [0.98, 0.75, 0.24, 1.0];
 
 fn favorite_ease(progress: f32) -> f32 {
@@ -46,6 +47,25 @@ const DURATION_MASK: u64 = (1 << 20) - 1;
 fn motion_alpha(started: Instant) -> f32 {
     let t = (started.elapsed().as_secs_f32() / MOTION.as_secs_f32()).min(1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+fn settings_ease(started: Instant) -> f32 {
+    let t = (started.elapsed().as_secs_f32() / SETTINGS_MOTION.as_secs_f32()).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The fixed metadata band never depends on how many lines a title occupies.
+fn video_badge_slots(card: Rect, count: usize) -> Vec<Rect> {
+    let left = card.x + 12.0;
+    let right = card.x + card.w - 12.0;
+    let width = (right - left).max(0.0);
+    let count = count.min(3);
+    if count == 0 { return Vec::new(); }
+    // One stable row: episode, running time, resolution. No wrapping or overflow.
+    let gap = 4.0;
+    let slot_width = ((width - gap * (count - 1) as f32) / count as f32).max(0.0);
+    let y = card.y + card.h - 87.0;
+    (0..count).map(|index| Rect::new(left + index as f32 * (slot_width + gap), y, slot_width, 25.0)).collect()
 }
 
 fn pack_progress(position: u64, duration: Option<u64>) -> u64 {
@@ -357,6 +377,8 @@ pub(super) struct Browser {
     discovery_cache: BTreeMap<(PathBuf, u64, usize), Vec<PathBuf>>,
     favorite_section: (bool, Instant, f32),
     dialog_started: Option<Instant>,
+    settings_exit: Option<Instant>,
+    settings_return_focus: Option<usize>,
     button_motion: Option<(Rect, Instant)>,
     favorite_motion: Option<(PathBuf, bool, Instant)>,
     ejecting: Option<(Volume, Instant)>,
@@ -388,7 +410,8 @@ impl Browser {
             media_view: None,
             nav_tab: 0, nav_focus: None, nav_strip: widgets::TabStrip::new(), discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
-            dialog_started: None, button_motion: None, favorite_motion: None,
+            dialog_started: None, settings_exit: None, settings_return_focus: None,
+            button_motion: None, favorite_motion: None,
             ejecting: None, eject_feedback: None, eject_uncertain: false,
             estimate: None, next_estimate: None, estimate_anchor: None,
         }
@@ -616,8 +639,12 @@ impl Browser {
         }
         if self.dialog.is_some() {
             let started = *self.dialog_started.get_or_insert(now);
-            changed |= now.duration_since(started) < MOTION;
+            let duration = if matches!(self.dialog, Some(Dialog::Settings)) { SETTINGS_MOTION } else { MOTION };
+            changed |= now.duration_since(started) < duration;
         } else { self.dialog_started = None; }
+        if self.settings_exit.is_some_and(|started| now.duration_since(started) < SETTINGS_MOTION) {
+            changed = true;
+        } else { self.settings_exit = None; }
         changed |= self.button_motion.is_some_and(|(_, started)| now.duration_since(started) < MOTION);
         changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < FAVORITE_MOTION);
         changed |= self.favorite_section.1.elapsed() < MOTION;
@@ -947,7 +974,10 @@ impl Browser {
                 self.show_favorites();
             }
             4 => {
+                self.settings_exit = None;
+                self.settings_return_focus = self.nav_focus.or(Some(self.nav_tab));
                 self.dialog = Some(Dialog::Settings);
+                self.dialog_started = Some(Instant::now());
                 self.status.clear();
             }
             5 => {
@@ -1519,6 +1549,10 @@ impl Browser {
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if std::mem::take(&mut self.loading_favorites) && self.favorite_view.is_none() { self.set_favorite_section(false); }
         if let Some(dialog) = self.dialog.take() {
+            if matches!(dialog, Dialog::Settings) {
+                self.settings_exit = Some(Instant::now());
+                self.nav_focus = self.settings_return_focus.take();
+            }
             self.prepared = None;
             self.dialog = match dialog {
                 Dialog::Appearance => Some(Dialog::Settings),
@@ -1773,7 +1807,7 @@ impl Browser {
         if let Some(folder) = self.folders.last() {
             let entry = folder.entries.get(index)?;
             let (cover, kind) = art::entry_cover(entry, folder.collection);
-            Some((display_name(entry, self.settings.extensions), kind, cover))
+            Some((display_name(entry, false), kind, cover))
         } else {
         self.scan.volumes.get(index).map(|volume| (volume_name(volume), tr("Disco USB", "Disc USB"), Cover::Drive))
         }
@@ -1885,6 +1919,9 @@ impl Browser {
         }
         if let Some(dialog) = &self.dialog {
             self.draw_dialog(p, dialog);
+        } else if let Some(started) = self.settings_exit {
+            let alpha = 1.0 - settings_ease(started);
+            self.draw_unified_settings(p, alpha);
         } else if !self.status.is_empty() {
             draw_line(p, &self.status, Rect::new(x, 990.0, width - if storage.is_some() { 610.0 } else { 0.0 }, 48.0), theme::size::CAPTION, false);
         } else {
@@ -1967,7 +2004,7 @@ impl Browser {
             let x = rect.x + (rect.w - width - icon_space) * 0.5;
             if let Some(glyph) = glyph {
                 draw_glyph(p, glyph, Rect::new(x, rect.y + (rect.h - 26.0) * 0.5, 26.0, 26.0),
-                    widgets::TabPill::mixed_ink(focus, selected));
+                    if index == 3 { theme::USB_FAVORITES } else { widgets::TabPill::mixed_ink(focus, selected) });
             }
             // PlxNative's ink regions are clipped to the travelling capsule.
             // This avoids illegible intermediate-grey text when it crosses labels.
@@ -1999,10 +2036,13 @@ impl Browser {
         }
     }
 
-    fn draw_unified_settings(&self, p: Painter) {
-        // Full-page PlxNative-like view, not the alert/modal glass surface.
-        let p = p.alpha(self.dialog_started.map_or(1.0, |at| 0.86 + motion_alpha(at) * 0.14));
-        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.98), theme::scrim_black(0.98), 0.0);
+    fn draw_unified_settings(&self, p: Painter, progress: f32) {
+        // The main frame already clears to theme::CLEAR_RGB (SURFACE_APP).
+        // Never place a black scrim over settings: keep one continuous surface.
+        // Animate only opacity and a small content rise, not a second framebuffer.
+        let p = p.alpha(progress);
+        let shift = (1.0 - progress) * 12.0;
+        let p = p.translated(0.0, shift);
         draw_line(p, tr("Configuración", "Configuració"),
             Rect::new(110.0, 169.0, 650.0, 80.0), theme::size::HEADLINE, true);
         let (_, description, _) = unified_setting_text(self.option, &self.settings);
@@ -2053,7 +2093,7 @@ impl Browser {
 
     fn draw_dialog(&self, p: Painter, dialog: &Dialog) {
         if matches!(dialog, Dialog::Settings) {
-            self.draw_unified_settings(p);
+            self.draw_unified_settings(p, self.dialog_started.map_or(1.0, settings_ease));
             return;
         }
         let cancel = tr("Cancelar", "Cancel·la");
@@ -2302,7 +2342,17 @@ impl Browser {
         }
         let video = current.is_some_and(|(_, entry)| entry.kind == Kind::Video);
         if video { widgets::art_scrim(p, card, radius, 68.0, widgets::STILL_SCRIM_A); }
-        let caption = widgets::poster_title(p, card, radius, &title, video, &TtfMeasure);
+        let caption = if video {
+            // Use a stable, two-line title block. Keep it independent of metadata.
+            let title = TtfMeasure.fit_line(&title, card.w - 24.0, theme::size::MICRO, true);
+            let frame = Rect::new(card.x + 12.0, card.y + 18.0, card.w - 24.0, 45.0);
+            let veil = theme::scrim_black(widgets::STILL_SCRIM_A);
+            p.rect(Rect::new(card.x + 6.0, card.y + 6.0, card.w - 12.0, 65.0),
+                radius.min(10.0), veil, veil, 0.0);
+            Label::new(title.as_ptr(), theme::size::MICRO, theme::TEXT_PRIMARY)
+                .h(HAlign::Left).bold().draw(p, frame);
+            frame
+        } else { widgets::poster_title(p, card, radius, &title, false, &TtfMeasure) };
         let status_y = if video { card.y + card.h - 44.0 } else { caption.y - 30.0 };
         let (position, duration) = unpack_progress(record);
         if duration > 0 {
@@ -2337,21 +2387,12 @@ impl Browser {
                 .map(|(width, height)| resolution_label(width, height));
             let badges: Vec<String> = episode.into_iter().chain(duration).chain(quality).collect();
             let size = theme::size::DIAGNOSTIC;
-            let available = card.w - 24.0;
-            let mut x = card.x + 12.0;
-            let mut y = caption.y + caption.h + 5.0;
-            for text in badges {
-                let (run, width) = TtfMeasure.fit_line_measured(&text, available - 10.0, size, true);
-                let badge_width = width + 10.0;
-                if x + badge_width > card.x + card.w - 12.0 && x > card.x + 12.0 {
-                    x = card.x + 12.0;
-                    y += 37.0;
-                }
-                let badge = Rect::new(x, y, badge_width, 32.0);
-                p.rect_sheened(badge, 10.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
-                if focused && self.action.is_none() { p.rring(badge, 10.0, 1.0, self.accent()); }
+            for (text, badge) in badges.iter().zip(video_badge_slots(card, badges.len())) {
+                if badge.w < 15.0 { continue; }
+                let run = TtfMeasure.fit_line(text, badge.w - 8.0, size, true);
+                p.rect_sheened(badge, 8.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
+                if focused && self.action.is_none() { p.rring(badge, 8.0, 1.0, self.accent()); }
                 Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).h(HAlign::Center).bold().draw(p, badge);
-                x += badge.w + 5.0;
             }
         }
         if record == WATCHED {
