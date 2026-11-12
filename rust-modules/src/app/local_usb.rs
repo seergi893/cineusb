@@ -55,16 +55,46 @@ fn settings_ease(started: Instant) -> f32 {
 }
 
 /// The fixed metadata band never depends on how many lines a title occupies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VideoCardSize { Compact, Medium, Large }
+
+fn video_card_size(card: Rect) -> VideoCardSize {
+    if card.w < 195.0 { VideoCardSize::Compact }
+    else if card.w < 245.0 { VideoCardSize::Medium }
+    else { VideoCardSize::Large }
+}
+
+/// Reserve a stable metadata footer above the bottom content-type label.
+/// Coordinates derive from actual scaled card dimensions, not the poster size preset.
 fn video_badge_slots(card: Rect) -> [Rect; 3] {
-    let usable = (card.w - 28.0).max(0.0);
-    let half = (usable - 5.0) * 0.5;
-    // Episode number is the only label on row one; playback facts always
-    // occupy the same second row even when the episode label is missing.
+    let compact = video_card_size(card) == VideoCardSize::Compact;
+    let inset = if compact { 8.0 } else { 12.0 };
+    let gap = if compact { 4.0 } else { 6.0 };
+    let height = if compact { 22.0 } else { 26.0 };
+    let usable = (card.w - inset * 2.0).max(0.0);
+    let half = ((usable - gap) / 2.0).max(0.0);
+    // Preserve the established upper badge layout on normal and large cards.
+    // Only compact cards need a dedicated lower band away from the title.
+    let (first_y, second_y) = if compact {
+        let footer = card.y + card.h - 48.0;
+        (footer - height * 2.0 - 12.0, footer - height - 6.0)
+    } else {
+        (card.y + 81.0, card.y + 112.0)
+    };
     [
-        Rect::new(card.x + 12.0, card.y + 81.0, usable, 25.0),
-        Rect::new(card.x + 12.0, card.y + 112.0, half, 25.0),
-        Rect::new(card.x + 17.0 + half, card.y + 112.0, half, 25.0),
+        Rect::new(card.x + inset, first_y, usable, height),
+        Rect::new(card.x + inset, second_y, half, height),
+        Rect::new(card.x + inset + half + gap, second_y, half, height),
     ]
+}
+
+fn compact_badge_text(value: &str, compact: bool) -> String {
+    if !compact { return value.to_owned(); }
+    if value == "4K UHD" { return "4K".into(); }
+    if let Some(hours) = value.strip_suffix(" min") {
+        return format!("{hours}m");
+    }
+    value.to_owned()
 }
 
 fn nav_glyph_ink(index: usize, focus: f32, selected: f32) -> [f32; 4] {
@@ -384,6 +414,7 @@ pub(super) struct Browser {
     settings_exit: Option<Instant>,
     settings_return_focus: Option<usize>,
     button_motion: Option<(Rect, Instant)>,
+    settings_focus_motion: Option<(usize, usize, Instant)>,
     favorite_motion: Option<(PathBuf, bool, Instant)>,
     ejecting: Option<(Volume, Instant)>,
     eject_feedback: Option<(Volume, bool, Instant)>,
@@ -415,7 +446,7 @@ impl Browser {
             nav_tab: 0, nav_focus: None, nav_strip: widgets::TabStrip::new(), discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
             dialog_started: None, settings_exit: None, settings_return_focus: None,
-            button_motion: None, favorite_motion: None,
+            button_motion: None, settings_focus_motion: None, favorite_motion: None,
             ejecting: None, eject_feedback: None, eject_uncertain: false,
             estimate: None, next_estimate: None, estimate_anchor: None,
         }
@@ -650,6 +681,7 @@ impl Browser {
             changed = true;
         } else { self.settings_exit = None; }
         changed |= self.button_motion.is_some_and(|(_, started)| now.duration_since(started) < MOTION);
+        changed |= self.settings_focus_motion.is_some_and(|(_, _, at)| now.duration_since(at) < MOTION);
         changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < FAVORITE_MOTION);
         changed |= self.favorite_section.1.elapsed() < MOTION;
         let selected_tab = if self.favorite_section.0 { 3 } else { self.nav_tab };
@@ -1708,6 +1740,7 @@ impl Browser {
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
             let settings = vertical > 0;
+            let previous_setting = self.option;
             match key {
                 Key::Up if settings => self.option = self.option.saturating_sub(1),
                 Key::Down if settings => self.option = (self.option + 1).min(vertical - 1),
@@ -1729,6 +1762,9 @@ impl Browser {
                 }
                 Key::Back if !repeat => self.back(),
                 _ => {}
+            }
+            if matches!(self.dialog, Some(Dialog::Settings)) && self.option != previous_setting {
+                self.settings_focus_motion = Some((previous_setting, self.option, Instant::now()));
             }
             return;
         }
@@ -2065,37 +2101,60 @@ impl Browser {
         draw_line(p, tr("← → Cambiar · OK Seleccionar · Atrás Cerrar",
                 "← → Canvia · OK Selecciona · Enrere Tanca"),
             Rect::new(110.0, 879.0, 650.0, 50.0), theme::size::CAPTION, false);
-        // All eight current settings fit without scrolling at 1920×1080.
-        // Leave a separate heading in the gutter between grouped rows.
+        // Each group is a subtle raised surface. Headings live outside the
+        // surfaces and are never interactive.
+        for (first, last, heading) in [
+            (0, 1, tr("BIBLIOTECA / USB", "BIBLIOTECA / USB")),
+            (2, 4, tr("REPRODUCCIÓN", "REPRODUCCIÓ")),
+            (5, 5, tr("SISTEMA", "SISTEMA")),
+            (6, 7, tr("APARIENCIA", "APARENÇA")),
+        ] {
+            let top = unified_setting_rect(first);
+            let bottom = unified_setting_rect(last);
+            let group = Rect::new(top.x, top.y - 8.0, top.w,
+                bottom.y + bottom.h - top.y + 16.0);
+            p.rect_sheened(group, 16.0, theme::MENU_GLASS_TOP, theme::MENU_GLASS_BOT);
+            let accent = theme::usb_accent(self.settings.accent);
+            let heading_text = TtfMeasure.fit_line(heading, top.w - 24.0, theme::size::MICRO, true);
+            Label::new(heading_text.as_ptr(), theme::size::MICRO, accent).bold()
+                .h(HAlign::Left).draw(p,
+                    Rect::new(top.x + 12.0, top.y - 35.0, top.w - 24.0, 26.0));
+            p.rect(Rect::new(top.x + 8.0, top.y - 9.0, 56.0, 2.0),
+                1.0, accent, accent, 0.0);
+            for index in first..last {
+                let divider = unified_setting_rect(index);
+                p.rect(Rect::new(divider.x + 22.0, divider.y + divider.h + 18.0,
+                    divider.w - 44.0, 1.0), 0.0,
+                    theme::HEADER_DIVIDER_INK, theme::HEADER_DIVIDER_INK, 0.0);
+            }
+        }
         for i in 0..UNIFIED_SETTINGS_COUNT {
             let rect = unified_setting_rect(i);
-            let focused = self.option == i;
-            if matches!(i, 0 | 2 | 5 | 6) {
-                let heading = match i {
-                    0 => tr("BIBLIOTECA / USB", "BIBLIOTECA / USB"),
-                    2 => tr("REPRODUCCIÓN", "REPRODUCCIÓ"),
-                    5 => tr("SISTEMA", "SISTEMA"),
-                    _ => tr("APARIENCIA", "APARENÇA"),
-                };
-                draw_line(p, heading, Rect::new(rect.x + 10.0, rect.y - 28.0, rect.w - 20.0, 25.0),
-                    theme::size::MICRO, true);
+            let mut focus_alpha = if self.option == i { 1.0 } else { 0.0 };
+            if let Some((from, to, started)) = self.settings_focus_motion {
+                let t = (started.elapsed().as_secs_f32() / MOTION.as_secs_f32()).clamp(0.0, 1.0);
+                let eased = t * t * (3.0 - 2.0 * t);
+                if from == i { focus_alpha = 1.0 - eased; }
+                if to == i { focus_alpha = eased; }
             }
-            if focused {
-                p.rect_sheened(rect, 14.0, theme::TEXT_PRIMARY, theme::TEXT_PRIMARY);
+            if focus_alpha > 0.0 {
+                let mut fill = theme::usb_accent(self.settings.accent);
+                fill[3] = 0.24 * focus_alpha;
+                p.rect_sheened(rect, 12.0, fill, fill);
+                let mut edge = theme::usb_accent(self.settings.accent);
+                edge[3] = 0.52 * focus_alpha;
+                p.rring(rect, 12.0, 1.5, edge);
             }
             let (name, _, value) = unified_setting_text(i, &self.settings);
-            let foreground = if focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
-            let value_ink = if focused { theme::ACCENT_INK } else { theme::TEXT_SECONDARY };
-            let label = TtfMeasure.fit_line(name, 630.0, theme::size::CAPTION, focused);
-            Label::new(label.as_ptr(), theme::size::CAPTION, foreground)
-                .h(HAlign::Left).draw(p, Rect::new(rect.x + 24.0, rect.y + 6.0, 630.0, 46.0));
-            let fit = TtfMeasure.fit_line(&value, 280.0, theme::size::CAPTION, focused);
-            Label::new(fit.as_ptr(), theme::size::CAPTION, value_ink)
-                .h(HAlign::Right).draw(p, Rect::new(rect.x + rect.w - 322.0, rect.y + 6.0, 292.0, 46.0));
-            // The selected color appears as a swatch while focus remains white.
+            let label = TtfMeasure.fit_line(name, 590.0, theme::size::CAPTION, self.option == i);
+            Label::new(label.as_ptr(), theme::size::CAPTION, theme::TEXT_PRIMARY)
+                .h(HAlign::Left).draw(p, Rect::new(rect.x + 24.0, rect.y + 6.0, 600.0, 46.0));
+            let fit = TtfMeasure.fit_line(&value, 260.0, theme::size::CAPTION, false);
+            Label::new(fit.as_ptr(), theme::size::CAPTION, theme::TEXT_SECONDARY)
+                .h(HAlign::Right).draw(p, Rect::new(rect.x + rect.w - 312.0, rect.y + 6.0, 282.0, 46.0));
             if i == 6 {
                 let swatch = theme::usb_accent(self.settings.accent);
-                p.rect_sheened(Rect::new(rect.x + rect.w - 344.0, rect.y + 18.0, 17.0, 17.0),
+                p.rect_sheened(Rect::new(rect.x + rect.w - 332.0, rect.y + 18.0, 17.0, 17.0),
                     8.0, swatch, swatch);
             }
         }
@@ -2360,9 +2419,12 @@ impl Browser {
         let caption = if video {
             // Fixed two-line title zone: a long filename never moves the
             // episode, running time or resolution labels below it.
-            let frame = Rect::new(card.x + 12.0, card.y + 18.0, card.w - 24.0, 56.0);
+            let compact = video_card_size(card) == VideoCardSize::Compact;
+            let inset = if compact { 8.0 } else { 12.0 };
+            let frame = Rect::new(card.x + inset, card.y + 12.0,
+                card.w - inset * 2.0, if compact { 49.0 } else { 56.0 });
             let veil = theme::scrim_black(widgets::STILL_SCRIM_A);
-            p.rect(Rect::new(card.x + 6.0, card.y + 6.0, card.w - 12.0, 72.0),
+            p.rect(Rect::new(card.x + 6.0, card.y + 6.0, card.w - 12.0, frame.h + 14.0),
                 radius.min(10.0), veil, veil, 0.0);
             let normal = plx_ui::text_view::TextView::new(&title, theme::size::LABEL, theme::TEXT_PRIMARY)
                 .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2);
@@ -2406,13 +2468,16 @@ impl Browser {
             let quality = details.and_then(|details| details.resolution)
                 .map(|(width, height)| resolution_label(width, height));
             let slots = video_badge_slots(card);
+            let compact = video_card_size(card) == VideoCardSize::Compact;
             for (text, badge) in [episode, duration, quality].into_iter().zip(slots) {
                 let Some(text) = text else { continue };
                 if badge.w < 15.0 { continue; }
-                let run = TtfMeasure.fit_line(&text, badge.w - 8.0, theme::size::DIAGNOSTIC, true);
+                let text = compact_badge_text(&text, compact);
+                let font = if compact { theme::size::MICRO } else { theme::size::DIAGNOSTIC };
+                let run = TtfMeasure.fit_line(&text, badge.w - 6.0, font, true);
                 p.rect_sheened(badge, 8.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
                 if focused && self.action.is_none() { p.rring(badge, 8.0, 1.0, self.accent()); }
-                Label::new(run.as_ptr(), theme::size::DIAGNOSTIC, theme::TEXT_PRIMARY)
+                Label::new(run.as_ptr(), font, theme::TEXT_PRIMARY)
                     .h(HAlign::Center).bold().draw(p, badge);
             }
         }
@@ -3064,18 +3129,23 @@ mod usb_browser_tests {
 
 
     #[test]
-    fn fixed_video_metadata_slots_never_overlap_at_any_card_size() {
-        for cards in 0..3 {
-            let g = grid_geometry(12, cards);
-            let card = Rect::new(80.0, 340.0, g.w, g.h);
-            let slots = video_badge_slots(card);
-            assert!(slots[0].y > card.y + 74.0);
-            assert!(slots[0].y + slots[0].h < slots[1].y);
-            assert_eq!(slots[1].y, slots[2].y);
-            assert!(slots[1].x + slots[1].w <= slots[2].x);
-            assert!(slots[2].x + slots[2].w <= card.x + card.w);
-            assert!(slots[1].y + slots[1].h < card.y + card.h - 44.0);
+    fn adaptive_metadata_uses_footer_without_overlaps() {
+        for preset in 0..3 {
+            let g = grid_geometry(12, preset);
+            for scale in [0.97, 1.0, 1.07] {
+                let card = Rect::new(80.0, 340.0, g.w * scale, g.h * scale);
+                let slots = video_badge_slots(card);
+                assert!(slots[0].y > card.y + 65.0);
+                assert!(slots[0].y + slots[0].h < slots[1].y);
+                assert_eq!(slots[1].y, slots[2].y);
+                assert!(slots[1].x + slots[1].w < slots[2].x);
+                assert!(slots[2].x + slots[2].w <= card.x + card.w);
+                assert!(slots[1].y + slots[1].h <= card.y + card.h - 48.0);
+            }
         }
+        assert_eq!(compact_badge_text("4K UHD", true), "4K");
+        assert_eq!(compact_badge_text("35 min", true), "35m");
+        assert_eq!(compact_badge_text("4K UHD", false), "4K UHD");
     }
 
     #[test]

@@ -1,11 +1,11 @@
 {
   "id": "com.seergi893.cineusb",
   "version": "1.4.0",
-  "vendor": "CineUSB",
+  "vendor": "Sergi Sans",
   "type": "native",
   "main": "plxnative",
   "title": "CineUSB",
-  "appDescription": "Local USB video browser for LG webOS",
+  "appDescription": "Developed by Sergi Sans. CineUSB plays movies and TV series directly from USB storage on LG webOS TVs, without Plex or external servers. Browse folders, manage favorites, track playback progress, and select audio and subtitle tracks.",
   "icon": "icon.png",
   "largeIcon": "largeIcon.png",
   "iconColor": "#10172A",
