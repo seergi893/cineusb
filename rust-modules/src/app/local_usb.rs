@@ -1065,9 +1065,11 @@ impl Browser {
     }
 
     fn video_is_episode(&self, volume: &Volume, path: &std::path::Path) -> bool {
-        self.folders.last().is_some_and(|folder| &folder.volume == volume)
-            && (self.series_root().is_some_and(|root| path.starts_with(root))
-                || path.file_name().is_some_and(|name| continuity::episode(name).is_some()))
+        // Keep episode menus episode-only even when an old standalone favorite
+        // is opened from the Favorites tab without a parent folder on the stack.
+        path.file_name().is_some_and(|name| continuity::episode(name).is_some())
+            || (self.folders.last().is_some_and(|folder| &folder.volume == volume)
+                && self.series_root().is_some_and(|root| path.starts_with(root)))
     }
 
     fn video_favorite_target(&self, volume: &Volume, path: &std::path::Path) -> PathBuf {
