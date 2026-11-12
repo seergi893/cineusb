@@ -73,11 +73,18 @@ fn video_badge_slots(card: Rect) -> [Rect; 3] {
     let height = if compact { 22.0 } else { 26.0 };
     let usable = (card.w - inset * 2.0).max(0.0);
     let half = ((usable - gap) / 2.0).max(0.0);
-    let footer = card.y + card.h - 48.0;
+    // Preserve the established upper badge layout on normal and large cards.
+    // Only compact cards need a dedicated lower band away from the title.
+    let (first_y, second_y) = if compact {
+        let footer = card.y + card.h - 48.0;
+        (footer - height * 2.0 - 12.0, footer - height - 6.0)
+    } else {
+        (card.y + 81.0, card.y + 112.0)
+    };
     [
-        Rect::new(card.x + inset, footer - height * 2.0 - 12.0, usable, height),
-        Rect::new(card.x + inset, footer - height - 6.0, half, height),
-        Rect::new(card.x + inset + half + gap, footer - height - 6.0, half, height),
+        Rect::new(card.x + inset, first_y, usable, height),
+        Rect::new(card.x + inset, second_y, half, height),
+        Rect::new(card.x + inset + half + gap, second_y, half, height),
     ]
 }
 
