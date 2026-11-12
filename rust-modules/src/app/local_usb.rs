@@ -2957,6 +2957,36 @@ mod usb_browser_tests {
     use super::*;
 
     #[test]
+    fn media_folders_match_catalan_spanish_and_english_without_false_positives() {
+        for name in ["PELIS", "Películas", "Peliculas", "Pel·lícules", "Movies", "movie_collection", "Films", "Cine"] {
+            assert!(media_folder_score(name, 1) > 0, "{name}");
+        }
+        for name in ["SERIES", "Sèries", "Series TV", "TV Shows", "tv_series", "Temporadas", "Episodios"] {
+            assert!(media_folder_score(name, 2) > 0, "{name}");
+        }
+        assert_eq!(media_folder_score("Mis documentos", 1), 0);
+        assert_eq!(media_folder_score("The Series Movie.mkv", 2), 0);
+        assert_eq!(media_folder_score("Séries", 1), 0);
+        assert_eq!(folder_fold("TÉLÉ-ÉPISODES"), "teleepisodes");
+    }
+
+    #[test]
+    fn movie_navigation_returns_all_matching_folders_for_one_usb() {
+        let volume = Volume { path: "/tmp/usb/sdb/sdb1".into(), label: None, mount_id: Some(121), system: true };
+        let first = volume.path.join("PELIS");
+        let second = volume.path.join("Películas 4K");
+        let mut browser = Browser::new();
+        browser.scan.volumes.push(volume.clone());
+        browser.discovery_cache.insert((volume.path.clone(), 121, 1), vec![first.clone(), second.clone()]);
+        browser.open_nav_tab(1);
+        assert_eq!(browser.nav_tab, 1);
+        assert_eq!(browser.media_cards().unwrap().paths, vec![first, second]);
+        browser.leave_media();
+        assert_eq!(browser.nav_tab, 0);
+        assert!(browser.media_cards().is_none());
+    }
+
+    #[test]
     fn favorites_keeps_its_section_through_folders_and_returns_to_its_cards() {
         let mut browser = Browser::new();
         let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: Some(42), system: true };
