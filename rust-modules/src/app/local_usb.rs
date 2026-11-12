@@ -71,13 +71,13 @@ enum Mutation { Delete, Eject }
 
 const TOOLBAR: Rect = Rect::new(475.0, 36.0, 1349.0, 67.0);
 const ACTIONS: [(Action, Rect); 7] = [
-    (Action::Library, Rect::new(486.0, 45.0, 189.0, 49.0)),
-    (Action::Favorites, Rect::new(681.0, 45.0, 187.0, 49.0)),
+    (Action::Library, Rect::new(486.0, 45.0, 150.0, 49.0)),
+    (Action::Favorites, Rect::new(1283.0, 45.0, 105.0, 49.0)),
     (Action::ToggleFavorite, Rect::new(1404.0, 222.0, 420.0, 45.0)),
-    (Action::Select, Rect::new(874.0, 45.0, 198.0, 49.0)),
-    (Action::DeleteFolders, Rect::new(1078.0, 45.0, 174.0, 49.0)),
-    (Action::Settings, Rect::new(1258.0, 45.0, 188.0, 49.0)),
-    (Action::Eject, Rect::new(1452.0, 45.0, 361.0, 49.0)),
+    (Action::Select, Rect::new(1392.0, 45.0, 100.0, 49.0)),
+    (Action::DeleteFolders, Rect::new(1496.0, 45.0, 100.0, 49.0)),
+    (Action::Settings, Rect::new(1600.0, 45.0, 102.0, 49.0)),
+    (Action::Eject, Rect::new(1706.0, 45.0, 108.0, 49.0)),
 ];
 const PANEL: Rect = Rect::new(510.0, 292.0, 900.0, 496.0);
 const OPTIONS: [Rect; 2] = [
