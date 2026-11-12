@@ -17,6 +17,28 @@ thread_local! {
     static TEXTURES: Cell<[Option<u32>; 4]> = const { Cell::new([None; 4]) };
 }
 
+thread_local! {
+    // Keep the exact full-colour CineUSB launcher artwork, not a monochrome SVG tint.
+    static BRAND_TEXTURE: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+/// The in-app brand mark uses the same CineUSB artwork as the launcher.
+/// The texture is created once, and its dark square is clipped to a rounded tile.
+pub(super) fn draw_brand(p: Painter, rect: Rect) {
+    if p.is_recording() { return; }
+    let texture = BRAND_TEXTURE.with(|cache| {
+        if let Some(texture) = cache.get() { return texture; }
+        const SIZE: i32 = 160;
+        let texture = svg::rasterize(include_str!("../../../../assets/cineusb/launcher.svg"), SIZE, SIZE)
+            .map_or(0, |pixels| gfx::upload_rgba(0, SIZE, SIZE, pixels.as_ptr()));
+        cache.set(Some(texture));
+        texture
+    });
+    if texture != 0 {
+        p.tex_carded(texture, [0.0, 0.0, 1.0, 1.0], rect, 16.0, theme::TINT_WHITE, 0.0);
+    }
+}
+
 impl Cover {
     pub(super) fn draw(self, p: Painter, card: Rect, radius: f32, lift: f32) {
         if p.is_recording() { return; }
