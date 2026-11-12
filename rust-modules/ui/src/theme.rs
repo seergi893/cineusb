@@ -1507,7 +1507,7 @@ pub const RUNTIME_WARNING: [f32; 4] = PURPLE_700;
 
 /// Accent choices for the local USB library. Index zero preserves the shared default.
 pub fn usb_accent(index: usize) -> [f32; 4] {
-    [ACCENT, rgb8(0x91, 0xbc, 0xff), rgb8(0xc2, 0xc6, 0xcc)][index]
+    [rgb8(0xa7, 0x8b, 0xfa), rgb8(0x91, 0xbc, 0xff), rgb8(0xc2, 0xc6, 0xcc)][index]
 }
 
 /// Watched USB cards use green independently of the chosen accent.
