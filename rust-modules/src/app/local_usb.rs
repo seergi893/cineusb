@@ -1777,7 +1777,7 @@ impl Browser {
         let (title, detail, greeting_icon) = if self.media_cards().is_some() {
             (if self.nav_tab == 1 { tr("Películas", "Pel·lícules") } else { tr("Series", "Sèries") }, "", None)
         } else if self.favorite_cards().is_some() {
-            (tr("Carpetas favoritas", "Carpetes favorites"), "", None)
+            (tr("Favoritos", "Favorits"), "", None)
         } else if breadcrumb.is_none() {
             let greeting = match self.hour {
                 Some(6..=11) => (tr("Buenos días", "Bon dia"), Some(Glyph::Sun)),
@@ -1811,7 +1811,7 @@ impl Browser {
                 tr("No hay carpetas de esta categoría. Pulsa Inicio para navegar manualmente.",
                     "No hi ha carpetes d'aquesta categoria. Prem Inici per navegar manualment.")
             } else if self.favorite_cards().is_some() {
-                tr("No hay carpetas favoritas en este USB.", "No hi ha cap carpeta favorita en aquest USB.")
+                tr("No hay favoritos en este USB.", "No hi ha cap favorit en aquest USB.")
             } else if self.folders.last().is_some() {
                 tr("Esta carpeta no contiene subcarpetas ni vídeos compatibles.",
                     "En aquesta carpeta no hi ha subcarpetes ni vídeos compatibles.")
@@ -1913,11 +1913,23 @@ impl Browser {
                 2 => (tr("Series", "Sèries"), None),
                 3 => (tr("Favoritos", "Favorits"), Some(Glyph::Star(false))),
                 4 => (tr("Ajustes", "Ajustos"), Some(Glyph::Settings)),
-                _ => (tr("Expulsar disco", "Expulsa el disc"), Some(Glyph::Eject)),
+                _ => (tr("Expulsar disco", "Expulsar disc"), Some(Glyph::Eject)),
             };
             let (focus, selected) = self.nav_strip.mixes((rect.x, rect.w));
-            let ink = widgets::TabPill::mixed_ink(focus, selected);
-            draw_button_content(p, rect, title, glyph, ink);
+            let icon_space = if glyph.is_some() { 39.0 } else { 0.0 };
+            let (run, width) = TtfMeasure.fit_line_measured(title, rect.w - 28.0 - icon_space, theme::size::CAPTION, true);
+            let x = rect.x + (rect.w - width - icon_space) * 0.5;
+            if let Some(glyph) = glyph {
+                draw_glyph(p, glyph, Rect::new(x, rect.y + (rect.h - 26.0) * 0.5, 26.0, 26.0),
+                    widgets::TabPill::mixed_ink(focus, selected));
+            }
+            // PlxNative's ink regions are clipped to the travelling capsule.
+            // This avoids illegible intermediate-grey text when it crosses labels.
+            let ink = self.nav_strip.pill_ink(rect, widgets::TabGround::Tracked { glass: false });
+            widgets::paint_inked(p, &ink, |fm, sm| {
+                Label::new(run.as_ptr(), theme::size::CAPTION, widgets::TabPill::mixed_ink(fm, sm))
+                    .h(HAlign::Center).bold().draw(p, Rect::new(x + icon_space, rect.y, width, rect.h));
+            });
             if self.nav_focus == Some(index) { p.rring(rect, 24.0, 1.5, self.accent()); }
         }
     }
