@@ -67,6 +67,11 @@ fn video_badge_slots(card: Rect) -> [Rect; 3] {
     ]
 }
 
+fn nav_glyph_ink(index: usize, focus: f32, selected: f32) -> [f32; 4] {
+    if index == 3 { theme::USB_FAVORITES }
+    else { widgets::TabPill::mixed_ink(focus, selected) }
+}
+
 fn pack_progress(position: u64, duration: Option<u64>) -> u64 {
     let position_us = (position / 1000).min(PLAYHEAD_MASK - 1);
     let duration_secs = (duration.unwrap_or(0) / 1_000_000_000).min(DURATION_MASK - 1);
@@ -2002,8 +2007,14 @@ impl Browser {
             let (run, width) = TtfMeasure.fit_line_measured(title, rect.w - 28.0 - icon_space, theme::size::CAPTION, true);
             let x = rect.x + (rect.w - width - icon_space) * 0.5;
             if let Some(glyph) = glyph {
-                draw_glyph(p, glyph, Rect::new(x, rect.y + (rect.h - 26.0) * 0.5, 26.0, 26.0),
-                    if index == 3 { theme::USB_FAVORITES } else { widgets::TabPill::mixed_ink(focus, selected) });
+                let icon = Rect::new(x, rect.y + (rect.h - 26.0) * 0.5, 26.0, 26.0);
+                if index == 3 && selected > 0.1 {
+                    // Tiny dark under-stroke keeps the yellow outline legible
+                    // against the travelling light selection capsule.
+                    let shadow = Rect::new(icon.x + 1.0, icon.y + 1.0, icon.w, icon.h);
+                    draw_glyph(p, glyph, shadow, theme::USB_FAVORITES_GROUND);
+                }
+                draw_glyph(p, glyph, icon, nav_glyph_ink(index, focus, selected));
             }
             // PlxNative's ink regions are clipped to the travelling capsule.
             // This avoids illegible intermediate-grey text when it crosses labels.
@@ -2117,7 +2128,7 @@ impl Browser {
                 path.file_stem().unwrap_or_default().to_string_lossy().into_owned(), "",
                 [tr("Reproducir ahora", "Reprodueix ara"), cancel]),
             Dialog::Video { path, .. } => (tr("Opciones del vídeo", "Opcions del vídeo"),
-                if self.settings.extensions { path.file_name() } else { path.file_stem() }
+                (if self.settings.extensions { path.file_name() } else { path.file_stem() })
                     .unwrap_or_default().to_string_lossy().into_owned(),
                 "",
                 [tr("Reproducir", "Reprodueix"), tr("Eliminar archivo", "Esborra el fitxer")]),
@@ -3093,6 +3104,27 @@ mod usb_browser_tests {
         assert_eq!(media_folder_score("The Series Movie.mkv", 2), 0);
         assert_eq!(media_folder_score("Séries", 1), 0);
         assert_eq!(folder_fold("TÉLÉ-ÉPISODES"), "teleepisodes");
+    }
+
+    #[test]
+    fn favorite_nav_star_uses_yellow_in_every_state() {
+        for selected in [0.0, 0.25, 0.75, 1.0] {
+            for focus in [0.0, 0.5, 1.0] {
+                assert_eq!(nav_glyph_ink(3, focus, selected), theme::USB_FAVORITES);
+            }
+        }
+    }
+
+    #[test]
+    fn leaving_settings_restores_previous_navigation_focus() {
+        let mut browser = Browser::new();
+        browser.nav_tab = 2;
+        browser.open_nav_tab(4);
+        assert!(matches!(browser.dialog, Some(Dialog::Settings)));
+        browser.back();
+        assert!(browser.dialog.is_none());
+        assert_eq!(browser.nav_focus, Some(2));
+        assert!(browser.settings_exit.is_some());
     }
 
     #[test]
