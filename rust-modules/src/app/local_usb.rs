@@ -2,7 +2,6 @@
 mod art;
 mod continuity;
 mod disk;
-mod search;
 
 use art::Cover;
 use super::{App, Key, playback};
@@ -162,12 +161,6 @@ const ACTIONS: [(Action, Rect); 3] = [
     (Action::DeleteFolders, Rect::new(1225.0, 222.0, 185.0, 45.0)),
 ];
 
-const SEARCH_KEYS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-const SEARCH_KEY_COUNT: usize = 40;
-fn search_key_rect(index: usize) -> Rect {
-    Rect::new(350.0 + (index % 10) as f32 * 122.0, 342.0 + (index / 10) as f32 * 102.0, 104.0, 79.0)
-}
-
 const UNIFIED_SETTINGS_COUNT: usize = 8;
 fn unified_setting_rect(index: usize) -> Rect {
     Rect::new(825.0, 168.0 + index as f32 * 98.0, 975.0, 58.0)
@@ -205,7 +198,6 @@ fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'s
 
 enum Dialog {
     Settings,
-    Search,
     Appearance,
     Accent,
     Cards,
@@ -262,7 +254,6 @@ enum DiskResult {
     Eject(Volume, Result<(), String>),
     Favorites(Volume, Vec<PathBuf>, Vec<PathBuf>),
     Discovered(Volume, usize, Vec<PathBuf>),
-    Searched(Volume, Vec<PathBuf>),
 }
 
 type VolumeFacts = (Option<(u64, u64, u64, bool)>, Option<String>);
@@ -336,10 +327,6 @@ pub(super) struct Browser {
     loading_favorites: bool,
     favorite_view: Option<FavoriteView>,
     media_view: Option<FavoriteView>,
-    search_view: Option<FavoriteView>,
-    search_target: Option<Volume>,
-    search_query: String,
-    search_key: usize,
     nav_tab: usize,
     nav_focus: Option<usize>,
     nav_strip: widgets::TabStrip,
@@ -374,8 +361,8 @@ impl Browser {
             progress_job: None, queued_progress: Default::default(), countdown_display: 0,
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
             queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_view: None,
-            media_view: None, search_view: None, search_target: None, search_query: String::new(),
-            search_key: 0, nav_tab: 0, nav_focus: None, nav_strip: widgets::TabStrip::new(), discovery_cache: BTreeMap::new(),
+            media_view: None,
+            nav_tab: 0, nav_focus: None, nav_strip: widgets::TabStrip::new(), discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
             dialog_started: None, button_motion: None, favorite_motion: None,
             ejecting: None, eject_feedback: None, eject_uncertain: false,
@@ -384,7 +371,6 @@ impl Browser {
     }
 
     fn len(&self) -> usize {
-        if let Some(view) = self.search_cards() { return view.paths.len(); }
         if let Some(view) = self.media_cards() { return view.paths.len(); }
         self.favorite_cards().map_or_else(|| self.folders.last().map_or(self.scan.volumes.len(), |folder| folder.entries.len()), |view| view.paths.len())
     }
@@ -493,15 +479,6 @@ impl Browser {
                         self.scanning = None;
                         self.next_scan = Instant::now();
                     }
-                    DiskResult::Searched(volume, paths) => {
-                        if self.scan.volumes.contains(&volume) {
-                            self.enter_search(volume, paths);
-                            self.status = if self.search_cards().is_some_and(|view| view.paths.is_empty()) {
-                                tr("No hay vídeos que coincidan. Pulsa Buscar para otra búsqueda.",
-                                    "No hi ha vídeos coincidents. Prem Cerca per tornar a cercar.").into()
-                            } else { String::new() };
-                        }
-                    }
                     DiskResult::Discovered(volume, kind, paths) => {
                         if self.scan.volumes.contains(&volume) {
                             self.discovery_cache.insert((volume.path.clone(), volume.mount_id.unwrap_or(0), kind), paths.clone());
@@ -529,7 +506,6 @@ impl Browser {
                             self.scan.volumes.retain(|item| *item != volume);
                             self.discovery_cache.retain(|(path, _, _), _| *path != volume.path);
                             if self.media_view.as_ref().is_some_and(|view| view.volume == volume) { self.leave_media(); }
-                            if self.search_view.as_ref().is_some_and(|view| view.volume == volume) { self.leave_search(); }
                             self.leave_favorites();
                             self.folders.clear();
                             self.action = None;
@@ -569,9 +545,6 @@ impl Browser {
                             .any(|volume| volume.path == *path && volume.mount_id.unwrap_or(0) == *id));
                         if self.media_view.as_ref().is_some_and(|view| !self.scan.volumes.contains(&view.volume)) {
                             self.leave_media();
-                        }
-                        if self.search_view.as_ref().is_some_and(|view| !self.scan.volumes.contains(&view.volume)) {
-                            self.leave_search();
                         }
                         if self.favorite_view.as_ref().is_some_and(|view| !self.scan.volumes.contains(&view.volume))
                             || self.folders.last().is_some_and(|folder| !self.scan.volumes.contains(&folder.volume)) {
@@ -888,55 +861,6 @@ impl Browser {
         });
     }
 
-    fn search_cards(&self) -> Option<&FavoriteView> {
-        self.search_view.as_ref().filter(|view| view.depth == self.folders.len())
-    }
-
-    fn leave_search(&mut self) {
-        if let Some(view) = self.search_view.take() {
-            self.folders.truncate(view.depth);
-            self.restore_view(view.library_selected, view.library_scroll);
-        }
-        if self.nav_tab == 3 { self.nav_tab = 0; }
-    }
-
-    fn enter_search(&mut self, volume: Volume, paths: Vec<PathBuf>) {
-        self.leave_favorites();
-        self.leave_media();
-        self.leave_search();
-        let selected = self.selected;
-        let scroll = self.scroll.pos;
-        self.search_view = Some(FavoriteView {
-            volume, paths, depth: self.folders.len(), selected: 0, scroll: 0.0,
-            library_selected: selected, library_scroll: scroll,
-        });
-        self.nav_tab = 3;
-        self.search_target = None;
-        self.restore_view(0, 0.0);
-    }
-
-    fn submit_search(&mut self) {
-        if self.search_query.trim().is_empty() { return; }
-        let Some(volume) = self.search_target.take() else { return };
-        let query = self.search_query.clone();
-        self.dialog = None;
-        self.status = tr("Buscando vídeos en el USB…", "Buscant vídeos a l'USB…").into();
-        self.request(move || DiskResult::Searched(volume.clone(), search::filenames(&volume, &query)));
-    }
-
-    fn choose_search_key(&mut self) {
-        match self.search_key {
-            0..=35 if self.search_query.len() < 32 => {
-                if let Some(ch) = SEARCH_KEYS.chars().nth(self.search_key) { self.search_query.push(ch); }
-            }
-            36 if self.search_query.len() < 32 => self.search_query.push(' '),
-            37 => self.search_query.clear(),
-            38 => { self.search_query.pop(); },
-            39 => self.submit_search(),
-            _ => {}
-        }
-    }
-
     fn media_cards(&self) -> Option<&FavoriteView> {
         self.media_view.as_ref().filter(|view| view.depth == self.folders.len())
     }
@@ -952,7 +876,6 @@ impl Browser {
     fn enter_media(&mut self, volume: Volume, kind: usize, paths: Vec<PathBuf>) {
         self.leave_favorites();
         self.leave_media();
-        self.leave_search();
         self.nav_tab = kind;
         let selected = self.selected;
         let scroll = self.scroll.pos;
@@ -965,41 +888,59 @@ impl Browser {
     }
 
     fn open_nav_tab(&mut self, tab: usize) {
+        if self.pending.is_some() || self.mutating { return; }
         self.nav_focus = None;
         self.action = None;
-        if tab == 0 {
-            self.leave_media();
-            self.leave_search();
-            self.leave_favorites();
-            self.open_library_root();
-            self.nav_tab = 0;
-            return;
+        self.option = 0;
+        match tab {
+            0 => {
+                let selected = self.volume().and_then(|volume|
+                    self.scan.volumes.iter().position(|item| item == volume)).unwrap_or(self.selected);
+                self.leave_media();
+                self.leave_favorites();
+                self.folders.clear();
+                self.loading_favorites = false;
+                self.nav_tab = 0;
+                self.restore_view(selected, 0.0);
+                self.status.clear();
+            }
+            1 | 2 => {
+                let Some(volume) = self.volume().cloned() else {
+                    self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
+                    return;
+                };
+                let key = (volume.path.clone(), volume.mount_id.unwrap_or(0), tab);
+                if let Some(paths) = self.discovery_cache.get(&key).cloned() {
+                    self.enter_media(volume, tab, paths);
+                } else {
+                    self.status = tr("Buscando carpetas multimedia…", "Buscant carpetes multimèdia…").into();
+                    self.request(move || DiskResult::Discovered(volume.clone(), tab, discover_media_folders(&volume, tab)));
+                }
+            }
+            3 => {
+                if self.volume().is_none() {
+                    self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
+                    return;
+                }
+                self.leave_media();
+                self.nav_tab = 3;
+                self.set_favorite_section(true);
+                self.show_favorites();
+            }
+            4 => {
+                self.dialog = Some(Dialog::Settings);
+                self.status.clear();
+            }
+            5 => {
+                if let Some(volume) = self.volume().cloned().filter(|volume| system_mount(volume).is_some()) {
+                    self.dialog = Some(Dialog::Eject(volume));
+                    self.status.clear();
+                } else {
+                    self.status = tr("Selecciona un disco que se pueda expulsar.", "Tria un disc que es pugui expulsar.").into();
+                }
+            }
+            _ => {}
         }
-        if tab == 3 {
-            let Some(volume) = self.volume().cloned() else {
-                self.status = tr("Selecciona un disco para buscar.", "Tria un disc per cercar.").into();
-                return;
-            };
-            self.search_target = Some(volume);
-            self.search_key = 0;
-            self.dialog = Some(Dialog::Search);
-            self.status.clear();
-            return;
-        }
-        let Some(volume) = self.volume().cloned() else {
-            self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
-            return;
-        };
-        let key = (volume.path.clone(), volume.mount_id.unwrap_or(0), tab);
-        if let Some(paths) = self.discovery_cache.get(&key).cloned() {
-            self.enter_media(volume, tab, paths);
-            return;
-        }
-        self.status = tr("Buscando carpetas multimedia…", "Buscant carpetes multimèdia…").into();
-        self.request(move || {
-            let paths = discover_media_folders(&volume, tab);
-            DiskResult::Discovered(volume, tab, paths)
-        });
     }
 
     fn favorite_cards(&self) -> Option<&FavoriteView> {
@@ -1027,6 +968,7 @@ impl Browser {
             library_selected, library_scroll,
         });
         self.set_favorite_section(true);
+        self.nav_tab = 3;
         self.action = None;
         self.restore_view(0, 0.0);
     }
@@ -1037,6 +979,7 @@ impl Browser {
             self.restore_view(view.library_selected, view.library_scroll);
         }
         self.set_favorite_section(false);
+        if self.nav_tab == 3 { self.nav_tab = 0; }
     }
 
     fn restore_view(&mut self, selected: usize, scroll: f32) {
@@ -1199,8 +1142,7 @@ impl Browser {
     }
 
     fn volume(&self) -> Option<&Volume> {
-        self.search_cards().map(|view| &view.volume)
-            .or_else(|| self.media_cards().map(|view| &view.volume))
+        self.media_cards().map(|view| &view.volume)
             .or_else(|| self.favorite_cards().map(|view| &view.volume))
             .or_else(|| self.folders.last().map(|folder| &folder.volume))
             .or_else(|| self.scan.volumes.get(self.selected))
@@ -1384,13 +1326,6 @@ impl Browser {
 
     fn open(&mut self) {
         if self.pending.is_some() { return; }
-        if let Some(view) = self.search_cards() {
-            if let Some(path) = view.paths.get(self.selected) {
-                self.dialog = Some(Dialog::Video { volume: view.volume.clone(), path: path.clone() });
-                self.option = 0;
-            }
-            return;
-        }
         if let Some(view) = self.media_cards().or_else(|| self.favorite_cards()) {
             if let Some(path) = view.paths.get(self.selected) {
                 self.open_folder(view.volume.clone(), path.clone());
@@ -1517,16 +1452,11 @@ impl Browser {
             self.status.clear();
             return;
         }
-        if self.search_cards().is_some() {
-            self.leave_search();
-            self.status.clear();
-            return;
-        }
         let Some(folder) = self.folders.pop() else {
             plx_platform::tv::home::go_home();
             return;
         };
-        let (index, scroll) = if let Some(view) = self.search_cards().or_else(|| self.media_cards()).or_else(|| self.favorite_cards()) {
+        let (index, scroll) = if let Some(view) = self.media_cards().or_else(|| self.favorite_cards()) {
             (view.selected, view.scroll)
         } else if let Some(parent) = self.folders.last() {
             (parent.selected, parent.scroll)
@@ -1564,13 +1494,6 @@ impl Browser {
             return;
         }
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
-        if matches!(self.dialog, Some(Dialog::Search)) {
-            if let Some(index) = (0..SEARCH_KEY_COUNT).find(|index| hit(search_key_rect(*index), x, y)) {
-                self.search_key = index;
-                self.choose_search_key();
-            }
-            return;
-        }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
             let unified = matches!(self.dialog, Some(Dialog::Settings));
@@ -1633,18 +1556,6 @@ impl Browser {
             return;
         }
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
-        if matches!(self.dialog, Some(Dialog::Search)) {
-            match key {
-                Key::Left { alt: false } => self.search_key = self.search_key.saturating_sub(1),
-                Key::Right { alt: false } => self.search_key = (self.search_key + 1).min(SEARCH_KEY_COUNT - 1),
-                Key::Up => self.search_key = self.search_key.saturating_sub(10),
-                Key::Down => self.search_key = (self.search_key + 10).min(SEARCH_KEY_COUNT - 1),
-                Key::Ok if !repeat => self.choose_search_key(),
-                Key::Back if !repeat => { self.dialog = None; self.search_target = None; },
-                _ => {}
-            }
-            return;
-        }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
             let settings = vertical > 0;
@@ -1730,10 +1641,6 @@ impl Browser {
     }
 
     fn item(&self, index: usize) -> Option<(String, &'static str, Cover)> {
-        if let Some(view) = self.search_cards() {
-            let path = view.paths.get(index)?;
-            return Some((path.file_stem()?.to_string_lossy().into_owned(), tr("Vídeo", "Vídeo"), Cover::Movie));
-        }
         if let Some(view) = self.media_cards() {
             let path = view.paths.get(index)?;
             let name = path.file_name()?.to_string_lossy().into_owned();
@@ -1795,9 +1702,7 @@ impl Browser {
             parts.join("   /   ")
         });
         let focused = self.item(self.selected);
-        let (title, detail, greeting_icon) = if self.search_cards().is_some() {
-            (tr("Resultados de búsqueda", "Resultats de la cerca"), "", None)
-        } else if self.media_cards().is_some() {
+        let (title, detail, greeting_icon) = if self.media_cards().is_some() {
             (if self.nav_tab == 1 { tr("Películas", "Pel·lícules") } else { tr("Series", "Sèries") }, "", None)
         } else if self.favorite_cards().is_some() {
             (tr("Carpetas favoritas", "Carpetes favorites"), "", None)
@@ -1830,10 +1735,7 @@ impl Browser {
         draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, 226.0, 920.0, 37.0), theme::size::CAPTION, false);
 
         if self.len() == 0 {
-            let message = if self.search_cards().is_some() {
-                tr("No hay vídeos con ese nombre. Pulsa Buscar para repetir la búsqueda.",
-                    "No hi ha vídeos amb aquest nom. Prem Cerca per tornar a cercar.")
-            } else if self.media_cards().is_some() {
+            let message = if self.media_cards().is_some() {
                 tr("No hay carpetas de esta categoría. Pulsa Inicio para navegar manualmente.",
                     "No hi ha carpetes d'aquesta categoria. Prem Inici per navegar manualment.")
             } else if self.favorite_cards().is_some() {
@@ -1967,33 +1869,6 @@ impl Browser {
         }
     }
 
-    fn draw_search_keyboard(&self, p: Painter) {
-        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.98), theme::scrim_black(0.98), 0.0);
-        draw_line(p, tr("Buscar en el disco USB", "Cerca al disc USB"),
-            Rect::new(350.0, 130.0, 1260.0, 72.0), theme::size::HEADLINE, true);
-        p.rect_sheened(Rect::new(350.0, 233.0, 1202.0, 78.0), 17.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
-        draw_line(p, &self.search_query, Rect::new(385.0, 239.0, 1120.0, 63.0), theme::size::BODY, true);
-        for index in 0..SEARCH_KEY_COUNT {
-            let rect = search_key_rect(index);
-            let selected = index == self.search_key;
-            let fill = if selected { theme::TEXT_PRIMARY } else { theme::CONTROL_IDLE_FILL };
-            p.rect_sheened(rect, 14.0, fill, fill);
-            let name = match index {
-                0..=35 => SEARCH_KEYS.get(index..index+1).unwrap_or(""),
-                36 => tr("Espacio", "Espai"),
-                37 => tr("Limpiar", "Neteja"),
-                38 => tr("Borrar", "Esborra"),
-                _ => tr("Buscar", "Cerca"),
-            };
-            let fg = if selected { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
-            let run = TtfMeasure.fit_line(name, rect.w-8.0, theme::size::CAPTION, true);
-            Label::new(run.as_ptr(), theme::size::CAPTION, fg).h(HAlign::Center).bold().draw(p, rect);
-        }
-        draw_line(p, tr("Usa las flechas y OK para escribir. Atrás cancela.",
-                "Fes servir les fletxes i OK per escriure. Enrere cancel·la."),
-            Rect::new(350.0, 824.0, 1250.0, 60.0), theme::size::CAPTION, false);
-    }
-
     fn draw_unified_settings(&self, p: Painter) {
         // Full-page PlxNative-like view, not the alert/modal glass surface.
         let p = p.alpha(self.dialog_started.map_or(1.0, |at| 0.86 + motion_alpha(at) * 0.14));
@@ -2051,10 +1926,6 @@ impl Browser {
             self.draw_unified_settings(p);
             return;
         }
-        if matches!(dialog, Dialog::Search) {
-            self.draw_search_keyboard(p);
-            return;
-        }
         let cancel = tr("Cancelar", "Cancel·la");
         let save_status = |description: &'static str| {
             if matches!(self.settings_job, Some(SettingsJob::Save(_))) { tr("Guardando…", "Desant…") }
@@ -2063,7 +1934,6 @@ impl Browser {
         };
         let (title, subject, detail, options) = match dialog {
             Dialog::Settings => (tr("Ajustes", "Ajustos"), String::new(), "", ["", ""]),
-            Dialog::Search => (tr("Buscar", "Cerca"), String::new(), "", ["", ""]),
             Dialog::Appearance => (tr("Apariencia", "Aparença"), String::new(), "", ["", ""]),
             Dialog::Accent => (tr("Color de acento", "Color de ressaltat"), String::new(), "", ["", ""]),
             Dialog::Extensions => (tr("Mostrar extensiones", "Mostra les extensions"), String::new(),
@@ -2201,7 +2071,7 @@ impl Browser {
         let card = frame.scaled(scale);
         let radius = USB_STYLE.tile_radius(card, scale);
         let lift = ((scale - 1.0) / (USB_STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
-        let current = self.folders.last().filter(|_| self.favorite_cards().is_none() && self.media_cards().is_none() && self.search_cards().is_none()).and_then(|folder| folder.entries.get(index).map(|entry| (folder, entry)));
+        let current = self.folders.last().filter(|_| self.favorite_cards().is_none() && self.media_cards().is_none()).and_then(|folder| folder.entries.get(index).map(|entry| (folder, entry)));
         let record = current.and_then(|(folder, entry)| {
             let identity = self.identity(&folder.volume)?;
             let path = folder.path.join(&entry.name);
@@ -2949,9 +2819,9 @@ mod usb_browser_tests {
         assert_eq!(browser.len(), 1);
         assert_eq!(browser.item(0).unwrap().0, "Breaking Bad");
         browser.folders.push(Folder { volume, path, entries: vec![], collection: None, selected: 0, scroll: 0.0 });
-        browser.action = Some(Action::Settings);
+        browser.nav_focus = Some(4);
         assert!(browser.favorite_section.0 && browser.favorite_cards().is_none());
-        browser.action = None;
+        browser.nav_focus = None;
         browser.dialog = Some(Dialog::Settings);
         browser.back();
         assert!(browser.favorite_section.0 && browser.favorite_cards().is_none());
@@ -3031,7 +2901,7 @@ mod usb_browser_tests {
     }
 
     #[test]
-    fn library_returns_to_the_cached_root_and_restores_its_focus() {
+    fn home_returns_to_the_drive_picker() {
         let mut browser = Browser::new();
         let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: Some(42), system: true };
         let folder = |path, selected, names: &[&str]| Folder {
@@ -3042,10 +2912,10 @@ mod usb_browser_tests {
         browser.folders.push(folder(volume.path.clone(), 1, &["Pel·lícules", "Sèries"]));
         browser.folders.push(folder(volume.path.join("Sèries"), 0, &[]));
         let scan_at = browser.next_scan;
-        browser.open_action(Action::Library);
-        assert_eq!(browser.folders.len(), 1);
+        browser.open_nav_tab(0);
+        assert!(browser.folders.is_empty());
         assert_eq!(browser.volume(), Some(&volume));
-        assert_eq!(browser.selected, 1);
+        assert_eq!(browser.selected, 0);
         assert!(browser.pending.is_none());
         assert_eq!(browser.next_scan, scan_at);
     }
