@@ -171,7 +171,8 @@ pub fn volume_details(mount_id: &str, path_hex: &str) -> io::Result<()> {
 }
 
 fn volume_identity(device: &Path) -> Option<String> {
-    let device = fs::canonicalize(device).ok()?;
+    // Preserve device-node access when webOS does not expose a udev symlink.
+    let device = fs::canonicalize(device).unwrap_or_else(|_| device.to_path_buf());
     let alias = |directory| fs::read_dir(directory).into_iter().flatten().filter_map(Result::ok)
         .filter_map(|entry| (fs::canonicalize(entry.path()).ok()? == device)
             .then(|| entry.file_name().into_string().ok()).flatten()).min();
@@ -189,7 +190,9 @@ fn volume_identity(device: &Path) -> Option<String> {
     // On rooted webOS, /dev/disk/by-uuid and blkid may both be missing.
     // Read the filesystem's own serial number rather than using the unstable
     // /dev/sdX name, which can change after reconnecting a USB drive.
-    filesystem_serial(&device).or_else(|| alias("/dev/disk/by-id").map(|id| format!("disk:{id}")))
+    filesystem_serial(&device)
+        .or_else(|| alias("/dev/disk/by-partuuid").map(|id| format!("partuuid:{id}")))
+        .or_else(|| alias("/dev/disk/by-id").map(|id| format!("disk:{id}")))
 }
 
 /// Stable, filesystem-scoped identity for volumes with no blkid/udev links.
@@ -325,7 +328,8 @@ fn pdm_device<'a>(status: &'a serde_json::Value, partition: &str) -> io::Result<
         if device["deviceType"].as_str().is_some_and(|kind| kind != "USB_STORAGE") { return None; }
         let drives: Vec<_> = device["driveStatusList"].as_array()?.iter()
             .filter_map(|drive| drive["driveName"].as_str()).collect();
-        drives.contains(&partition).then(|| (device["deviceNum"].as_u64().filter(|n| *n > 0), drives))
+        drives.iter().any(|name| name.rsplit('/').next() == Some(partition))
+            .then(|| (device["deviceNum"].as_u64().filter(|n| *n > 0), drives))
     });
     let (Some(number), drives) = matches.next().ok_or_else(|| io::Error::other("USB disk not found in webOS"))?
         else { return Err(invalid()); };
@@ -352,16 +356,19 @@ fn eject_checked(mount_id: &str, path_hex: &str) -> io::Result<()> {
     }).and_then(|source| source.strip_prefix(b"/dev/"))
         .and_then(|source| std::str::from_utf8(source).ok()).ok_or_else(invalid)?;
     let status = pdm("getAttachedDeviceStatus", &serde_json::json!({"subscribe": true}))?;
-    let (device, drives) = pdm_device(&status, source)?;
+    let partition = source.rsplit('/').next().ok_or_else(invalid)?;
+    let (device, drives) = pdm_device(&status, partition)?;
     require_mount(&path, id)?;
     pdm("eject", &serde_json::json!({"deviceNum": device}))?;
-    for _ in 0..5 {
+    // Some USB bridges take several seconds to unmount after PDM accepts eject.
+    for _ in 0..12 {
         let table = fs::read("/proc/self/mountinfo")?;
         let mounted = table.split(|byte| *byte == b'\n').filter_map(mount_source)
             .filter_map(|device| device.strip_prefix(b"/dev/"))
-            .any(|device| drives.iter().any(|drive| device == drive.as_bytes()));
+            .any(|device| drives.iter().any(|drive| device == drive.as_bytes()
+                || device.rsplit(|byte| *byte == b'/').next() == Some(drive.as_bytes().rsplit(|byte| *byte == b'/').next().unwrap_or_default())));
         if !mounted { return Ok(()); }
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
     Err(io::Error::other("webOS still shows partitions mounted after eject"))
 }
@@ -496,6 +503,42 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!((&entries[0].0, entries[0].1), (&hex_path(video.file_name().unwrap()), false));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_serial_covers_exfat_fat32_and_fat16() {
+        let root = std::env::temp_dir().join(format!("cineusb-fs-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("partition");
+        let mut sector = [0u8; 512];
+        sector[3..11].copy_from_slice(b"EXFAT   ");
+        sector[0x64..0x68].copy_from_slice(&0x12345678u32.to_le_bytes());
+        fs::write(&path, sector).unwrap();
+        assert_eq!(filesystem_serial(&path).as_deref(), Some("exfat:78563412"));
+        sector = [0u8; 512];
+        sector[82..90].copy_from_slice(b"FAT32   ");
+        sector[0x43..0x47].copy_from_slice(&0x89abcdefu32.to_le_bytes());
+        fs::write(&path, sector).unwrap();
+        assert_eq!(filesystem_serial(&path).as_deref(), Some("fat32:efcdab89"));
+        sector = [0u8; 512];
+        sector[54..62].copy_from_slice(b"FAT16   ");
+        sector[0x27..0x2b].copy_from_slice(&0x1234abcdu32.to_le_bytes());
+        fs::write(&path, sector).unwrap();
+        assert_eq!(filesystem_serial(&path).as_deref(), Some("fat:cdab3412"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn eject_resolves_full_device_paths_from_webos() {
+        let status = serde_json::json!({
+            "returnValue":true,
+            "deviceStatusList":[{"deviceNum":7,"deviceType":"USB_STORAGE",
+                "driveStatusList":[{"driveName":"/dev/sdb1"},{"driveName":"/dev/sdb2"}]}]
+        });
+        let (device, drives) = pdm_device(&status, "sdb1").unwrap();
+        assert_eq!(device, 7);
+        assert_eq!(drives.len(), 2);
+        assert!(pdm_device(&status, "sdc1").is_err());
     }
 
     #[test]
