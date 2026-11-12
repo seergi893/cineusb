@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 const MOTION: Duration = Duration::from_millis(160);
 const FAVORITE_MOTION: Duration = Duration::from_millis(340);
+const SETTINGS_MOTION: Duration = Duration::from_millis(220);
 const FAVORITE_YELLOW: [f32; 4] = [0.98, 0.75, 0.24, 1.0];
 
 fn favorite_ease(progress: f32) -> f32 {
@@ -46,6 +47,29 @@ const DURATION_MASK: u64 = (1 << 20) - 1;
 fn motion_alpha(started: Instant) -> f32 {
     let t = (started.elapsed().as_secs_f32() / MOTION.as_secs_f32()).min(1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+fn settings_ease(started: Instant) -> f32 {
+    let t = (started.elapsed().as_secs_f32() / SETTINGS_MOTION.as_secs_f32()).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The fixed metadata band never depends on how many lines a title occupies.
+fn video_badge_slots(card: Rect) -> [Rect; 3] {
+    let usable = (card.w - 28.0).max(0.0);
+    let half = (usable - 5.0) * 0.5;
+    // Episode number is the only label on row one; playback facts always
+    // occupy the same second row even when the episode label is missing.
+    [
+        Rect::new(card.x + 12.0, card.y + 81.0, usable, 25.0),
+        Rect::new(card.x + 12.0, card.y + 112.0, half, 25.0),
+        Rect::new(card.x + 17.0 + half, card.y + 112.0, half, 25.0),
+    ]
+}
+
+fn nav_glyph_ink(index: usize, focus: f32, selected: f32) -> [f32; 4] {
+    if index == 3 { theme::USB_FAVORITES }
+    else { widgets::TabPill::mixed_ink(focus, selected) }
 }
 
 fn pack_progress(position: u64, duration: Option<u64>) -> u64 {
@@ -197,7 +221,7 @@ fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'s
             tr("Cambia el orden de archivos y carpetas.", "Canvia l'ordre dels fitxers i les carpetes."),
             [tr("Nombre", "Nom"), tr("Fecha", "Data"), tr("Tamaño", "Mida")][settings.sort].into()),
         1 => (tr("Mostrar extensiones", "Mostra les extensions"),
-            tr("Muestra el tipo de archivo en los títulos.", "Mostra el tipus de fitxer als títols."),
+            tr("Muestra extensiones en los diálogos de archivo.", "Mostra les extensions als diàlegs de fitxer."),
             on(settings.extensions).into()),
         2 => (tr("Siguiente episodio automático", "Episodi següent automàtic"),
             tr("Reproduce el siguiente episodio de la carpeta.", "Reprodueix l'episodi següent de la carpeta."),
@@ -357,6 +381,8 @@ pub(super) struct Browser {
     discovery_cache: BTreeMap<(PathBuf, u64, usize), Vec<PathBuf>>,
     favorite_section: (bool, Instant, f32),
     dialog_started: Option<Instant>,
+    settings_exit: Option<Instant>,
+    settings_return_focus: Option<usize>,
     button_motion: Option<(Rect, Instant)>,
     favorite_motion: Option<(PathBuf, bool, Instant)>,
     ejecting: Option<(Volume, Instant)>,
@@ -388,7 +414,8 @@ impl Browser {
             media_view: None,
             nav_tab: 0, nav_focus: None, nav_strip: widgets::TabStrip::new(), discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
-            dialog_started: None, button_motion: None, favorite_motion: None,
+            dialog_started: None, settings_exit: None, settings_return_focus: None,
+            button_motion: None, favorite_motion: None,
             ejecting: None, eject_feedback: None, eject_uncertain: false,
             estimate: None, next_estimate: None, estimate_anchor: None,
         }
@@ -616,8 +643,12 @@ impl Browser {
         }
         if self.dialog.is_some() {
             let started = *self.dialog_started.get_or_insert(now);
-            changed |= now.duration_since(started) < MOTION;
+            let duration = if matches!(self.dialog, Some(Dialog::Settings)) { SETTINGS_MOTION } else { MOTION };
+            changed |= now.duration_since(started) < duration;
         } else { self.dialog_started = None; }
+        if self.settings_exit.is_some_and(|started| now.duration_since(started) < SETTINGS_MOTION) {
+            changed = true;
+        } else { self.settings_exit = None; }
         changed |= self.button_motion.is_some_and(|(_, started)| now.duration_since(started) < MOTION);
         changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < FAVORITE_MOTION);
         changed |= self.favorite_section.1.elapsed() < MOTION;
@@ -908,6 +939,7 @@ impl Browser {
 
     fn open_nav_tab(&mut self, tab: usize) {
         if self.pending.is_some() || self.mutating { return; }
+        let previous_focus = self.nav_focus;
         self.nav_focus = None;
         self.action = None;
         self.option = 0;
@@ -947,7 +979,10 @@ impl Browser {
                 self.show_favorites();
             }
             4 => {
+                self.settings_exit = None;
+                self.settings_return_focus = previous_focus.or(Some(4));
                 self.dialog = Some(Dialog::Settings);
+                self.dialog_started = Some(Instant::now());
                 self.status.clear();
             }
             5 => {
@@ -1519,6 +1554,10 @@ impl Browser {
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if std::mem::take(&mut self.loading_favorites) && self.favorite_view.is_none() { self.set_favorite_section(false); }
         if let Some(dialog) = self.dialog.take() {
+            if matches!(dialog, Dialog::Settings) {
+                self.settings_exit = Some(Instant::now());
+                self.nav_focus = self.settings_return_focus.take();
+            }
             self.prepared = None;
             self.dialog = match dialog {
                 Dialog::Appearance => Some(Dialog::Settings),
@@ -1764,7 +1803,7 @@ impl Browser {
         if let Some(view) = self.favorite_cards() {
             let path = view.paths.get(index)?;
             if is_video_path(path) {
-                return Some((path.file_stem()?.to_string_lossy().into_owned(), tr("Vídeo", "Vídeo"), Cover::Movie));
+                return Some((clean_video_title(&path.file_stem()?.to_string_lossy()), tr("Vídeo", "Vídeo"), Cover::Movie));
             }
             let name = path.file_name()?.to_string_lossy().into_owned();
             let cover = path.strip_prefix(&view.volume.path).ok().and_then(art::collection).unwrap_or(Cover::Folder);
@@ -1773,7 +1812,7 @@ impl Browser {
         if let Some(folder) = self.folders.last() {
             let entry = folder.entries.get(index)?;
             let (cover, kind) = art::entry_cover(entry, folder.collection);
-            Some((display_name(entry, self.settings.extensions), kind, cover))
+            Some((display_name(entry, false), kind, cover))
         } else {
         self.scan.volumes.get(index).map(|volume| (volume_name(volume), tr("Disco USB", "Disc USB"), Cover::Drive))
         }
@@ -1885,6 +1924,9 @@ impl Browser {
         }
         if let Some(dialog) = &self.dialog {
             self.draw_dialog(p, dialog);
+        } else if let Some(started) = self.settings_exit {
+            let alpha = 1.0 - settings_ease(started);
+            self.draw_unified_settings(p, alpha);
         } else if !self.status.is_empty() {
             draw_line(p, &self.status, Rect::new(x, 990.0, width - if storage.is_some() { 610.0 } else { 0.0 }, 48.0), theme::size::CAPTION, false);
         } else {
@@ -1966,8 +2008,14 @@ impl Browser {
             let (run, width) = TtfMeasure.fit_line_measured(title, rect.w - 28.0 - icon_space, theme::size::CAPTION, true);
             let x = rect.x + (rect.w - width - icon_space) * 0.5;
             if let Some(glyph) = glyph {
-                draw_glyph(p, glyph, Rect::new(x, rect.y + (rect.h - 26.0) * 0.5, 26.0, 26.0),
-                    widgets::TabPill::mixed_ink(focus, selected));
+                let icon = Rect::new(x, rect.y + (rect.h - 26.0) * 0.5, 26.0, 26.0);
+                if index == 3 && selected > 0.1 {
+                    // Tiny dark under-stroke keeps the yellow outline legible
+                    // against the travelling light selection capsule.
+                    let shadow = Rect::new(icon.x + 1.0, icon.y + 1.0, icon.w, icon.h);
+                    draw_glyph(p, glyph, shadow, theme::USB_FAVORITES_GROUND);
+                }
+                draw_glyph(p, glyph, icon, nav_glyph_ink(index, focus, selected));
             }
             // PlxNative's ink regions are clipped to the travelling capsule.
             // This avoids illegible intermediate-grey text when it crosses labels.
@@ -1999,10 +2047,15 @@ impl Browser {
         }
     }
 
-    fn draw_unified_settings(&self, p: Painter) {
-        // Full-page PlxNative-like view, not the alert/modal glass surface.
-        let p = p.alpha(self.dialog_started.map_or(1.0, |at| 0.86 + motion_alpha(at) * 0.14));
-        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.98), theme::scrim_black(0.98), 0.0);
+    fn draw_unified_settings(&self, p: Painter, progress: f32) {
+        // The main frame already clears to theme::CLEAR_RGB (SURFACE_APP).
+        // Never place a black scrim over settings: keep one continuous surface.
+        // Animate only opacity and a small content rise, not a second framebuffer.
+        let p = p.alpha(progress);
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0,
+            theme::SURFACE_APP, theme::SURFACE_APP, 0.0);
+        let shift = (1.0 - progress) * 12.0;
+        let p = p.translate(0.0, shift);
         draw_line(p, tr("Configuración", "Configuració"),
             Rect::new(110.0, 169.0, 650.0, 80.0), theme::size::HEADLINE, true);
         let (_, description, _) = unified_setting_text(self.option, &self.settings);
@@ -2053,7 +2106,7 @@ impl Browser {
 
     fn draw_dialog(&self, p: Painter, dialog: &Dialog) {
         if matches!(dialog, Dialog::Settings) {
-            self.draw_unified_settings(p);
+            self.draw_unified_settings(p, self.dialog_started.map_or(1.0, settings_ease));
             return;
         }
         let cancel = tr("Cancelar", "Cancel·la");
@@ -2076,7 +2129,8 @@ impl Browser {
                 path.file_stem().unwrap_or_default().to_string_lossy().into_owned(), "",
                 [tr("Reproducir ahora", "Reprodueix ara"), cancel]),
             Dialog::Video { path, .. } => (tr("Opciones del vídeo", "Opcions del vídeo"),
-                path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                (if self.settings.extensions { path.file_name() } else { path.file_stem() })
+                    .unwrap_or_default().to_string_lossy().into_owned(),
                 "",
                 [tr("Reproducir", "Reprodueix"), tr("Eliminar archivo", "Esborra el fitxer")]),
             Dialog::Delete { path, .. } => (tr("¿Eliminar este archivo?", "Vols esborrar aquest fitxer?"),
@@ -2300,9 +2354,25 @@ impl Browser {
                 }
             }
         }
-        let video = current.is_some_and(|(_, entry)| entry.kind == Kind::Video);
+        let video = current.is_some_and(|(_, entry)| entry.kind == Kind::Video)
+            || self.favorite_cards().and_then(|view| view.paths.get(index)).is_some_and(|path| is_video_path(path));
         if video { widgets::art_scrim(p, card, radius, 68.0, widgets::STILL_SCRIM_A); }
-        let caption = widgets::poster_title(p, card, radius, &title, video, &TtfMeasure);
+        let caption = if video {
+            // Fixed two-line title zone: a long filename never moves the
+            // episode, running time or resolution labels below it.
+            let frame = Rect::new(card.x + 12.0, card.y + 18.0, card.w - 24.0, 56.0);
+            let veil = theme::scrim_black(widgets::STILL_SCRIM_A);
+            p.rect(Rect::new(card.x + 6.0, card.y + 6.0, card.w - 12.0, 72.0),
+                radius.min(10.0), veil, veil, 0.0);
+            let normal = plx_ui::text_view::TextView::new(&title, theme::size::LABEL, theme::TEXT_PRIMARY)
+                .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2);
+            if normal.truncates(frame.w) {
+                plx_ui::text_view::TextView::new(&title, theme::size::MICRO, theme::TEXT_PRIMARY)
+                    .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2)
+                    .draw(p, frame);
+            } else { normal.draw(p, frame); }
+            frame
+        } else { widgets::poster_title(p, card, radius, &title, false, &TtfMeasure) };
         let status_y = if video { card.y + card.h - 44.0 } else { caption.y - 30.0 };
         let (position, duration) = unpack_progress(record);
         if duration > 0 {
@@ -2335,23 +2405,15 @@ impl Browser {
             let duration = details.and_then(|details| details.duration_secs).map(video_duration);
             let quality = details.and_then(|details| details.resolution)
                 .map(|(width, height)| resolution_label(width, height));
-            let badges: Vec<String> = episode.into_iter().chain(duration).chain(quality).collect();
-            let size = theme::size::DIAGNOSTIC;
-            let available = card.w - 24.0;
-            let mut x = card.x + 12.0;
-            let mut y = caption.y + caption.h + 5.0;
-            for text in badges {
-                let (run, width) = TtfMeasure.fit_line_measured(&text, available - 10.0, size, true);
-                let badge_width = width + 10.0;
-                if x + badge_width > card.x + card.w - 12.0 && x > card.x + 12.0 {
-                    x = card.x + 12.0;
-                    y += 37.0;
-                }
-                let badge = Rect::new(x, y, badge_width, 32.0);
-                p.rect_sheened(badge, 10.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
-                if focused && self.action.is_none() { p.rring(badge, 10.0, 1.0, self.accent()); }
-                Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).h(HAlign::Center).bold().draw(p, badge);
-                x += badge.w + 5.0;
+            let slots = video_badge_slots(card);
+            for (text, badge) in [episode, duration, quality].into_iter().zip(slots) {
+                let Some(text) = text else { continue };
+                if badge.w < 15.0 { continue; }
+                let run = TtfMeasure.fit_line(&text, badge.w - 8.0, theme::size::DIAGNOSTIC, true);
+                p.rect_sheened(badge, 8.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
+                if focused && self.action.is_none() { p.rring(badge, 8.0, 1.0, self.accent()); }
+                Label::new(run.as_ptr(), theme::size::DIAGNOSTIC, theme::TEXT_PRIMARY)
+                    .h(HAlign::Center).bold().draw(p, badge);
             }
         }
         if record == WATCHED {
@@ -2774,12 +2836,29 @@ fn open_for_details(path: &std::path::Path, _mount_id: Option<u64>) -> Result<Fi
     direct
 }
 
+/// Remove trailing release tags without inventing technical metadata.
+fn clean_video_title(stem: &str) -> String {
+    let technical = ["2160p", "1080p", "720p", "480p", "hdr10", "hdr10plus", "hdr",
+        "dovi", "dolbyvision", "webdl", "webrip", "bluray", "bdrip", "remux",
+        "x264", "x265", "h264", "h265", "hevc", "av1"];
+    for (index, separator) in stem.char_indices() {
+        if index == 0 || !matches!(separator, '.' | '_' | ' ' | '[' | '(') { continue; }
+        let rest = &stem[index + separator.len_utf8()..];
+        let token = rest.split(|ch: char| !ch.is_ascii_alphanumeric()).next().unwrap_or_default();
+        if technical.iter().any(|tag| tag.eq_ignore_ascii_case(token)) {
+            let cleaned = stem[..index].trim_end_matches(|ch: char| matches!(ch, '.' | '_' | ' ' | '-'));
+            if !cleaned.is_empty() { return cleaned.to_owned(); }
+        }
+    }
+    stem.to_owned()
+}
+
 fn display_name(entry: &Entry, extensions: bool) -> String {
     let name = std::path::Path::new(&entry.name);
     match entry.kind {
         Kind::Folder => entry.name.to_string_lossy().into_owned(),
         Kind::Video if extensions => entry.name.to_string_lossy().into_owned(),
-        Kind::Video => name.file_stem().unwrap_or(&entry.name).to_string_lossy().into_owned(),
+        Kind::Video => clean_video_title(&name.file_stem().unwrap_or(&entry.name).to_string_lossy()),
     }
 }
 
@@ -2983,6 +3062,41 @@ pub(super) fn flush_playback(app: &mut App) {
 mod usb_browser_tests {
     use super::*;
 
+
+    #[test]
+    fn fixed_video_metadata_slots_never_overlap_at_any_card_size() {
+        for cards in 0..3 {
+            let g = grid_geometry(12, cards);
+            let card = Rect::new(80.0, 340.0, g.w, g.h);
+            let slots = video_badge_slots(card);
+            assert!(slots[0].y > card.y + 74.0);
+            assert!(slots[0].y + slots[0].h < slots[1].y);
+            assert_eq!(slots[1].y, slots[2].y);
+            assert!(slots[1].x + slots[1].w <= slots[2].x);
+            assert!(slots[2].x + slots[2].w <= card.x + card.w);
+            assert!(slots[1].y + slots[1].h < card.y + card.h - 44.0);
+        }
+    }
+
+    #[test]
+    fn settings_motion_uses_a_clamped_eased_transition() {
+        assert_eq!(SETTINGS_MOTION, Duration::from_millis(220));
+        assert_eq!(theme::SURFACE_APP[3], 1.0);
+        let browser = Browser::new();
+        assert!(browser.settings_return_focus.is_none());
+        assert!(browser.settings_exit.is_none());
+    }
+
+    #[test]
+    fn episode_titles_hide_file_extensions_independently_of_settings() {
+        let entry = disk::media_entry("Serie.S01E02.2160p.mkv".into(), false).unwrap();
+        assert_eq!(display_name(&entry, false), "Serie.S01E02");
+        let movie = disk::media_entry("Película.mp4".into(), false).unwrap();
+        assert_eq!(display_name(&movie, false), "Película");
+        assert_eq!(clean_video_title("Breaking.Bad.S01E01.1080p.WEB-DL"), "Breaking.Bad.S01E01");
+        assert_eq!(clean_video_title("Película.2025"), "Película.2025");
+    }
+
     #[test]
     fn media_folders_match_catalan_spanish_and_english_without_false_positives() {
         for name in ["PELIS", "Películas", "Peliculas", "Pel·lícules", "Movies", "movie_collection", "Films", "Cine"] {
@@ -2995,6 +3109,27 @@ mod usb_browser_tests {
         assert_eq!(media_folder_score("The Series Movie.mkv", 2), 0);
         assert_eq!(media_folder_score("Séries", 1), 0);
         assert_eq!(folder_fold("TÉLÉ-ÉPISODES"), "teleepisodes");
+    }
+
+    #[test]
+    fn favorite_nav_star_uses_yellow_in_every_state() {
+        for selected in [0.0, 0.25, 0.75, 1.0] {
+            for focus in [0.0, 0.5, 1.0] {
+                assert_eq!(nav_glyph_ink(3, focus, selected), theme::USB_FAVORITES);
+            }
+        }
+    }
+
+    #[test]
+    fn leaving_settings_restores_previous_navigation_focus() {
+        let mut browser = Browser::new();
+        browser.nav_tab = 2;
+        browser.open_nav_tab(4);
+        assert!(matches!(browser.dialog, Some(Dialog::Settings)));
+        browser.back();
+        assert!(browser.dialog.is_none());
+        assert_eq!(browser.nav_focus, Some(4));
+        assert!(browser.settings_exit.is_some());
     }
 
     #[test]
@@ -3085,6 +3220,7 @@ mod usb_browser_tests {
         browser.enter_favorites(volume.clone(), vec![movie.clone()]);
         assert_eq!(browser.len(), 1);
         assert_eq!(browser.item(0).unwrap().1, tr("Vídeo", "Vídeo"));
+        assert_eq!(browser.item(0).unwrap().0, "Crash");
         browser.open();
         assert!(matches!(browser.dialog, Some(Dialog::Video { ref volume, ref path })
             if volume == &browser.scan.volumes[0] && path == &movie));
