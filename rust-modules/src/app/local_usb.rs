@@ -2,6 +2,7 @@
 mod art;
 mod continuity;
 mod disk;
+mod search;
 
 use art::Cover;
 use super::{App, Key, playback};
@@ -71,13 +72,13 @@ enum Mutation { Delete, Eject }
 
 const TOOLBAR: Rect = Rect::new(475.0, 36.0, 1349.0, 67.0);
 const ACTIONS: [(Action, Rect); 7] = [
-    (Action::Library, Rect::new(486.0, 45.0, 189.0, 49.0)),
-    (Action::Favorites, Rect::new(681.0, 45.0, 187.0, 49.0)),
+    (Action::Library, Rect::new(486.0, 45.0, 150.0, 49.0)),
+    (Action::Favorites, Rect::new(1283.0, 45.0, 105.0, 49.0)),
     (Action::ToggleFavorite, Rect::new(1404.0, 222.0, 420.0, 45.0)),
-    (Action::Select, Rect::new(874.0, 45.0, 198.0, 49.0)),
-    (Action::DeleteFolders, Rect::new(1078.0, 45.0, 174.0, 49.0)),
-    (Action::Settings, Rect::new(1258.0, 45.0, 188.0, 49.0)),
-    (Action::Eject, Rect::new(1452.0, 45.0, 361.0, 49.0)),
+    (Action::Select, Rect::new(1392.0, 45.0, 100.0, 49.0)),
+    (Action::DeleteFolders, Rect::new(1496.0, 45.0, 100.0, 49.0)),
+    (Action::Settings, Rect::new(1600.0, 45.0, 102.0, 49.0)),
+    (Action::Eject, Rect::new(1706.0, 45.0, 108.0, 49.0)),
 ];
 const PANEL: Rect = Rect::new(510.0, 292.0, 900.0, 496.0);
 const OPTIONS: [Rect; 2] = [
@@ -98,9 +99,79 @@ const SETTINGS_OPTIONS: [Rect; 6] = [
     Rect::new(550.0, 686.0, 820.0, 49.0),
 ];
 
+// Rooted-webOS drives can use labels in different languages and Unicode forms.
+// Only fold for matching; the real path is never changed.
+fn folder_fold(name: &str) -> String {
+    name.chars().filter_map(|ch| match ch.to_lowercase().next()? {
+        'à' | 'á' | 'â' | 'ä' | 'ã' => Some('a'),
+        'è' | 'é' | 'ê' | 'ë' => Some('e'),
+        'ì' | 'í' | 'î' | 'ï' => Some('i'),
+        'ò' | 'ó' | 'ô' | 'ö' | 'õ' => Some('o'),
+        'ù' | 'ú' | 'û' | 'ü' => Some('u'),
+        'ç' => Some('c'),
+        'ñ' => Some('n'),
+        ch if ch.is_ascii_alphanumeric() => Some(ch),
+        _ => None,
+    }).collect()
+}
+
+fn media_folder_score(name: &str, kind: usize) -> u8 {
+    let name = folder_fold(name);
+    let exact: &[&str] = if kind == 1 {
+        &["pelis", "peliculas", "movies", "films", "film", "cine", "cinema", "moviecollection", "pelicules", "pellicules"]
+    } else {
+        &["series", "seriestv", "tvseries", "tvshows", "shows", "temporadas", "episodios", "temporades", "episodis"]
+    };
+    if exact.contains(&name.as_str()) { 3 }
+    else if kind == 1 && (name.starts_with("peliculas") || name.starts_with("movies") || name.starts_with("films")) { 2 }
+    else if kind == 2 && (name.starts_with("series") || name.starts_with("tvshows")) { 2 }
+    else { 0 }
+}
+
+fn discover_media_folders(volume: &Volume, kind: usize) -> Vec<PathBuf> {
+    let mut matched = Vec::new();
+    let mut level = vec![volume.path.clone()];
+    // Bounded root-first traversal, never on the drawing thread.
+    for depth in 0..3 {
+        let mut next = Vec::new();
+        for parent in level.into_iter().take(96) {
+            let Ok(entries) = list_folder(&parent, system_mount(volume)) else { continue };
+            for entry in entries.into_iter().filter(|entry| entry.kind == Kind::Folder).take(250) {
+                let path = parent.join(&entry.name);
+                let name = entry.name.to_string_lossy();
+                if media_folder_score(&name, kind) > 0 {
+                    matched.push((depth, media_folder_score(&name, kind), path.clone()));
+                }
+                // Restrict nested scanning to likely container directories.
+                if depth == 0 || (depth == 1 && ["media", "videos", "video", "multimedia", "biblioteca", "library"]
+                        .contains(&folder_fold(&parent.file_name().unwrap_or_default().to_string_lossy()).as_str())) {
+                    if next.len() < 96 { next.push(path); }
+                }
+            }
+        }
+        level = next;
+    }
+    matched.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
+    matched.into_iter().map(|(_, _, path)| path).collect()
+}
+
+const NAV_PILL: Rect = Rect::new(645.0, 32.0, 630.0, 70.0);
+const NAV_TABS: [Rect; 4] = [
+    Rect::new(656.0, 42.0, 145.0, 48.0),
+    Rect::new(812.0, 42.0, 145.0, 48.0),
+    Rect::new(968.0, 42.0, 145.0, 48.0),
+    Rect::new(1124.0, 42.0, 139.0, 48.0),
+];
+
+const SEARCH_KEYS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const SEARCH_KEY_COUNT: usize = 40;
+fn search_key_rect(index: usize) -> Rect {
+    Rect::new(350.0 + (index % 10) as f32 * 122.0, 342.0 + (index / 10) as f32 * 102.0, 104.0, 79.0)
+}
+
 const UNIFIED_SETTINGS_COUNT: usize = 8;
 fn unified_setting_rect(index: usize) -> Rect {
-    Rect::new(815.0, 179.0 + index as f32 * 91.0, 940.0, 68.0)
+    Rect::new(825.0, 168.0 + index as f32 * 98.0, 975.0, 58.0)
 }
 
 fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'static str, String) {
@@ -135,6 +206,7 @@ fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'s
 
 enum Dialog {
     Settings,
+    Search,
     Appearance,
     Accent,
     Cards,
@@ -190,6 +262,8 @@ enum DiskResult {
     DeleteFolders { removed: Vec<OsString>, total: usize, error: Option<String>, entries: io::Result<Vec<Entry>> },
     Eject(Volume, Result<(), String>),
     Favorites(Volume, Vec<PathBuf>, Vec<PathBuf>),
+    Discovered(Volume, usize, Vec<PathBuf>),
+    Searched(Volume, Vec<PathBuf>),
 }
 
 type VolumeFacts = (Option<(u64, u64, u64, bool)>, Option<String>);
@@ -262,12 +336,21 @@ pub(super) struct Browser {
     queued_history_clears: BTreeSet<String>,
     loading_favorites: bool,
     favorite_view: Option<FavoriteView>,
+    media_view: Option<FavoriteView>,
+    search_view: Option<FavoriteView>,
+    search_target: Option<Volume>,
+    search_query: String,
+    search_key: usize,
+    nav_tab: usize,
+    nav_focus: Option<usize>,
+    discovery_cache: BTreeMap<(PathBuf, u64, usize), Vec<PathBuf>>,
     favorite_section: (bool, Instant, f32),
     dialog_started: Option<Instant>,
     button_motion: Option<(Rect, Instant)>,
     favorite_motion: Option<(PathBuf, bool, Instant)>,
     ejecting: Option<(Volume, Instant)>,
     eject_feedback: Option<(Volume, bool, Instant)>,
+    eject_uncertain: bool,
     estimate: Option<(i64, plx_appkit::player_hud::model::FinishClock)>,
     next_estimate: Option<Instant>,
     estimate_anchor: Option<(i64, i32)>,
@@ -291,14 +374,18 @@ impl Browser {
             progress_job: None, queued_progress: Default::default(), countdown_display: 0,
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
             queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_view: None,
+            media_view: None, search_view: None, search_target: None, search_query: String::new(),
+            search_key: 0, nav_tab: 0, nav_focus: None, discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
             dialog_started: None, button_motion: None, favorite_motion: None,
-            ejecting: None, eject_feedback: None,
+            ejecting: None, eject_feedback: None, eject_uncertain: false,
             estimate: None, next_estimate: None, estimate_anchor: None,
         }
     }
 
     fn len(&self) -> usize {
+        if let Some(view) = self.search_cards() { return view.paths.len(); }
+        if let Some(view) = self.media_cards() { return view.paths.len(); }
         self.favorite_cards().map_or_else(|| self.folders.last().map_or(self.scan.volumes.len(), |folder| folder.entries.len()), |view| view.paths.len())
     }
 
@@ -406,6 +493,25 @@ impl Browser {
                         self.scanning = None;
                         self.next_scan = Instant::now();
                     }
+                    DiskResult::Searched(volume, paths) => {
+                        if self.scan.volumes.contains(&volume) {
+                            self.enter_search(volume, paths);
+                            self.status = if self.search_cards().is_some_and(|view| view.paths.is_empty()) {
+                                tr("No hay vídeos que coincidan. Pulsa Buscar para otra búsqueda.",
+                                    "No hi ha vídeos coincidents. Prem Cerca per tornar a cercar.").into()
+                            } else { String::new() };
+                        }
+                    }
+                    DiskResult::Discovered(volume, kind, paths) => {
+                        if self.scan.volumes.contains(&volume) {
+                            self.discovery_cache.insert((volume.path.clone(), volume.mount_id.unwrap_or(0), kind), paths.clone());
+                            self.enter_media(volume, kind, paths);
+                            if self.media_cards().is_some_and(|view| view.paths.is_empty()) {
+                                self.status = tr("No se encontraron carpetas. Puedes navegar desde Inicio.",
+                                    "No s'han trobat carpetes. Pots navegar des d'Inici.").into();
+                            } else { self.status.clear(); }
+                        }
+                    }
                     DiskResult::Favorites(volume, paths, missing) => {
                         if self.volume() == Some(&volume) {
                             for path in missing { self.remove_history_under(&volume, &path); }
@@ -417,8 +523,13 @@ impl Browser {
                     }
                     DiskResult::Eject(volume, result) => {
                         let success = result.is_ok();
+                        self.eject_uncertain = result.as_ref().err()
+                            .is_some_and(|error| error.starts_with("safe eject unconfirmed:"));
                         if success {
                             self.scan.volumes.retain(|item| *item != volume);
+                            self.discovery_cache.retain(|(path, _, _), _| *path != volume.path);
+                            if self.media_view.as_ref().is_some_and(|view| view.volume == volume) { self.leave_media(); }
+                            if self.search_view.as_ref().is_some_and(|view| view.volume == volume) { self.leave_search(); }
                             self.leave_favorites();
                             self.folders.clear();
                             self.action = None;
@@ -454,6 +565,14 @@ impl Browser {
                         let selected = self.scan.volumes.get(self.selected).cloned();
                         self.details.clear();
                         self.scan = scan;
+                        self.discovery_cache.retain(|(path, id, _), _| self.scan.volumes.iter()
+                            .any(|volume| volume.path == *path && volume.mount_id.unwrap_or(0) == *id));
+                        if self.media_view.as_ref().is_some_and(|view| !self.scan.volumes.contains(&view.volume)) {
+                            self.leave_media();
+                        }
+                        if self.search_view.as_ref().is_some_and(|view| !self.scan.volumes.contains(&view.volume)) {
+                            self.leave_search();
+                        }
                         if self.favorite_view.as_ref().is_some_and(|view| !self.scan.volumes.contains(&view.volume))
                             || self.folders.last().is_some_and(|folder| !self.scan.volumes.contains(&folder.volume)) {
                             self.leave_favorites();
@@ -764,6 +883,120 @@ impl Browser {
         });
     }
 
+    fn search_cards(&self) -> Option<&FavoriteView> {
+        self.search_view.as_ref().filter(|view| view.depth == self.folders.len())
+    }
+
+    fn leave_search(&mut self) {
+        if let Some(view) = self.search_view.take() {
+            self.folders.truncate(view.depth);
+            self.restore_view(view.library_selected, view.library_scroll);
+        }
+        if self.nav_tab == 3 { self.nav_tab = 0; }
+    }
+
+    fn enter_search(&mut self, volume: Volume, paths: Vec<PathBuf>) {
+        self.leave_favorites();
+        self.leave_media();
+        self.leave_search();
+        let selected = self.selected;
+        let scroll = self.scroll.pos;
+        self.search_view = Some(FavoriteView {
+            volume, paths, depth: self.folders.len(), selected: 0, scroll: 0.0,
+            library_selected: selected, library_scroll: scroll,
+        });
+        self.nav_tab = 3;
+        self.search_target = None;
+        self.restore_view(0, 0.0);
+    }
+
+    fn submit_search(&mut self) {
+        if self.search_query.trim().is_empty() { return; }
+        let Some(volume) = self.search_target.take() else { return };
+        let query = self.search_query.clone();
+        self.dialog = None;
+        self.status = tr("Buscando vídeos en el USB…", "Buscant vídeos a l'USB…").into();
+        self.request(move || DiskResult::Searched(volume.clone(), search::filenames(&volume, &query)));
+    }
+
+    fn choose_search_key(&mut self) {
+        match self.search_key {
+            0..=35 if self.search_query.len() < 32 => {
+                if let Some(ch) = SEARCH_KEYS.chars().nth(self.search_key) { self.search_query.push(ch); }
+            }
+            36 if self.search_query.len() < 32 => self.search_query.push(' '),
+            37 => self.search_query.clear(),
+            38 => { self.search_query.pop(); },
+            39 => self.submit_search(),
+            _ => {}
+        }
+    }
+
+    fn media_cards(&self) -> Option<&FavoriteView> {
+        self.media_view.as_ref().filter(|view| view.depth == self.folders.len())
+    }
+
+    fn leave_media(&mut self) {
+        if let Some(view) = self.media_view.take() {
+            self.folders.truncate(view.depth);
+            self.restore_view(view.library_selected, view.library_scroll);
+        }
+        self.nav_tab = 0;
+    }
+
+    fn enter_media(&mut self, volume: Volume, kind: usize, paths: Vec<PathBuf>) {
+        self.leave_favorites();
+        self.leave_media();
+        self.leave_search();
+        self.nav_tab = kind;
+        let selected = self.selected;
+        let scroll = self.scroll.pos;
+        self.media_view = Some(FavoriteView {
+            volume, paths, depth: self.folders.len(), selected: 0, scroll: 0.0,
+            library_selected: selected, library_scroll: scroll,
+        });
+        self.action = None;
+        self.restore_view(0, 0.0);
+    }
+
+    fn open_nav_tab(&mut self, tab: usize) {
+        self.nav_focus = None;
+        self.action = None;
+        if tab == 0 {
+            self.leave_media();
+            self.leave_search();
+            self.leave_favorites();
+            self.open_library_root();
+            self.nav_tab = 0;
+            return;
+        }
+        if tab == 3 {
+            let Some(volume) = self.volume().cloned() else {
+                self.status = tr("Selecciona un disco para buscar.", "Tria un disc per cercar.").into();
+                return;
+            };
+            self.search_target = Some(volume);
+            self.search_key = 0;
+            self.dialog = Some(Dialog::Search);
+            self.status.clear();
+            return;
+        }
+        let Some(volume) = self.volume().cloned() else {
+            self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
+            return;
+        };
+        let key = (volume.path.clone(), volume.mount_id.unwrap_or(0), tab);
+        if let Some(paths) = self.discovery_cache.get(&key).cloned() {
+            self.enter_media(volume, tab, paths);
+            return;
+        }
+        self.status = tr("Buscando carpetas multimedia…", "Buscant carpetes multimèdia…").into();
+        self.request(move || {
+            let paths = discover_media_folders(&volume, tab);
+            DiskResult::Discovered(volume, tab, paths)
+        });
+    }
+
     fn favorite_cards(&self) -> Option<&FavoriteView> {
         self.favorite_view.as_ref().filter(|view| view.depth == self.folders.len())
     }
@@ -961,7 +1194,10 @@ impl Browser {
     }
 
     fn volume(&self) -> Option<&Volume> {
-        self.favorite_cards().map(|view| &view.volume).or_else(|| self.folders.last().map(|folder| &folder.volume))
+        self.search_cards().map(|view| &view.volume)
+            .or_else(|| self.media_cards().map(|view| &view.volume))
+            .or_else(|| self.favorite_cards().map(|view| &view.volume))
+            .or_else(|| self.folders.last().map(|folder| &folder.volume))
             .or_else(|| self.scan.volumes.get(self.selected))
     }
 
@@ -1106,6 +1342,7 @@ impl Browser {
                 self.status = tr("Expulsando disco…", "Expulsant el disc…").into();
                 self.ejecting = Some((volume.clone(), Instant::now()));
                 self.eject_feedback = None;
+                self.eject_uncertain = false;
                 self.request(move || {
                     let result = mutate_usb(Mutation::Eject, &volume, &volume.path);
                     DiskResult::Eject(volume, result)
@@ -1168,7 +1405,14 @@ impl Browser {
 
     fn open(&mut self) {
         if self.pending.is_some() { return; }
-        if let Some(view) = self.favorite_cards() {
+        if let Some(view) = self.search_cards() {
+            if let Some(path) = view.paths.get(self.selected) {
+                self.dialog = Some(Dialog::Video { volume: view.volume.clone(), path: path.clone() });
+                self.option = 0;
+            }
+            return;
+        }
+        if let Some(view) = self.media_cards().or_else(|| self.favorite_cards()) {
             if let Some(path) = view.paths.get(self.selected) {
                 self.open_folder(view.volume.clone(), path.clone());
             }
@@ -1245,7 +1489,10 @@ impl Browser {
     }
 
     fn open_folder(&mut self, volume: Volume, path: PathBuf) {
-        if let Some(view) = self.favorite_view.as_mut().filter(|view| view.depth == self.folders.len()) {
+        if let Some(view) = self.media_view.as_mut().filter(|view| view.depth == self.folders.len()) {
+            view.selected = self.selected;
+            view.scroll = self.scroll.pos;
+        } else if let Some(view) = self.favorite_view.as_mut().filter(|view| view.depth == self.folders.len()) {
             view.selected = self.selected;
             view.scroll = self.scroll.pos;
         } else if let Some(folder) = self.folders.last_mut() {
@@ -1286,11 +1533,21 @@ impl Browser {
             self.status.clear();
             return;
         }
+        if self.media_cards().is_some() {
+            self.leave_media();
+            self.status.clear();
+            return;
+        }
+        if self.search_cards().is_some() {
+            self.leave_search();
+            self.status.clear();
+            return;
+        }
         let Some(folder) = self.folders.pop() else {
             plx_platform::tv::home::go_home();
             return;
         };
-        let (index, scroll) = if let Some(view) = self.favorite_cards() {
+        let (index, scroll) = if let Some(view) = self.search_cards().or_else(|| self.media_cards()).or_else(|| self.favorite_cards()) {
             (view.selected, view.scroll)
         } else if let Some(parent) = self.folders.last() {
             (parent.selected, parent.scroll)
@@ -1315,6 +1572,12 @@ impl Browser {
     }
 
     fn click(&mut self, x: f32, y: f32) {
+        if self.dialog.is_none() && self.eject_feedback.is_none() && !self.mutating {
+            if let Some(tab) = NAV_TABS.iter().position(|rect| hit(*rect, x, y)) {
+                self.open_nav_tab(tab);
+                return;
+            }
+        }
         if self.eject_feedback.is_some() {
             if hit(Rect::new(510.0, 292.0, 900.0, 496.0), x, y) {
                 self.eject_feedback = None;
@@ -1322,6 +1585,13 @@ impl Browser {
             return;
         }
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
+        if matches!(self.dialog, Some(Dialog::Search)) {
+            if let Some(index) = (0..SEARCH_KEY_COUNT).find(|index| hit(search_key_rect(*index), x, y)) {
+                self.search_key = index;
+                self.choose_search_key();
+            }
+            return;
+        }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
             let unified = matches!(self.dialog, Some(Dialog::Settings));
@@ -1362,6 +1632,16 @@ impl Browser {
     }
 
     fn key(&mut self, key: Key, repeat: bool) {
+        if let Some(tab) = self.nav_focus {
+            match key {
+                Key::Left { alt: false } => self.nav_focus = Some(tab.saturating_sub(1)),
+                Key::Right { alt: false } => self.nav_focus = Some((tab + 1).min(3)),
+                Key::Down | Key::Back => self.nav_focus = None,
+                Key::Ok if !repeat => self.open_nav_tab(tab),
+                _ => {}
+            }
+            return;
+        }
         if self.eject_feedback.is_some() {
             if !repeat && matches!(key, Key::Ok | Key::Back) {
                 if let Some((volume, success, _)) = self.eject_feedback.take() {
@@ -1374,6 +1654,18 @@ impl Browser {
             return;
         }
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
+        if matches!(self.dialog, Some(Dialog::Search)) {
+            match key {
+                Key::Left { alt: false } => self.search_key = self.search_key.saturating_sub(1),
+                Key::Right { alt: false } => self.search_key = (self.search_key + 1).min(SEARCH_KEY_COUNT - 1),
+                Key::Up => self.search_key = self.search_key.saturating_sub(10),
+                Key::Down => self.search_key = (self.search_key + 10).min(SEARCH_KEY_COUNT - 1),
+                Key::Ok if !repeat => self.choose_search_key(),
+                Key::Back if !repeat => { self.dialog = None; self.search_target = None; },
+                _ => {}
+            }
+            return;
+        }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
             let settings = vertical > 0;
@@ -1409,6 +1701,7 @@ impl Browser {
                 Key::Left { alt: false } => self.action = actions.get(index.saturating_sub(1)).copied(),
                 Key::Right { alt: false } => self.action = actions.get(index + 1).copied().or(Some(action)),
                 Key::Down => self.action = None,
+                Key::Up => { self.action = None; self.nav_focus = Some(self.nav_tab); },
                 Key::Back if !repeat => self.back(),
                 Key::Ok if !repeat => {
                     if let Some((_, rect)) = ACTIONS.iter().find(|(item, _)| *item == action) { self.press_button(*rect); }
@@ -1420,7 +1713,7 @@ impl Browser {
         }
         let dir = match key {
             Key::Up if self.selected < grid_geometry(self.len(), self.settings.cards).cols => {
-                self.action = ACTIONS.iter().find(|(action, _)| self.action_available(*action)).map(|(action, _)| *action);
+                self.nav_focus = Some(self.nav_tab);
                 return;
             }
             Key::Up => Dir::Up,
@@ -1458,6 +1751,16 @@ impl Browser {
     }
 
     fn item(&self, index: usize) -> Option<(String, &'static str, Cover)> {
+        if let Some(view) = self.search_cards() {
+            let path = view.paths.get(index)?;
+            return Some((path.file_stem()?.to_string_lossy().into_owned(), tr("Vídeo", "Vídeo"), Cover::Movie));
+        }
+        if let Some(view) = self.media_cards() {
+            let path = view.paths.get(index)?;
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let cover = path.strip_prefix(&view.volume.path).ok().and_then(art::collection).unwrap_or(Cover::Folder);
+            return Some((name, tr("Carpeta", "Carpeta"), cover));
+        }
         if let Some(view) = self.favorite_cards() {
             let path = view.paths.get(index)?;
             let name = path.file_name()?.to_string_lossy().into_owned();
@@ -1480,6 +1783,7 @@ impl Browser {
         let x = plx_ui::consts::MARGIN_X;
         let width = 1920.0 - 2.0 * x;
         p.rect(TOOLBAR, 24.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL, 0.0);
+        self.draw_nav_pill(p);
         draw_line(p, "CineUSB", Rect::new(x, 45.0, 345.0, 50.0), theme::size::HEADLINE, true);
         for (action, rect) in ACTIONS {
             if self.action_available(action) {
@@ -1523,7 +1827,11 @@ impl Browser {
             parts.join("   /   ")
         });
         let focused = self.item(self.selected);
-        let (title, detail, greeting_icon) = if self.favorite_cards().is_some() {
+        let (title, detail, greeting_icon) = if self.search_cards().is_some() {
+            (tr("Resultados de búsqueda", "Resultats de la cerca"), "", None)
+        } else if self.media_cards().is_some() {
+            (if self.nav_tab == 1 { tr("Películas", "Pel·lícules") } else { tr("Series", "Sèries") }, "", None)
+        } else if self.favorite_cards().is_some() {
             (tr("Carpetas favoritas", "Carpetes favorites"), "", None)
         } else if breadcrumb.is_none() {
             let greeting = match self.hour {
@@ -1554,7 +1862,13 @@ impl Browser {
         draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, 226.0, 920.0, 37.0), theme::size::CAPTION, false);
 
         if self.len() == 0 {
-            let message = if self.favorite_cards().is_some() {
+            let message = if self.search_cards().is_some() {
+                tr("No hay vídeos con ese nombre. Pulsa Buscar para repetir la búsqueda.",
+                    "No hi ha vídeos amb aquest nom. Prem Cerca per tornar a cercar.")
+            } else if self.media_cards().is_some() {
+                tr("No hay carpetas de esta categoría. Pulsa Inicio para navegar manualmente.",
+                    "No hi ha carpetes d'aquesta categoria. Prem Inici per navegar manualment.")
+            } else if self.favorite_cards().is_some() {
                 tr("No hay carpetas favoritas en este USB.", "No hi ha cap carpeta favorita en aquest USB.")
             } else if self.folders.last().is_some() {
                 tr("Esta carpeta no contiene subcarpetas ni vídeos compatibles.",
@@ -1628,6 +1942,7 @@ impl Browser {
         }
         let headline = match result {
             Some(true) => tr("USB expulsado correctamente", "USB expulsat correctament"),
+            Some(false) if self.eject_uncertain => tr("Expulsión USB sin confirmar", "Expulsió USB sense confirmar"),
             Some(false) => tr("No se pudo expulsar el USB", "No s'ha pogut expulsar l'USB"),
             None => tr("Expulsando USB…", "Expulsant l'USB…"),
         };
@@ -1635,11 +1950,35 @@ impl Browser {
         draw_line(p, &volume_name(volume), Rect::new(655.0, 539.0, 610.0, 48.0), theme::size::BODY, false);
         let description = match result {
             Some(true) => tr("Ya puedes desconectar el dispositivo con seguridad.", "Ja pots desconnectar el dispositiu amb seguretat."),
+            Some(false) if self.eject_uncertain => tr("No desconectes el disco: webOS aún muestra particiones montadas.",
+                "No desconnectis el disc: webOS encara mostra particions muntades."),
             Some(false) => tr("Comprueba que no haya archivos en uso. Pulsa OK para reintentar o Atrás para cerrar.",
                 "Comprova que no hi hagi fitxers oberts. Prem OK per reintentar o Enrere per tancar."),
             None => tr("Espera a que termine la operación.", "Espera que acabi l'operació."),
         };
         draw_line(p, description, Rect::new(620.0, 602.0, 690.0, 85.0), theme::size::CAPTION, false);
+    }
+
+    fn draw_nav_pill(&self, p: Painter) {
+        p.rect_sheened(NAV_PILL, 35.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+        p.rring(NAV_PILL, 35.0, 1.0, theme::TEXT_SECONDARY);
+        for (index, rect) in NAV_TABS.into_iter().enumerate() {
+            let active = self.nav_tab == index;
+            let focused = self.nav_focus == Some(index);
+            if active || focused {
+                p.rect_sheened(rect, 24.0, theme::TEXT_PRIMARY, theme::TEXT_PRIMARY);
+            }
+            let title = match index {
+                0 => tr("Inicio", "Inici"),
+                1 => tr("Películas", "Pel·lícules"),
+                2 => tr("Series", "Sèries"),
+                _ => tr("Buscar", "Cerca"),
+            };
+            let color = if active || focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
+            let run = TtfMeasure.fit_line(title, rect.w - 10.0, theme::size::CAPTION, true);
+            Label::new(run.as_ptr(), theme::size::CAPTION, color).h(HAlign::Center).bold().draw(p, rect);
+            if focused && !active { p.rring(rect, 24.0, 2.0, self.accent()); }
+        }
     }
 
     fn draw_storage(&self, p: Painter, volume: &Volume, (total, used, free, readonly): (u64, u64, u64, bool)) {
@@ -1661,44 +2000,92 @@ impl Browser {
         }
     }
 
+    fn draw_search_keyboard(&self, p: Painter) {
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.98), theme::scrim_black(0.98), 0.0);
+        draw_line(p, tr("Buscar en el disco USB", "Cerca al disc USB"),
+            Rect::new(350.0, 130.0, 1260.0, 72.0), theme::size::HEADLINE, true);
+        p.rect_sheened(Rect::new(350.0, 233.0, 1202.0, 78.0), 17.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+        draw_line(p, &self.search_query, Rect::new(385.0, 239.0, 1120.0, 63.0), theme::size::BODY, true);
+        for index in 0..SEARCH_KEY_COUNT {
+            let rect = search_key_rect(index);
+            let selected = index == self.search_key;
+            let fill = if selected { theme::TEXT_PRIMARY } else { theme::CONTROL_IDLE_FILL };
+            p.rect_sheened(rect, 14.0, fill, fill);
+            let name = match index {
+                0..=35 => SEARCH_KEYS.get(index..index+1).unwrap_or(""),
+                36 => tr("Espacio", "Espai"),
+                37 => tr("Limpiar", "Neteja"),
+                38 => tr("Borrar", "Esborra"),
+                _ => tr("Buscar", "Cerca"),
+            };
+            let fg = if selected { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
+            let run = TtfMeasure.fit_line(name, rect.w-8.0, theme::size::CAPTION, true);
+            Label::new(run.as_ptr(), theme::size::CAPTION, fg).h(HAlign::Center).bold().draw(p, rect);
+        }
+        draw_line(p, tr("Usa las flechas y OK para escribir. Atrás cancela.",
+                "Fes servir les fletxes i OK per escriure. Enrere cancel·la."),
+            Rect::new(350.0, 824.0, 1250.0, 60.0), theme::size::CAPTION, false);
+    }
+
     fn draw_unified_settings(&self, p: Painter) {
-        let alpha = self.dialog_started.map_or(1.0, motion_alpha);
-        let p = p.alpha(0.8 + 0.2 * alpha);
-        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.93), theme::scrim_black(0.93), 0.0);
-        draw_line(p, tr("Ajustes", "Ajustos"), Rect::new(115.0, 138.0, 610.0, 78.0), theme::size::HEADLINE, true);
+        // Full-page PlxNative-like view, not the alert/modal glass surface.
+        let p = p.alpha(self.dialog_started.map_or(1.0, |at| 0.86 + motion_alpha(at) * 0.14));
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.98), theme::scrim_black(0.98), 0.0);
+        draw_line(p, tr("Configuración", "Configuració"),
+            Rect::new(110.0, 169.0, 650.0, 80.0), theme::size::HEADLINE, true);
         let (_, description, _) = unified_setting_text(self.option, &self.settings);
-        draw_line(p, description, Rect::new(115.0, 250.0, 585.0, 165.0), theme::size::BODY, false);
-        draw_line(p, tr("Usa izquierda y derecha para cambiar el valor.", "Fes servir esquerra i dreta per canviar el valor."),
-            Rect::new(115.0, 480.0, 600.0, 100.0), theme::size::CAPTION, false);
+        plx_ui::text_view::TextView::new(description, theme::size::BODY, theme::TEXT_SECONDARY)
+            .with_measure(&TtfMeasure).break_long_words().leading(34.0).max_lines(5)
+            .draw(p, Rect::new(110.0, 281.0, 590.0, 240.0));
+        draw_line(p, tr("← → Cambiar · OK Seleccionar · Atrás Cerrar",
+                "← → Canvia · OK Selecciona · Enrere Tanca"),
+            Rect::new(110.0, 879.0, 650.0, 50.0), theme::size::CAPTION, false);
+        // All eight current settings fit without scrolling at 1920×1080.
+        // Leave a separate heading in the gutter between grouped rows.
         for i in 0..UNIFIED_SETTINGS_COUNT {
             let rect = unified_setting_rect(i);
             let focused = self.option == i;
-            if focused {
-                p.rect_sheened(rect, 18.0, self.accent(), self.accent());
-            } else {
-                p.rect_sheened(rect, 18.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
-            }
-            let (label, _, value) = unified_setting_text(i, &self.settings);
-            draw_line(p, label, Rect::new(rect.x + 20.0, rect.y + 10.0, 560.0, 47.0), theme::size::CAPTION, focused);
-            draw_line(p, &value, Rect::new(rect.x + 602.0, rect.y + 10.0, 305.0, 47.0), theme::size::CAPTION, focused);
             if matches!(i, 0 | 2 | 5 | 6) {
-                let category = match i {
+                let heading = match i {
                     0 => tr("BIBLIOTECA / USB", "BIBLIOTECA / USB"),
                     2 => tr("REPRODUCCIÓN", "REPRODUCCIÓ"),
                     5 => tr("SISTEMA", "SISTEMA"),
                     _ => tr("APARIENCIA", "APARENÇA"),
                 };
-                draw_line(p, category, Rect::new(rect.x, rect.y - 22.0, 600.0, 21.0), theme::size::MICRO, true);
+                draw_line(p, heading, Rect::new(rect.x + 10.0, rect.y - 28.0, rect.w - 20.0, 25.0),
+                    theme::size::MICRO, true);
+            }
+            if focused {
+                p.rect_sheened(rect, 14.0, theme::TEXT_PRIMARY, theme::TEXT_PRIMARY);
+            }
+            let (name, _, value) = unified_setting_text(i, &self.settings);
+            let foreground = if focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY };
+            let value_ink = if focused { theme::ACCENT_INK } else { theme::TEXT_SECONDARY };
+            let label = TtfMeasure.fit_line(name, 630.0, theme::size::CAPTION, focused);
+            Label::new(label.as_ptr(), theme::size::CAPTION, foreground)
+                .h(HAlign::Left).draw(p, Rect::new(rect.x + 24.0, rect.y + 6.0, 630.0, 46.0));
+            let fit = TtfMeasure.fit_line(&value, 280.0, theme::size::CAPTION, focused);
+            Label::new(fit.as_ptr(), theme::size::CAPTION, value_ink)
+                .h(HAlign::Right).draw(p, Rect::new(rect.x + rect.w - 322.0, rect.y + 6.0, 292.0, 46.0));
+            // The selected color appears as a swatch while focus remains white.
+            if i == 6 {
+                let swatch = theme::usb_accent(self.settings.accent);
+                p.rect_sheened(Rect::new(rect.x + rect.w - 344.0, rect.y + 18.0, 17.0, 17.0),
+                    8.0, swatch, swatch);
             }
         }
         if !self.status.is_empty() {
-            draw_line(p, &self.status, Rect::new(115.0, 940.0, 1600.0, 51.0), theme::size::CAPTION, false);
+            draw_line(p, &self.status, Rect::new(110.0, 941.0, 1630.0, 53.0), theme::size::CAPTION, false);
         }
     }
 
     fn draw_dialog(&self, p: Painter, dialog: &Dialog) {
         if matches!(dialog, Dialog::Settings) {
             self.draw_unified_settings(p);
+            return;
+        }
+        if matches!(dialog, Dialog::Search) {
+            self.draw_search_keyboard(p);
             return;
         }
         let cancel = tr("Cancelar", "Cancel·la");
@@ -1709,6 +2096,7 @@ impl Browser {
         };
         let (title, subject, detail, options) = match dialog {
             Dialog::Settings => (tr("Ajustes", "Ajustos"), String::new(), "", ["", ""]),
+            Dialog::Search => (tr("Buscar", "Cerca"), String::new(), "", ["", ""]),
             Dialog::Appearance => (tr("Apariencia", "Aparença"), String::new(), "", ["", ""]),
             Dialog::Accent => (tr("Color de acento", "Color de ressaltat"), String::new(), "", ["", ""]),
             Dialog::Extensions => (tr("Mostrar extensiones", "Mostra les extensions"), String::new(),
@@ -1869,7 +2257,7 @@ impl Browser {
         let card = frame.scaled(scale);
         let radius = USB_STYLE.tile_radius(card, scale);
         let lift = ((scale - 1.0) / (USB_STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
-        let current = self.folders.last().filter(|_| self.favorite_cards().is_none()).and_then(|folder| folder.entries.get(index).map(|entry| (folder, entry)));
+        let current = self.folders.last().filter(|_| self.favorite_cards().is_none() && self.media_cards().is_none() && self.search_cards().is_none()).and_then(|folder| folder.entries.get(index).map(|entry| (folder, entry)));
         let record = current.and_then(|(folder, entry)| {
             let identity = self.identity(&folder.volume)?;
             let path = folder.path.join(&entry.name);
@@ -1906,7 +2294,7 @@ impl Browser {
             p.rect_sheened(fill, 2.5, self.accent(), self.accent());
         }
         if focused && self.action.is_none() {
-            let focus = if self.settings.accent == 0 { theme::CONTROL_FOCUS_RING } else { self.accent() };
+            let focus = self.accent();
             if record == WATCHED { p.rring(card.scaled(0.96), radius, 1.5, focus); }
             else { p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, focus); }
         }
@@ -2576,6 +2964,36 @@ pub(super) fn flush_playback(app: &mut App) {
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn media_folders_match_catalan_spanish_and_english_without_false_positives() {
+        for name in ["PELIS", "Películas", "Peliculas", "Pel·lícules", "Movies", "movie_collection", "Films", "Cine"] {
+            assert!(media_folder_score(name, 1) > 0, "{name}");
+        }
+        for name in ["SERIES", "Sèries", "Series TV", "TV Shows", "tv_series", "Temporadas", "Episodios"] {
+            assert!(media_folder_score(name, 2) > 0, "{name}");
+        }
+        assert_eq!(media_folder_score("Mis documentos", 1), 0);
+        assert_eq!(media_folder_score("The Series Movie.mkv", 2), 0);
+        assert_eq!(media_folder_score("Séries", 1), 0);
+        assert_eq!(folder_fold("TÉLÉ-ÉPISODES"), "teleepisodes");
+    }
+
+    #[test]
+    fn movie_navigation_returns_all_matching_folders_for_one_usb() {
+        let volume = Volume { path: "/tmp/usb/sdb/sdb1".into(), label: None, mount_id: Some(121), system: true };
+        let first = volume.path.join("PELIS");
+        let second = volume.path.join("Películas 4K");
+        let mut browser = Browser::new();
+        browser.scan.volumes.push(volume.clone());
+        browser.discovery_cache.insert((volume.path.clone(), 121, 1), vec![first.clone(), second.clone()]);
+        browser.open_nav_tab(1);
+        assert_eq!(browser.nav_tab, 1);
+        assert_eq!(browser.media_cards().unwrap().paths, vec![first, second]);
+        browser.leave_media();
+        assert_eq!(browser.nav_tab, 0);
+        assert!(browser.media_cards().is_none());
+    }
 
     #[test]
     fn favorites_keeps_its_section_through_folders_and_returns_to_its_cards() {
