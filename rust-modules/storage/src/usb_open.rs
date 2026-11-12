@@ -341,6 +341,23 @@ fn mount_source(line: &[u8]) -> Option<&[u8]> {
     line.split(|byte| *byte == b' ').skip_while(|field| *field != b"-").nth(2)
 }
 
+// Only genuine mounts below /tmp/usb count as mounted partitions. Ignore
+// unrelated mounts of the same block device while verifying the PDM operation.
+fn device_partitions_mounted(table: &[u8], drives: &[&str]) -> bool {
+    let mounts = live_mounts(table);
+    table.split(|byte| *byte == b'\n').any(|line| {
+        let Some(id) = line.split(|byte| *byte == b' ').next()
+            .and_then(|field| std::str::from_utf8(field).ok()?.parse::<u64>().ok()) else { return false };
+        if !mounts.iter().any(|(mount, _)| *mount == id) { return false; }
+        let Some(source) = mount_source(line).and_then(|source| source.strip_prefix(b"/dev/")) else { return false; };
+        let leaf = source.rsplit(|byte| *byte == b'/').next().unwrap_or(source);
+        drives.iter().any(|drive| {
+            let name = drive.as_bytes();
+            name.rsplit(|byte| *byte == b'/').next() == Some(leaf)
+        })
+    })
+}
+
 fn eject_checked(mount_id: &str, path_hex: &str) -> io::Result<()> {
     if unsafe { libc::geteuid() } != 0 { return Err(invalid()); }
     let path = decode_path(path_hex)?;
@@ -360,17 +377,15 @@ fn eject_checked(mount_id: &str, path_hex: &str) -> io::Result<()> {
     let (device, drives) = pdm_device(&status, partition)?;
     require_mount(&path, id)?;
     pdm("eject", &serde_json::json!({"deviceNum": device}))?;
-    // Some USB bridges take several seconds to unmount after PDM accepts eject.
-    for _ in 0..12 {
+    // USB bridges and multi-partition disks can update mountinfo much later
+    // than the PDM reply. This runs in the existing off-frame helper.
+    // Never treat a disappearing UI entry or a successful PDM request as proof.
+    for attempt in 0..30 {
         let table = fs::read("/proc/self/mountinfo")?;
-        let mounted = table.split(|byte| *byte == b'\n').filter_map(mount_source)
-            .filter_map(|device| device.strip_prefix(b"/dev/"))
-            .any(|device| drives.iter().any(|drive| device == drive.as_bytes()
-                || device.rsplit(|byte| *byte == b'/').next() == Some(drive.as_bytes().rsplit(|byte| *byte == b'/').next().unwrap_or_default())));
-        if !mounted { return Ok(()); }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        if !device_partitions_mounted(&table, &drives) { return Ok(()); }
+        if attempt < 29 { std::thread::sleep(std::time::Duration::from_millis(500)); }
     }
-    Err(io::Error::other("webOS still shows partitions mounted after eject"))
+    Err(io::Error::other("safe eject unconfirmed: webOS still reports USB partitions mounted; do not disconnect the disk yet"))
 }
 
 pub fn eject(mount_id: &str, path_hex: &str) -> io::Result<()> {
@@ -526,6 +541,17 @@ mod tests {
         fs::write(&path, sector).unwrap();
         assert_eq!(filesystem_serial(&path).as_deref(), Some("fat:cdab3412"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn eject_mount_verification_ignores_other_devices_and_tmpfs() {
+        let table = b"20 1 0:1 / /tmp/usb/sda/sda1 rw - tmpfs tmpfs rw\n45 1 8:17 / /tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\n46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\n47 1 8:33 / /tmp/usb/sdc/sdc1 rw - vfat /dev/sdc1 rw\n";
+        assert!(device_partitions_mounted(table, &["sdb1", "sdb2"]));
+        assert!(device_partitions_mounted(table, &["/dev/sdb1"]));
+        assert!(!device_partitions_mounted(table, &["sda1"]));
+        assert!(!device_partitions_mounted(table, &["sdd1"]));
+        let after = b"47 1 8:33 / /tmp/usb/sdc/sdc1 rw - vfat /dev/sdc1 rw\n";
+        assert!(!device_partitions_mounted(after, &["sdb1", "sdb2"]));
     }
 
     #[test]
