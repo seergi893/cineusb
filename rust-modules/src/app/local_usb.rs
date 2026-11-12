@@ -1022,10 +1022,18 @@ impl Browser {
         favorite_key(identity, &folder.volume, &root)
     }
 
+    fn video_favorite_target(&self, volume: &Volume, path: &std::path::Path) -> PathBuf {
+        // Opening a series episode must never create an episode-level favorite.
+        self.folders.last().filter(|folder| &folder.volume == volume)
+            .and_then(|_| self.series_root())
+            .filter(|root| path.starts_with(root))
+            .unwrap_or_else(|| path.to_path_buf())
+    }
+
     fn video_favorite_key(&self, volume: &Volume, path: &std::path::Path) -> Option<String> {
         let identity = self.identity(volume)?;
         self.history_loaded.contains(&history_prefix(identity)).then_some(())?;
-        favorite_key(identity, volume, path)
+        favorite_key(identity, volume, &self.video_favorite_target(volume, path))
     }
 
     fn toggle_folder_favorite(&mut self) {
@@ -1275,12 +1283,19 @@ impl Browser {
                     }
                 } else if self.option == 3 {
                     if let Some(key) = self.video_favorite_key(&volume, &path) {
+                        let target = self.video_favorite_target(&volume, &path);
+                        let series = target != path;
                         let marked = self.history_value(&key) == Some(FAVORITE);
                         self.change_history(key, if marked { 0 } else { FAVORITE });
-                        self.status = if marked { tr("Película quitada de favoritos.", "Pel·lícula treta dels favorits.") }
-                            else { tr("Película añadida a favoritos.", "Pel·lícula afegida als favorits.") }.into();
+                        self.status = match (series, marked) {
+                            (true, true) => tr("Serie quitada de favoritos.", "Sèrie treta dels favorits."),
+                            (true, false) => tr("Serie añadida a favoritos.", "Sèrie afegida als favorits."),
+                            (false, true) => tr("Película quitada de favoritos.", "Pel·lícula treta dels favorits."),
+                            (false, false) => tr("Película añadida a favoritos.", "Pel·lícula afegida als favorits."),
+                        }.into();
                         if marked {
-                            if let Some(view) = self.favorite_view.as_mut() { view.paths.retain(|item| item != &path); }
+                            if let Some(view) = self.favorite_view.as_mut() { view.paths.retain(|item| item != &target); }
+                            self.select(self.selected, true);
                         }
                     }
                 } else if self.option == 1 && system_mount(&volume).is_some() {
