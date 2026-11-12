@@ -2149,14 +2149,33 @@ impl Browser {
             p.rring(card, radius, 2.0, theme::USB_WATCHED_EDGE);
         } else { cover.draw(p, card, radius, lift); }
         if let Some((folder, entry)) = current {
-            let star = Rect::new(card.x + card.w - 40.0, card.y + 13.0, 26.0, 26.0);
-            let animation = self.favorite_motion.as_ref().filter(|(path, _, at)|
-                at.elapsed() < MOTION && *path == folder.path.join(&entry.name));
-            if let Some((_, marked, started)) = animation {
-                let alpha = motion_alpha(*started);
-                draw_glyph(p.alpha(1.0 - alpha), Glyph::Star(!marked), star, self.accent());
-                draw_glyph(p.alpha(alpha), Glyph::Star(*marked), star, self.accent());
-            } else if record == FAVORITE { draw_glyph(p, Glyph::Star(true), star, self.accent()); }
+            // A movie keeps its progress under entry_key and its favorite under
+            // favorite_key. A series episode resolves its favorite to the series
+            // folder. Neither may overwrite the independent playback progress.
+            let path = folder.path.join(&entry.name);
+            let target = if entry.kind == Kind::Video {
+                self.video_favorite_target(&folder.volume, &path)
+            } else {
+                path.clone()
+            };
+            let marked = self.identity(&folder.volume)
+                .and_then(|identity| favorite_key(identity, &folder.volume, &target))
+                .and_then(|key| self.history_value(&key))
+                == Some(FAVORITE);
+            let animation = self.favorite_motion.as_ref().filter(|(changed, _, at)|
+                at.elapsed() < MOTION && *changed == target);
+            if marked || animation.is_some() {
+                let badge = Rect::new(card.x + card.w - 46.0, card.y + 10.0, 36.0, 36.0);
+                p.rect_sheened(badge, 18.0, theme::scrim_black(0.72), theme::scrim_black(0.72));
+                let star = Rect::new(badge.x + 6.0, badge.y + 6.0, 24.0, 24.0);
+                if let Some((_, becoming_marked, started)) = animation {
+                    let alpha = motion_alpha(*started);
+                    draw_glyph(p.alpha(1.0 - alpha), Glyph::Star(!becoming_marked), star, self.accent());
+                    draw_glyph(p.alpha(alpha), Glyph::Star(*becoming_marked), star, self.accent());
+                } else {
+                    draw_glyph(p, Glyph::Star(true), star, self.accent());
+                }
+            }
         }
         let video = current.is_some_and(|(_, entry)| entry.kind == Kind::Video);
         if video { widgets::art_scrim(p, card, radius, 68.0, widgets::STILL_SCRIM_A); }
