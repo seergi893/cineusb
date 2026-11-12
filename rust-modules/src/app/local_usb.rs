@@ -25,6 +25,18 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 const MOTION: Duration = Duration::from_millis(160);
+const FAVORITE_MOTION: Duration = Duration::from_millis(340);
+const FAVORITE_YELLOW: [f32; 4] = [0.98, 0.75, 0.24, 1.0];
+
+fn favorite_ease(progress: f32) -> f32 {
+    let t = progress.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn favorite_lerp(from: [f32; 4], to: [f32; 4], alpha: f32) -> [f32; 4] {
+    std::array::from_fn(|index| from[index] + (to[index] - from[index]) * alpha)
+}
+
 const WATCHED: u64 = u64::MAX;
 const FAVORITE: u64 = WATCHED - 1;
 const PACKED: u64 = 1 << 63;
@@ -65,7 +77,7 @@ fn tr(es: &'static str, ca: &'static str) -> &'static str {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Action { Select, DeleteFolders }
+enum Action { ToggleFavorite, Select, DeleteFolders }
 
 enum Mutation { Delete, Eject }
 
@@ -167,7 +179,8 @@ const NAV_TABS: [Rect; 6] = [
     Rect::new(1265.0, 42.0, 290.0, 48.0),
 ];
 // Folder-specific controls sit in the content header, not the navigation.
-const ACTIONS: [(Action, Rect); 2] = [
+const ACTIONS: [(Action, Rect); 3] = [
+    (Action::ToggleFavorite, Rect::new(1020.0, 218.0, 396.0, 55.0)),
     (Action::Select, Rect::new(1430.0, 222.0, 185.0, 45.0)),
     (Action::DeleteFolders, Rect::new(1625.0, 222.0, 185.0, 45.0)),
 ];
@@ -604,7 +617,7 @@ impl Browser {
             changed |= now.duration_since(started) < MOTION;
         } else { self.dialog_started = None; }
         changed |= self.button_motion.is_some_and(|(_, started)| now.duration_since(started) < MOTION);
-        changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < MOTION);
+        changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < FAVORITE_MOTION);
         changed |= self.favorite_section.1.elapsed() < MOTION;
         let selected_tab = if self.favorite_section.0 { 3 } else { self.nav_tab };
         let focused_tab = self.nav_focus.unwrap_or(selected_tab);
@@ -882,6 +895,13 @@ impl Browser {
         });
         self.action = None;
         self.restore_view(0, 0.0);
+        // A media tab opens the *contents* of the discovered category folder,
+        // not another card representing PELIS or SERIES. Keep media_view as
+        // the navigation floor so Back never exposes that container card.
+        if let Some(path) = self.media_view.as_ref().and_then(|view| view.paths.first().cloned()) {
+            let volume = self.media_view.as_ref().expect("media view created").volume.clone();
+            self.open_folder(volume, path);
+        }
     }
 
     fn open_nav_tab(&mut self, tab: usize) {
@@ -988,9 +1008,6 @@ impl Browser {
     fn series_root(&self) -> Option<PathBuf> {
         let folder = self.folders.last()?;
         if folder.path == folder.volume.path || self.favorite_cards().is_some() { return None; }
-        let has_content = folder.entries.iter().any(|entry| entry.kind == Kind::Video
-            || (entry.kind == Kind::Folder && season_folder(&entry.name.to_string_lossy())));
-        if !has_content { return None; }
         let relative = folder.path.strip_prefix(&folder.volume.path).ok()?;
         let parts: Vec<_> = relative.components().filter_map(|component| match component {
             std::path::Component::Normal(name) => Some(name),
@@ -1011,6 +1028,43 @@ impl Browser {
         folder.entries.iter().any(|entry| (entry.kind == Kind::Video && continuity::episode(&entry.name).is_some())
             || (entry.kind == Kind::Folder && season_folder(&entry.name.to_string_lossy())))
             .then(|| folder.path.clone())
+    }
+
+    /// A series favorite belongs to the series folder, not to an individual
+    /// season or episode, even when the series contains no files yet.
+    fn series_favorite_key(&self) -> Option<(PathBuf, String)> {
+        let folder = self.folders.last()?;
+        let root = self.series_root()?;
+        if root != folder.path { return None; }
+        let identity = self.identity(&folder.volume)?;
+        if !self.history_loaded.contains(&history_prefix(identity)) { return None; }
+        let key = favorite_key(identity, &folder.volume, &root)?;
+        Some((root, key))
+    }
+
+    fn toggle_series_favorite(&mut self) {
+        let Some((root, key)) = self.series_favorite_key() else { return; };
+        let was_favorite = self.history_value(&key) == Some(FAVORITE);
+        self.change_history(key, if was_favorite { 0 } else { FAVORITE });
+        if let Some(view) = &mut self.favorite_view {
+            if was_favorite { view.paths.retain(|path| *path != root); }
+            else if !view.paths.contains(&root) {
+                view.paths.push(root.clone());
+                view.paths.sort();
+            }
+        }
+        self.favorite_motion = Some((root, !was_favorite, Instant::now()));
+        self.status = if was_favorite {
+            tr("Serie quitada de favoritos.", "Sèrie treta dels favorits.")
+        } else {
+            tr("Serie añadida a favoritos.", "Sèrie afegida als favorits.")
+        }.into();
+        plx_machine::idle::invalidate();
+    }
+
+    fn video_is_episode(&self, volume: &Volume, path: &std::path::Path) -> bool {
+        self.folders.last().is_some_and(|folder| &folder.volume == volume)
+            && self.series_root().is_some_and(|root| path.starts_with(root))
     }
 
     fn video_favorite_target(&self, volume: &Volume, path: &std::path::Path) -> PathBuf {
@@ -1163,6 +1217,7 @@ impl Browser {
 
     fn action_available(&self, action: Action) -> bool {
         match action {
+            Action::ToggleFavorite => self.selection.is_none() && self.series_favorite_key().is_some(),
             Action::Select => self.selection.is_some() || (self.favorite_cards().is_none() && self.folders.last().is_some_and(|folder| {
                 folder.path != folder.volume.path && system_mount(&folder.volume).is_some() && folder.entries.iter().any(|entry| entry.kind == Kind::Folder)
             })),
@@ -1176,6 +1231,7 @@ impl Browser {
         self.status.clear();
         self.loading_favorites = false;
         self.dialog = match action {
+            Action::ToggleFavorite => { self.toggle_series_favorite(); None },
             Action::Select => {
                 self.selection = self.selection.is_none().then(BTreeSet::new);
                 self.action = None;
@@ -1251,7 +1307,7 @@ impl Browser {
                         let watched = self.history_value(&key) == Some(WATCHED);
                         self.change_history(key, if watched { 0 } else { WATCHED });
                     }
-                } else if self.option == 3 {
+                } else if self.option == 3 && !self.video_is_episode(&volume, &path) {
                     if let Some(key) = self.video_favorite_key(&volume, &path) {
                         let target = self.video_favorite_target(&volume, &path);
                         let series = target != path;
@@ -1486,6 +1542,16 @@ impl Browser {
             self.status.clear();
             return;
         }
+        if self.media_view.as_ref().is_some_and(|view| {
+            self.folders.len() == view.depth + 1
+                && self.folders.last().is_some_and(|folder| view.paths.first() == Some(&folder.path))
+        }) {
+            // At the direct category root, Back returns to the drive picker.
+            // The category container is deliberately never shown as a card.
+            self.leave_media();
+            self.status.clear();
+            return;
+        }
         let Some(folder) = self.folders.pop() else {
             plx_platform::tv::home::go_home();
             return;
@@ -1659,7 +1725,9 @@ impl Browser {
     }
 
     fn horizontal_options(&self) -> &'static [Rect] {
-        if matches!(self.dialog, Some(Dialog::Video { .. })) { &VIDEO_OPTIONS } else { &OPTIONS }
+        if matches!(self.dialog, Some(Dialog::Video { ref volume, ref path }) if self.video_is_episode(volume, path)) {
+            &VIDEO_OPTIONS[..3]
+        } else if matches!(self.dialog, Some(Dialog::Video { .. })) { &VIDEO_OPTIONS } else { &OPTIONS }
     }
 
     fn option_available(&self, index: usize) -> bool {
@@ -1669,7 +1737,8 @@ impl Browser {
                 self.identity(volume).is_some_and(|identity| self.history_loaded.contains(&history_prefix(identity)))
                     && self.video_history_key(volume, path).is_some()
             }
-            Some(Dialog::Video { volume, path }) if index == 3 => self.video_favorite_key(volume, path).is_some(),
+            Some(Dialog::Video { volume, path }) if index == 3 =>
+                !self.video_is_episode(volume, path) && self.video_favorite_key(volume, path).is_some(),
             _ => true,
         }
     }
