@@ -492,6 +492,15 @@ impl Browser {
                         self.scanning = None;
                         self.next_scan = Instant::now();
                     }
+                    DiskResult::Searched(volume, paths) => {
+                        if self.scan.volumes.contains(&volume) {
+                            self.enter_search(volume, paths);
+                            self.status = if self.search_cards().is_some_and(|view| view.paths.is_empty()) {
+                                tr("No hay vídeos que coincidan. Pulsa Buscar para otra búsqueda.",
+                                    "No hi ha vídeos coincidents. Prem Cerca per tornar a cercar.").into()
+                            } else { String::new() };
+                        }
+                    }
                     DiskResult::Discovered(volume, kind, paths) => {
                         if self.scan.volumes.contains(&volume) {
                             self.discovery_cache.insert((volume.path.clone(), volume.mount_id.unwrap_or(0), kind), paths.clone());
@@ -1378,6 +1387,13 @@ impl Browser {
 
     fn open(&mut self) {
         if self.pending.is_some() { return; }
+        if let Some(view) = self.search_cards() {
+            if let Some(path) = view.paths.get(self.selected) {
+                self.dialog = Some(Dialog::Video { volume: view.volume.clone(), path: path.clone() });
+                self.option = 0;
+            }
+            return;
+        }
         if let Some(view) = self.media_cards().or_else(|| self.favorite_cards()) {
             if let Some(path) = view.paths.get(self.selected) {
                 self.open_folder(view.volume.clone(), path.clone());
@@ -1504,11 +1520,16 @@ impl Browser {
             self.status.clear();
             return;
         }
+        if self.search_cards().is_some() {
+            self.leave_search();
+            self.status.clear();
+            return;
+        }
         let Some(folder) = self.folders.pop() else {
             plx_platform::tv::home::go_home();
             return;
         };
-        let (index, scroll) = if let Some(view) = self.media_cards().or_else(|| self.favorite_cards()) {
+        let (index, scroll) = if let Some(view) = self.search_cards().or_else(|| self.media_cards()).or_else(|| self.favorite_cards()) {
             (view.selected, view.scroll)
         } else if let Some(parent) = self.folders.last() {
             (parent.selected, parent.scroll)
@@ -1693,6 +1714,10 @@ impl Browser {
     }
 
     fn item(&self, index: usize) -> Option<(String, &'static str, Cover)> {
+        if let Some(view) = self.search_cards() {
+            let path = view.paths.get(index)?;
+            return Some((path.file_stem()?.to_string_lossy().into_owned(), tr("Vídeo", "Vídeo"), Cover::Movie));
+        }
         if let Some(view) = self.media_cards() {
             let path = view.paths.get(index)?;
             let name = path.file_name()?.to_string_lossy().into_owned();
@@ -1765,7 +1790,9 @@ impl Browser {
             parts.join("   /   ")
         });
         let focused = self.item(self.selected);
-        let (title, detail, greeting_icon) = if self.media_cards().is_some() {
+        let (title, detail, greeting_icon) = if self.search_cards().is_some() {
+            (tr("Resultados de búsqueda", "Resultats de la cerca"), "", None)
+        } else if self.media_cards().is_some() {
             (if self.nav_tab == 1 { tr("Películas", "Pel·lícules") } else { tr("Series", "Sèries") }, "", None)
         } else if self.favorite_cards().is_some() {
             (tr("Carpetas favoritas", "Carpetes favorites"), "", None)
@@ -1798,7 +1825,10 @@ impl Browser {
         draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, 226.0, 920.0, 37.0), theme::size::CAPTION, false);
 
         if self.len() == 0 {
-            let message = if self.media_cards().is_some() {
+            let message = if self.search_cards().is_some() {
+                tr("No hay vídeos con ese nombre. Pulsa Buscar para repetir la búsqueda.",
+                    "No hi ha vídeos amb aquest nom. Prem Cerca per tornar a cercar.")
+            } else if self.media_cards().is_some() {
                 tr("No hay carpetas de esta categoría. Pulsa Inicio para navegar manualmente.",
                     "No hi ha carpetes d'aquesta categoria. Prem Inici per navegar manualment.")
             } else if self.favorite_cards().is_some() {
@@ -1987,6 +2017,10 @@ impl Browser {
             self.draw_unified_settings(p);
             return;
         }
+        if matches!(dialog, Dialog::Search) {
+            self.draw_search_keyboard(p);
+            return;
+        }
         let cancel = tr("Cancelar", "Cancel·la");
         let save_status = |description: &'static str| {
             if matches!(self.settings_job, Some(SettingsJob::Save(_))) { tr("Guardando…", "Desant…") }
@@ -1995,6 +2029,7 @@ impl Browser {
         };
         let (title, subject, detail, options) = match dialog {
             Dialog::Settings => (tr("Ajustes", "Ajustos"), String::new(), "", ["", ""]),
+            Dialog::Search => (tr("Buscar", "Cerca"), String::new(), "", ["", ""]),
             Dialog::Appearance => (tr("Apariencia", "Aparença"), String::new(), "", ["", ""]),
             Dialog::Accent => (tr("Color de acento", "Color de ressaltat"), String::new(), "", ["", ""]),
             Dialog::Extensions => (tr("Mostrar extensiones", "Mostra les extensions"), String::new(),
@@ -2155,7 +2190,7 @@ impl Browser {
         let card = frame.scaled(scale);
         let radius = USB_STYLE.tile_radius(card, scale);
         let lift = ((scale - 1.0) / (USB_STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
-        let current = self.folders.last().filter(|_| self.favorite_cards().is_none() && self.media_cards().is_none()).and_then(|folder| folder.entries.get(index).map(|entry| (folder, entry)));
+        let current = self.folders.last().filter(|_| self.favorite_cards().is_none() && self.media_cards().is_none() && self.search_cards().is_none()).and_then(|folder| folder.entries.get(index).map(|entry| (folder, entry)));
         let record = current.and_then(|(folder, entry)| {
             let identity = self.identity(&folder.volume)?;
             let path = folder.path.join(&entry.name);
