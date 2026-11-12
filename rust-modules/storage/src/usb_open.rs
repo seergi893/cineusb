@@ -418,18 +418,28 @@ fn eject_checked(mount_id: &str, path_hex: &str) -> io::Result<()> {
     let partition = source.rsplit('/').next().ok_or_else(invalid)?;
     let (device, drives) = pdm_device(&status, partition)?;
     require_mount(&path, id)?;
-    pdm("eject", &serde_json::json!({"deviceNum": device}))?;
-    // Give webOS time to detach the disk itself. The TV's NTFS driver can
-    // leave tntfs mounted even after PDM accepts the eject request.
-    for _ in 0..6 {
-        let table = fs::read("/proc/self/mountinfo")?;
-        if !device_partitions_mounted(&table, &drives) { return Ok(()); }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    let request = pdm("eject", &serde_json::json!({"deviceNum": device}));
+    // Let the TV's device manager detach the disk first. Some webOS NTFS
+    // builds reject PDM eject while tntfs is still mounted; we can still
+    // safely flush and unmount that verified partition before retrying PDM.
+    if request.is_ok() {
+        for _ in 0..6 {
+            let table = fs::read("/proc/self/mountinfo")?;
+            if !device_partitions_mounted(&table, &drives) { return Ok(()); }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
     }
     let table = fs::read("/proc/self/mountinfo")?;
-    // Fall back ONLY for verified NTFS partitions. A regular unmount waits
-    // for dirty writes and refuses busy volumes; never use MNT_FORCE or DETACH.
-    let _ = unmount_still_live_ntfs(&table, &drives)?;
+    if device_partitions_mounted(&table, &drives) {
+        // Fall back ONLY for verified NTFS partitions. A regular unmount
+        // flushes dirty writes and refuses busy volumes; never force/detach.
+        let _ = unmount_still_live_ntfs(&table, &drives)?;
+    }
+    if request.is_err() {
+        // After a successful clean unmount the physical eject request may
+        // succeed, but an unavailable PDM must not invalidate safe removal.
+        let _ = pdm("eject", &serde_json::json!({"deviceNum": device}));
+    }
     for attempt in 0..16 {
         let table = fs::read("/proc/self/mountinfo")?;
         if !device_partitions_mounted(&table, &drives) { return Ok(()); }
