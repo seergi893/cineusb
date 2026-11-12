@@ -5,7 +5,7 @@
   "type": "native",
   "main": "plxnative",
   "title": "CineUSB",
-  "appDescription": "Desenvolupat per Sergi Sans. CineUSB permet reproduir pel·lícules i sèries directament des d'un USB en televisors LG webOS, sense Plex ni servidors. Inclou navegació per carpetes, favorits, progrés de reproducció i selecció d'àudio i subtítols.",
+  "appDescription": "Developed by Sergi Sans. CineUSB plays movies and TV series directly from USB storage on LG webOS TVs, without Plex or external servers. Browse folders, manage favorites, track playback progress, and select audio and subtitle tracks.",
   "icon": "icon.png",
   "largeIcon": "largeIcon.png",
   "iconColor": "#10172A",
