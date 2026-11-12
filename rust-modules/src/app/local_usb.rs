@@ -939,6 +939,7 @@ impl Browser {
 
     fn open_nav_tab(&mut self, tab: usize) {
         if self.pending.is_some() || self.mutating { return; }
+        let previous_focus = self.nav_focus;
         self.nav_focus = None;
         self.action = None;
         self.option = 0;
@@ -979,7 +980,7 @@ impl Browser {
             }
             4 => {
                 self.settings_exit = None;
-                self.settings_return_focus = self.nav_focus.or(Some(self.nav_tab));
+                self.settings_return_focus = previous_focus.or(Some(4));
                 self.dialog = Some(Dialog::Settings);
                 self.dialog_started = Some(Instant::now());
                 self.status.clear();
@@ -3127,7 +3128,7 @@ mod usb_browser_tests {
         assert!(matches!(browser.dialog, Some(Dialog::Settings)));
         browser.back();
         assert!(browser.dialog.is_none());
-        assert_eq!(browser.nav_focus, Some(2));
+        assert_eq!(browser.nav_focus, Some(4));
         assert!(browser.settings_exit.is_some());
     }
 
