@@ -1064,7 +1064,8 @@ impl Browser {
 
     fn video_is_episode(&self, volume: &Volume, path: &std::path::Path) -> bool {
         self.folders.last().is_some_and(|folder| &folder.volume == volume)
-            && self.series_root().is_some_and(|root| path.starts_with(root))
+            && (self.series_root().is_some_and(|root| path.starts_with(root))
+                || path.file_name().is_some_and(|name| continuity::episode(name).is_some()))
     }
 
     fn video_favorite_target(&self, volume: &Volume, path: &std::path::Path) -> PathBuf {
@@ -1784,12 +1785,18 @@ impl Browser {
         art::draw_brand(p, Rect::new(x, 29.0, 76.0, 76.0));
         for (action, rect) in ACTIONS {
             if self.action_available(action) {
+                if action == Action::ToggleFavorite {
+                    self.draw_series_favorite(p, rect);
+                    continue;
+                }
                 let label = match action {
+                    Action::ToggleFavorite => continue,
                     Action::Select if self.selection.is_some() => tr("Cancelar", "Cancel·la"),
                     Action::Select => tr("Seleccionar", "Selecciona"),
                     Action::DeleteFolders => tr("Eliminar", "Esborra"),
                 };
                 let glyph = match action {
+                    Action::ToggleFavorite => None,
                     Action::Select => Some(Glyph::Shared(Icon::CheckCircleFill)),
                     Action::DeleteFolders => Some(Glyph::Trash),
                 };
@@ -2160,6 +2167,44 @@ impl Browser {
 
     /// A compact, clearly stateful favorite action in the video's own menu.
     /// Series favorites are still resolved from an episode to the series root.
+    fn draw_series_favorite(&self, p: Painter, rect: Rect) {
+        let Some((root, key)) = self.series_favorite_key() else { return };
+        let marked = self.history_value(&key) == Some(FAVORITE);
+        let focused = self.action == Some(Action::ToggleFavorite);
+        // A real 340 ms transition, reversing the yellow fill when removed.
+        let alpha = self.favorite_motion.as_ref()
+            .filter(|(changed, _, _)| changed == &root)
+            .map_or(if marked { 1.0 } else { 0.0 }, |(_, target, at)| {
+                let t = favorite_ease(at.elapsed().as_secs_f32() / FAVORITE_MOTION.as_secs_f32());
+                if *target { t } else { 1.0 - t }
+            });
+        let pop = self.favorite_motion.as_ref()
+            .filter(|(changed, _, at)| changed == &root && at.elapsed() < FAVORITE_MOTION)
+            .map_or(0.0, |(_, _, at)| {
+                let t = (at.elapsed().as_secs_f32() / FAVORITE_MOTION.as_secs_f32()).clamp(0.0, 1.0);
+                (t * std::f32::consts::PI).sin()
+            });
+        let rect = rect.scaled(1.0 + pop * 0.018);
+        let neutral = if focused { self.accent() } else { theme::CONTROL_IDLE_FILL };
+        let background = favorite_lerp(neutral, FAVORITE_YELLOW, alpha);
+        let ink = favorite_lerp(if focused { theme::ACCENT_INK } else { theme::TEXT_PRIMARY },
+            [0.16, 0.13, 0.08, 1.0], alpha);
+        widgets::draw_control_face(p, rect, background, focused, widgets::ControlGround::Keyed);
+        if focused { p.rring(rect, rect.h * 0.5, 2.0, theme::CONTROL_FOCUS_RING); }
+        if pop > 0.0 {
+            p.alpha(pop * 0.72).rring(rect.scaled(1.02), rect.h * 0.5, 1.7, FAVORITE_YELLOW);
+        }
+        let label = if marked { tr("Quitar de favoritos", "Treure dels favorits") }
+            else { tr("Añadir a favoritos", "Afegir als favorits") };
+        let star = Rect::new(rect.x + 18.0, rect.y + (rect.h - 27.0) * 0.5, 27.0, 27.0)
+            .scaled(1.0 + 0.17 * pop);
+        draw_glyph(p.alpha(1.0 - alpha), Glyph::Star(false), star, ink);
+        draw_glyph(p.alpha(alpha), Glyph::Star(true), star, ink);
+        let fitted = TtfMeasure.fit_line(label, rect.w - 75.0, theme::size::CAPTION, true);
+        Label::new(fitted.as_ptr(), theme::size::CAPTION, ink).h(HAlign::Center).bold()
+            .draw(p, Rect::new(rect.x + 57.0, rect.y, rect.w - 69.0, rect.h));
+    }
+
     fn draw_favorite_chip(&self, p: Painter, rect: Rect, label: &str, marked: bool, focused: bool) {
         let scale = self.button_motion.filter(|(pressed, at)| *pressed == rect && at.elapsed() < MOTION)
             .map_or(1.0, |(_, at)| 0.975 + motion_alpha(at) * 0.025);
