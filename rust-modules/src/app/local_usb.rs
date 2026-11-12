@@ -135,14 +135,9 @@ fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'s
 
 enum Dialog {
     Settings,
-    Language,
-    ForcedSubtitles,
-    Audio,
-    AutoNext,
     Appearance,
     Accent,
     Cards,
-    Sort,
     Extensions,
     Resume(u64),
     Next { volume: Volume, path: PathBuf, deadline: Instant },
@@ -935,16 +930,11 @@ impl Browser {
                 if size_changed || sort_changed { self.select(self.selected, true); }
                 i18n::apply_usb_language(settings.language);
                 if saving {
-                    self.option = match self.dialog {
-                        Some(Dialog::ForcedSubtitles) => 1,
-                        Some(Dialog::Audio) => 2,
-                        Some(Dialog::AutoNext) => 3,
-                        Some(Dialog::Sort) => 5,
-                        Some(Dialog::Cards) => 1,
-                        Some(Dialog::Extensions) => 2,
-                        _ => 0,
-                    };
-                    self.dialog = Some(if matches!(self.dialog, Some(Dialog::Accent | Dialog::Cards | Dialog::Extensions)) { Dialog::Appearance } else { Dialog::Settings });
+                    // The unified screen keeps its current focus when a value is saved.
+                    // Do not resurrect obsolete per-setting dialogs or reset the selection.
+                    if matches!(self.dialog, Some(Dialog::Accent | Dialog::Cards | Dialog::Extensions)) {
+                        self.dialog = Some(Dialog::Appearance);
+                    }
                     self.status.clear();
                 }
             }
@@ -1052,19 +1042,6 @@ impl Browser {
                 self.dialog = Some(Dialog::Settings);
                 self.cycle_unified_setting(1);
             }
-            Some(Dialog::Language) => {
-                let language = if self.option == 0 { Preference::Es } else { Preference::Ca };
-                self.dialog = Some(Dialog::Language);
-                self.change_settings(Settings { language, ..self.settings });
-            }
-            Some(Dialog::ForcedSubtitles) => {
-                self.dialog = Some(Dialog::ForcedSubtitles);
-                self.change_settings(Settings { forced_subtitles: self.option == 1, ..self.settings });
-            }
-            Some(Dialog::Audio) => {
-                self.dialog = Some(Dialog::Audio);
-                self.change_settings(Settings { spanish_audio: self.option == 1, ..self.settings });
-            }
             Some(Dialog::Appearance) => {
                 (self.dialog, self.option) = match self.option {
                     0 => (Some(Dialog::Accent), self.settings.accent),
@@ -1072,13 +1049,11 @@ impl Browser {
                     _ => (Some(Dialog::Extensions), usize::from(self.settings.extensions)),
                 };
             }
-            Some(dialog @ (Dialog::AutoNext | Dialog::Accent | Dialog::Cards | Dialog::Sort | Dialog::Extensions)) => {
+            Some(dialog @ (Dialog::Accent | Dialog::Cards | Dialog::Extensions)) => {
                 let mut settings = self.settings;
                 match dialog {
-                    Dialog::AutoNext => settings.auto_next = self.option == 1,
                     Dialog::Accent => settings.accent = self.option,
                     Dialog::Cards => settings.cards = self.option,
-                    Dialog::Sort => settings.sort = self.option,
                     Dialog::Extensions => settings.extensions = self.option == 1,
                     _ => unreachable!(),
                 }
@@ -1290,7 +1265,7 @@ impl Browser {
         if let Some(dialog) = self.dialog.take() {
             self.prepared = None;
             self.dialog = match dialog {
-                Dialog::Language | Dialog::ForcedSubtitles | Dialog::Audio | Dialog::AutoNext | Dialog::Appearance | Dialog::Sort => Some(Dialog::Settings),
+                Dialog::Appearance => Some(Dialog::Settings),
                 Dialog::Accent | Dialog::Cards | Dialog::Extensions => Some(Dialog::Appearance),
                 Dialog::Delete { volume, path } => Some(Dialog::Video { volume, path }),
                 _ => None,
@@ -1330,7 +1305,7 @@ impl Browser {
         match self.dialog {
             Some(Dialog::Settings) => UNIFIED_SETTINGS_COUNT,
             Some(Dialog::Appearance) => 3,
-            Some(Dialog::Accent | Dialog::Cards | Dialog::Sort) => 3,
+            Some(Dialog::Accent | Dialog::Cards) => 3,
             _ => 0,
         }
     }
@@ -1739,20 +1714,6 @@ impl Browser {
             Dialog::Extensions => (tr("Mostrar extensiones", "Mostra les extensions"), String::new(),
                 save_status(""), [tr("Ocultar", "Amaga-les"), tr("Mostrar", "Mostra-les")]),
             Dialog::Cards => (tr("Tamaño de tarjetas", "Mida de les targetes"), String::new(), "", ["", ""]),
-            Dialog::Sort => (tr("Biblioteca USB · Orden", "Biblioteca USB · Ordre"), String::new(), "", ["", ""]),
-            Dialog::AutoNext => (tr("Siguiente episodio automático", "Episodi següent automàtic"), String::new(),
-                save_status(tr("Se aplica a episodios consecutivos de la misma carpeta.", "S’aplica a episodis seguits de la mateixa carpeta.")),
-                [tr("Desactivado", "Desactivat"), tr("Activado", "Activat")]),
-            Dialog::Language => (tr("Idioma de CineUSB", "Idioma del CineUSB"), String::new(),
-                save_status(tr("Elige el idioma de la app.", "Tria en quin idioma vols fer servir l’app.")),
-                ["Castellano", "Català"]),
-            Dialog::ForcedSubtitles => (tr("Subtítulos forzados", "Subtítols forçats"), String::new(),
-                save_status(tr("Se activan al reproducir si hay una pista compatible.",
-                    "S’activen quan poses un vídeo si hi ha una pista compatible.")),
-                [tr("Desactivados", "Desactivats"), tr("Activados", "Activats")]),
-            Dialog::Audio => (tr("Idioma de audio predeterminado", "Idioma d’àudio per defecte"), String::new(),
-                save_status(tr("Se aplica al abrir cada vídeo.", "S’aplica quan obres un vídeo.")),
-                [tr("Automático", "Automàtic"), tr("Español", "Castellà")]),
             Dialog::Resume(_) => (tr("Reanudar reproducción", "Continua mirant"),
                 self.prepared.as_ref().map_or_else(String::new, |media| media.title.clone()), "",
                 ["", tr("Empezar desde el principio", "Torna a començar")]),
@@ -1797,7 +1758,6 @@ impl Browser {
             Dialog::Appearance => &[tr("Color de acento", "Color de ressaltat"), tr("Tamaño de tarjetas", "Mida de les targetes"), tr("Mostrar extensiones", "Mostra les extensions")],
             Dialog::Accent => &[tr("Morado", "Lila"), tr("Azul", "Blau"), tr("Gris neutro", "Gris neutre")],
             Dialog::Cards => &[tr("Normal", "Normal"), tr("Compacto", "Compacte"), tr("Grande", "Gran")],
-            Dialog::Sort => &[tr("Nombre", "Nom"), tr("Fecha de modificación", "Data de modificació"), tr("Tamaño", "Mida")],
             _ => &[],
         };
         if !labels.is_empty() {
