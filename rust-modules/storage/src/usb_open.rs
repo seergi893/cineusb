@@ -357,9 +357,9 @@ fn device_partitions_mounted(table: &[u8], drives: &[&str]) -> bool {
 /// A webOS PDM eject can report success while the tntfs/NTFS mount remains
 /// live. Only then try a regular, synchronous unmount. Never force/lazy-unmount,
 /// and never touch a partition outside the selected physical USB device.
-fn unmount_still_live_ntfs(table: &[u8], drives: &[&str]) -> io::Result<usize> {
+fn ntfs_mountpoints(table: &[u8], drives: &[&str]) -> io::Result<Vec<PathBuf>> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    for line in table.split(|byte| *byte == b'\\n') {
+    for line in table.split(|byte| *byte == b'\n') {
         let mut fields = line.split(|byte| *byte == b' ');
         let _ = fields.next();
         let _ = fields.next();
@@ -384,6 +384,11 @@ fn unmount_still_live_ntfs(table: &[u8], drives: &[&str]) -> io::Result<usize> {
     }
     // Child mountpoints must be unmounted before their parents.
     candidates.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    Ok(candidates)
+}
+
+fn unmount_still_live_ntfs(table: &[u8], drives: &[&str]) -> io::Result<usize> {
+    let candidates = ntfs_mountpoints(table, drives)?;
     for mount in &candidates {
         let handle = File::open(mount)?;
         if unsafe { libc::syncfs(handle.as_raw_fd()) } != 0 {
@@ -619,10 +624,13 @@ mod tests {
     #[test]
     fn ntfs_unmount_candidates_reject_other_devices_and_unsupported_mounts() {
         // Pure parsing of a mount table; no unmount calls are performed here.
-        let table = b"45 1 8:17 / /tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\\n46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\\n";
+        let table = b"45 1 8:17 / /tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\n46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\n";
         assert!(device_partitions_mounted(table, &["sdb1"]));
         assert!(!device_partitions_mounted(table, &["sdc1"]));
-        let unsupported = b"46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\\n";
+        assert_eq!(ntfs_mountpoints(table, &["sdb1"]).unwrap(),
+            vec![PathBuf::from("/tmp/usb/sdb/sdb1")]);
+        assert!(ntfs_mountpoints(table, &["sdb1", "sdb2"]).is_err());
+        let unsupported = b"46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\n";
         assert!(unmount_still_live_ntfs(unsupported, &["sdb2"]).is_err());
     }
 
