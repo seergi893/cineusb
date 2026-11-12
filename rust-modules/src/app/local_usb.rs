@@ -2,6 +2,7 @@
 mod art;
 mod continuity;
 mod disk;
+mod search;
 
 use art::Cover;
 use super::{App, Key, playback};
@@ -162,6 +163,12 @@ const NAV_TABS: [Rect; 4] = [
     Rect::new(1124.0, 42.0, 139.0, 48.0),
 ];
 
+const SEARCH_KEYS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const SEARCH_KEY_COUNT: usize = 40;
+fn search_key_rect(index: usize) -> Rect {
+    Rect::new(350.0 + (index % 10) as f32 * 122.0, 342.0 + (index / 10) as f32 * 102.0, 104.0, 79.0)
+}
+
 const UNIFIED_SETTINGS_COUNT: usize = 8;
 fn unified_setting_rect(index: usize) -> Rect {
     Rect::new(825.0, 168.0 + index as f32 * 98.0, 975.0, 58.0)
@@ -199,6 +206,7 @@ fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'s
 
 enum Dialog {
     Settings,
+    Search,
     Appearance,
     Accent,
     Cards,
@@ -255,6 +263,7 @@ enum DiskResult {
     Eject(Volume, Result<(), String>),
     Favorites(Volume, Vec<PathBuf>, Vec<PathBuf>),
     Discovered(Volume, usize, Vec<PathBuf>),
+    Searched(Volume, Vec<PathBuf>),
 }
 
 type VolumeFacts = (Option<(u64, u64, u64, bool)>, Option<String>);
@@ -328,6 +337,10 @@ pub(super) struct Browser {
     loading_favorites: bool,
     favorite_view: Option<FavoriteView>,
     media_view: Option<FavoriteView>,
+    search_view: Option<FavoriteView>,
+    search_target: Option<Volume>,
+    search_query: String,
+    search_key: usize,
     nav_tab: usize,
     nav_focus: Option<usize>,
     discovery_cache: BTreeMap<(PathBuf, u64, usize), Vec<PathBuf>>,
@@ -360,7 +373,8 @@ impl Browser {
             progress_job: None, queued_progress: Default::default(), countdown_display: 0,
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
             queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_view: None,
-            media_view: None, nav_tab: 0, nav_focus: None, discovery_cache: BTreeMap::new(),
+            media_view: None, search_view: None, search_target: None, search_query: String::new(),
+            search_key: 0, nav_tab: 0, nav_focus: None, discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
             dialog_started: None, button_motion: None, favorite_motion: None,
             ejecting: None, eject_feedback: None,
@@ -369,6 +383,7 @@ impl Browser {
     }
 
     fn len(&self) -> usize {
+        if let Some(view) = self.search_cards() { return view.paths.len(); }
         if let Some(view) = self.media_cards() { return view.paths.len(); }
         self.favorite_cards().map_or_else(|| self.folders.last().map_or(self.scan.volumes.len(), |folder| folder.entries.len()), |view| view.paths.len())
     }
@@ -845,6 +860,55 @@ impl Browser {
         });
     }
 
+    fn search_cards(&self) -> Option<&FavoriteView> {
+        self.search_view.as_ref().filter(|view| view.depth == self.folders.len())
+    }
+
+    fn leave_search(&mut self) {
+        if let Some(view) = self.search_view.take() {
+            self.folders.truncate(view.depth);
+            self.restore_view(view.library_selected, view.library_scroll);
+        }
+        if self.nav_tab == 3 { self.nav_tab = 0; }
+    }
+
+    fn enter_search(&mut self, volume: Volume, paths: Vec<PathBuf>) {
+        self.leave_favorites();
+        self.leave_media();
+        self.leave_search();
+        let selected = self.selected;
+        let scroll = self.scroll.pos;
+        self.search_view = Some(FavoriteView {
+            volume, paths, depth: self.folders.len(), selected: 0, scroll: 0.0,
+            library_selected: selected, library_scroll: scroll,
+        });
+        self.nav_tab = 3;
+        self.search_target = None;
+        self.restore_view(0, 0.0);
+    }
+
+    fn submit_search(&mut self) {
+        if self.search_query.trim().is_empty() { return; }
+        let Some(volume) = self.search_target.take() else { return };
+        let query = self.search_query.clone();
+        self.dialog = None;
+        self.status = tr("Buscando vídeos en el USB…", "Buscant vídeos a l'USB…").into();
+        self.request(move || DiskResult::Searched(volume.clone(), search::filenames(&volume, &query)));
+    }
+
+    fn choose_search_key(&mut self) {
+        match self.search_key {
+            0..=35 if self.search_query.len() < 32 => {
+                if let Some(ch) = SEARCH_KEYS.chars().nth(self.search_key) { self.search_query.push(ch); }
+            }
+            36 if self.search_query.len() < 32 => self.search_query.push(' '),
+            37 => self.search_query.clear(),
+            38 => { self.search_query.pop(); },
+            39 => self.submit_search(),
+            _ => {}
+        }
+    }
+
     fn media_cards(&self) -> Option<&FavoriteView> {
         self.media_view.as_ref().filter(|view| view.depth == self.folders.len())
     }
@@ -860,6 +924,7 @@ impl Browser {
     fn enter_media(&mut self, volume: Volume, kind: usize, paths: Vec<PathBuf>) {
         self.leave_favorites();
         self.leave_media();
+        self.leave_search();
         self.nav_tab = kind;
         let selected = self.selected;
         let scroll = self.scroll.pos;
@@ -876,14 +941,21 @@ impl Browser {
         self.action = None;
         if tab == 0 {
             self.leave_media();
+            self.leave_search();
             self.leave_favorites();
             self.open_library_root();
             self.nav_tab = 0;
             return;
         }
         if tab == 3 {
-            self.status = tr("Búsqueda local USB: selecciona primero Películas o Series y navega por las carpetas.",
-                "Cerca local USB: tria primer Pel·lícules o Sèries i navega per les carpetes.").into();
+            let Some(volume) = self.volume().cloned() else {
+                self.status = tr("Selecciona un disco para buscar.", "Tria un disc per cercar.").into();
+                return;
+            };
+            self.search_target = Some(volume);
+            self.search_key = 0;
+            self.dialog = Some(Dialog::Search);
+            self.status.clear();
             return;
         }
         let Some(volume) = self.volume().cloned() else {
