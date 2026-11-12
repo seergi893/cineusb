@@ -341,14 +341,10 @@ fn mount_source(line: &[u8]) -> Option<&[u8]> {
     line.split(|byte| *byte == b' ').skip_while(|field| *field != b"-").nth(2)
 }
 
-// Only genuine mounts below /tmp/usb count as mounted partitions. Ignore
-// unrelated mounts of the same block device while verifying the PDM operation.
+// The whole physical USB device must be clear, even if one partition is also
+// mounted elsewhere. Ignore tmpfs placeholders but never another real mount.
 fn device_partitions_mounted(table: &[u8], drives: &[&str]) -> bool {
-    let mounts = live_mounts(table);
     table.split(|byte| *byte == b'\n').any(|line| {
-        let Some(id) = line.split(|byte| *byte == b' ').next()
-            .and_then(|field| std::str::from_utf8(field).ok()?.parse::<u64>().ok()) else { return false };
-        if !mounts.iter().any(|(mount, _)| *mount == id) { return false; }
         let Some(source) = mount_source(line).and_then(|source| source.strip_prefix(b"/dev/")) else { return false; };
         let leaf = source.rsplit(|byte| *byte == b'/').next().unwrap_or(source);
         drives.iter().any(|drive| {
@@ -544,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn eject_mount_verification_ignores_other_devices_and_tmpfs() {
+    fn eject_mount_verification_checks_all_partitions_and_ignores_tmpfs() {
         let table = b"20 1 0:1 / /tmp/usb/sda/sda1 rw - tmpfs tmpfs rw\n45 1 8:17 / /tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\n46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\n47 1 8:33 / /tmp/usb/sdc/sdc1 rw - vfat /dev/sdc1 rw\n";
         assert!(device_partitions_mounted(table, &["sdb1", "sdb2"]));
         assert!(device_partitions_mounted(table, &["/dev/sdb1"]));
@@ -552,6 +548,8 @@ mod tests {
         assert!(!device_partitions_mounted(table, &["sdd1"]));
         let after = b"47 1 8:33 / /tmp/usb/sdc/sdc1 rw - vfat /dev/sdc1 rw\n";
         assert!(!device_partitions_mounted(after, &["sdb1", "sdb2"]));
+        let other_mount = b"52 1 8:17 / /media/other rw - tntfs /dev/sdb1 rw\n";
+        assert!(device_partitions_mounted(other_mount, &["sdb1", "sdb2"]));
     }
 
     #[test]
