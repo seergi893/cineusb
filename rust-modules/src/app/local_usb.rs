@@ -2873,6 +2873,72 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn six_navigation_destinations_stay_in_one_stationary_track() {
+        assert_eq!(NAV_TABS.len(), 6);
+        let first = NAV_TABS.first().unwrap();
+        let last = NAV_TABS.last().unwrap();
+        assert!(first.x >= NAV_PILL.x && first.y >= NAV_PILL.y);
+        assert!(last.x + last.w <= NAV_PILL.x + NAV_PILL.w);
+        assert!(last.y + last.h <= NAV_PILL.y + NAV_PILL.h);
+        for pair in NAV_TABS.windows(2) {
+            assert_eq!(pair[0].y, pair[1].y);
+            assert_eq!(pair[0].h, pair[1].h);
+            assert!(pair[0].x + pair[0].w < pair[1].x,
+                "navigation actions must never overlap");
+        }
+        assert!(NAV_PILL.x + NAV_PILL.w <= 1920.0);
+    }
+
+    #[test]
+    fn series_favorites_use_one_root_from_episode_and_season_views() {
+        let volume = Volume { path: "/tmp/usb/sdb/sdb1".into(), label: None, mount_id: Some(42), system: true };
+        let series = volume.path.join("SERIES/Breaking Bad");
+        let season = series.join("Season 01");
+        let mut browser = Browser::new();
+        browser.scan.volumes.push(volume.clone());
+        let entry = |name: &str, kind: Kind| Entry {
+            name: name.into(), kind, modified: None, size: None,
+        };
+        browser.folders.push(Folder {
+            volume: volume.clone(), path: volume.path.join("SERIES"),
+            entries: vec![entry("Breaking Bad", Kind::Folder)],
+            collection: None, selected: 0, scroll: 0.0,
+        });
+        assert_eq!(browser.series_root(), None,
+            "category folders must never be favoritable");
+        browser.folders.push(Folder {
+            volume: volume.clone(), path: series.clone(),
+            entries: vec![entry("Season 01", Kind::Folder)],
+            collection: None, selected: 0, scroll: 0.0,
+        });
+        assert_eq!(browser.series_root(), Some(series.clone()));
+        let episode = season.join("Breaking Bad S01E01.mkv");
+        browser.folders.push(Folder {
+            volume: volume.clone(), path: season,
+            entries: vec![entry("Breaking Bad S01E01.mkv", Kind::Video)],
+            collection: None, selected: 0, scroll: 0.0,
+        });
+        assert_eq!(browser.series_root(), Some(series.clone()));
+        assert_eq!(browser.video_favorite_target(&volume, &episode), series);
+    }
+
+    #[test]
+    fn movie_favorites_keep_a_single_file_and_reopen_its_video_dialog() {
+        let volume = Volume { path: "/tmp/usb/sdb/sdb1".into(), label: None, mount_id: Some(42), system: true };
+        let movie = volume.path.join("PELIS/Crash.mkv");
+        let mut browser = Browser::new();
+        browser.scan.volumes.push(volume.clone());
+        assert_eq!(browser.video_favorite_target(&volume, &movie), movie);
+        browser.enter_favorites(volume.clone(), vec![movie.clone()]);
+        assert_eq!(browser.len(), 1);
+        assert_eq!(browser.item(0).unwrap().1, tr("Vídeo", "Vídeo"));
+        browser.open();
+        assert!(matches!(browser.dialog, Some(Dialog::Video { ref volume, ref path })
+            if volume == &browser.scan.volumes[0] && path == &movie));
+        assert_eq!(VIDEO_OPTIONS.len(), 4);
+    }
+
+    #[test]
     fn movie_navigation_returns_all_matching_folders_for_one_usb() {
         let volume = Volume { path: "/tmp/usb/sdb/sdb1".into(), label: None, mount_id: Some(121), system: true };
         let first = volume.path.join("PELIS");
