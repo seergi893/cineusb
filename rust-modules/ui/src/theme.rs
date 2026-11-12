@@ -1518,3 +1518,17 @@ pub const USB_WATCHED_EDGE: [f32; 4] = rgb8(0x42, 0xc9, 0x85);
 /// Independent active treatment for the USB favorites section.
 pub const USB_FAVORITES: [f32; 4] = rgb8(0xf5, 0xc8, 0x4c);
 pub const USB_FAVORITES_GROUND: [f32; 4] = rgb8(0x3d, 0x31, 0x1a);
+
+#[cfg(test)]
+mod cineusb_accent_regression_tests {
+    use super::*;
+
+    #[test]
+    fn first_option_is_lilac_not_default_blue() {
+        assert_eq!(usb_accent(0), rgb8(0xa7, 0x8b, 0xfa));
+        assert_ne!(usb_accent(0), usb_accent(1));
+        assert_ne!(usb_accent(0), usb_accent(2));
+        assert_eq!(usb_accent(1), rgb8(0x91, 0xbc, 0xff));
+        assert_eq!(usb_accent(2), rgb8(0xc2, 0xc6, 0xcc));
+    }
+}
