@@ -117,6 +117,17 @@ fn media_folder_score(name: &str, kind: usize) -> u8 {
     else { 0 }
 }
 
+fn is_video_path(path: &std::path::Path) -> bool {
+    path.file_name().and_then(|name| disk::media_entry(name.to_os_string(), false))
+        .is_some_and(|entry| entry.kind == Kind::Video)
+}
+
+fn season_folder(name: &str) -> bool {
+    let name = folder_fold(name);
+    name.starts_with("season") || name.starts_with("temporada") || name.starts_with("temporades")
+        || (name.len() > 1 && name.starts_with('s') && name[1..].bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn discover_media_folders(volume: &Volume, kind: usize) -> Vec<PathBuf> {
     let mut matched = Vec::new();
     let mut level = vec![volume.path.clone()];
@@ -252,7 +263,7 @@ enum DiskResult {
     Delete(PathBuf, Result<(), String>),
     DeleteFolders { removed: Vec<OsString>, total: usize, error: Option<String>, entries: io::Result<Vec<Entry>> },
     Eject(Volume, Result<(), String>),
-    Favorites(Volume, Vec<PathBuf>, Vec<PathBuf>),
+    Favorites(Volume, Vec<PathBuf>),
     Discovered(Volume, usize, Vec<PathBuf>),
 }
 
@@ -417,7 +428,6 @@ impl Browser {
                     DiskResult::Folder(volume, path, Ok(mut entries)) => {
                         disk::sort_entries_by(&mut entries, self.settings.sort);
                         let collection = path.strip_prefix(&volume.path).ok().and_then(art::collection);
-                        self.prune_missing_favorites(&volume, &path, &entries);
                         self.folders.push(Folder { volume, path, entries, collection, selected: 0, scroll: 0.0 });
                         self.select(0, true);
                         self.status.clear();
@@ -489,9 +499,8 @@ impl Browser {
                             } else { self.status.clear(); }
                         }
                     }
-                    DiskResult::Favorites(volume, paths, missing) => {
+                    DiskResult::Favorites(volume, paths) => {
                         if self.volume() == Some(&volume) {
-                            for path in missing { self.remove_history_under(&volume, &path); }
                             self.enter_favorites(volume, paths);
                             self.status.clear();
                         } else if self.favorite_view.is_none() {
@@ -808,18 +817,6 @@ impl Browser {
         }).collect()
     }
 
-    fn prune_missing_favorites(&mut self, volume: &Volume, parent: &std::path::Path, entries: &[Entry]) {
-        for path in self.favorites(volume) {
-            if let Ok(relative) = path.strip_prefix(parent) {
-                if let Some(std::path::Component::Normal(child)) = relative.components().next() {
-                    if !entries.iter().any(|entry| entry.kind == Kind::Folder && entry.name == child) {
-                        self.remove_history_under(volume, &path);
-                    }
-                }
-            }
-        }
-    }
-
     fn show_favorites(&mut self) {
         let Some(volume) = self.volume().cloned() else { return };
         if let Some(identity) = self.identity(&volume) {
@@ -836,7 +833,6 @@ impl Browser {
         let favorites = self.favorites(&volume);
         self.request(move || {
             let mut paths = Vec::new();
-            let mut missing = Vec::new();
             let mut listings = BTreeMap::new();
             for path in favorites {
                 let Some(parent) = path.parent() else { continue };
@@ -846,10 +842,11 @@ impl Browser {
                 let mut proven = true;
                 for (index, directory) in ancestors.iter().enumerate() {
                     let child = ancestors.get(index + 1).copied().unwrap_or(&path);
+                    let required = if index + 1 == ancestors.len() && is_video_path(&path) { Kind::Video } else { Kind::Folder };
                     let entries = listings.entry(directory.to_path_buf()).or_insert_with(|| list_folder(directory, system_mount(&volume)));
                     match entries {
-                        Ok(entries) if !entries.iter().any(|entry| entry.kind == Kind::Folder && Some(entry.name.as_os_str()) == child.file_name()) => {
-                            missing.push(path.clone()); proven = false; break;
+                        Ok(entries) if !entries.iter().any(|entry| entry.kind == required && Some(entry.name.as_os_str()) == child.file_name()) => {
+                            proven = false; break;
                         }
                         Ok(_) => {}
                         Err(_) => { proven = false; break; }
@@ -857,7 +854,7 @@ impl Browser {
                 }
                 if proven { paths.push(path); }
             }
-            DiskResult::Favorites(volume, paths, missing)
+            DiskResult::Favorites(volume, paths)
         });
     }
 
@@ -987,18 +984,53 @@ impl Browser {
         self.select(selected, true);
     }
 
-    fn folder_favorite_key(&self) -> Option<String> {
-        if self.favorite_cards().is_some() { return None; }
+    // Resolve a season back to its series. Never mark the category folder itself.
+    fn series_root(&self) -> Option<PathBuf> {
         let folder = self.folders.last()?;
+        if folder.path == folder.volume.path || self.favorite_cards().is_some() { return None; }
+        let has_content = folder.entries.iter().any(|entry| entry.kind == Kind::Video
+            || (entry.kind == Kind::Folder && season_folder(&entry.name.to_string_lossy())));
+        if !has_content { return None; }
+        let relative = folder.path.strip_prefix(&folder.volume.path).ok()?;
+        let parts: Vec<_> = relative.components().filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name),
+            _ => None,
+        }).collect();
+        if let Some(index) = parts.iter().position(|name| media_folder_score(&name.to_string_lossy(), 2) > 0) {
+            if parts.get(index + 1).is_some() {
+                let mut root = folder.volume.path.clone();
+                for part in &parts[..=index + 1] { root.push(part); }
+                return Some(root);
+            }
+            return None;
+        }
+        if folder.path.file_name().is_some_and(|name| season_folder(&name.to_string_lossy())) {
+            return folder.path.parent().filter(|parent| *parent != folder.volume.path).map(std::path::Path::to_path_buf);
+        }
+        // Without a recognized category, require episode-like titles or season folders.
+        folder.entries.iter().any(|entry| (entry.kind == Kind::Video && continuity::episode(&entry.name).is_some())
+            || (entry.kind == Kind::Folder && season_folder(&entry.name.to_string_lossy())))
+            .then(|| folder.path.clone())
+    }
+
+    fn folder_favorite_key(&self) -> Option<String> {
+        let folder = self.folders.last()?;
+        let root = self.series_root()?;
         let identity = self.identity(&folder.volume)?;
         self.history_loaded.contains(&history_prefix(identity)).then_some(())?;
-        favorite_key(identity, &folder.volume, &folder.path)
+        favorite_key(identity, &folder.volume, &root)
+    }
+
+    fn video_favorite_key(&self, volume: &Volume, path: &std::path::Path) -> Option<String> {
+        let identity = self.identity(volume)?;
+        self.history_loaded.contains(&history_prefix(identity)).then_some(())?;
+        favorite_key(identity, volume, path)
     }
 
     fn toggle_folder_favorite(&mut self) {
         let Some(key) = self.folder_favorite_key() else { return };
         let marked = self.history_value(&key) == Some(FAVORITE);
-        let path = self.folders.last().map(|folder| folder.path.clone());
+        let path = self.series_root();
         self.change_history(key, if marked { 0 } else { FAVORITE });
         if let Some(path) = path {
             if let Some(view) = &mut self.favorite_view {
@@ -1010,8 +1042,8 @@ impl Browser {
             }
             self.favorite_motion = Some((path, !marked, Instant::now()));
         }
-        self.status = if marked { tr("Carpeta quitada de favoritos.", "Carpeta treta dels favorits.") }
-            else { tr("Carpeta añadida a favoritos.", "Carpeta afegida als favorits.") }.into();
+        self.status = if marked { tr("Serie quitada de favoritos.", "Sèrie treta dels favorits.") }
+            else { tr("Serie añadida a favoritos.", "Sèrie afegida als favorits.") }.into();
     }
 
     fn detail_key(folder: &Folder, entry: &Entry) -> DetailKey {
@@ -1328,7 +1360,12 @@ impl Browser {
         if self.pending.is_some() { return; }
         if let Some(view) = self.media_cards().or_else(|| self.favorite_cards()) {
             if let Some(path) = view.paths.get(self.selected) {
-                self.open_folder(view.volume.clone(), path.clone());
+                if is_video_path(path) {
+                    self.dialog = Some(Dialog::Video { volume: view.volume.clone(), path: path.clone() });
+                    self.option = 0;
+                } else {
+                    self.open_folder(view.volume.clone(), path.clone());
+                }
             }
             return;
         }
@@ -1649,9 +1686,12 @@ impl Browser {
         }
         if let Some(view) = self.favorite_cards() {
             let path = view.paths.get(index)?;
+            if is_video_path(path) {
+                return Some((path.file_stem()?.to_string_lossy().into_owned(), tr("Vídeo", "Vídeo"), Cover::Movie));
+            }
             let name = path.file_name()?.to_string_lossy().into_owned();
             let cover = path.strip_prefix(&view.volume.path).ok().and_then(art::collection).unwrap_or(Cover::Folder);
-            return Some((name, tr("Carpeta", "Carpeta"), cover));
+            return Some((name, tr("Sèrie", "Sèrie"), cover));
         }
         if let Some(folder) = self.folders.last() {
             let entry = folder.entries.get(index)?;
