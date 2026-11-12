@@ -271,6 +271,8 @@ pub(super) struct Browser {
     dialog_started: Option<Instant>,
     button_motion: Option<(Rect, Instant)>,
     favorite_motion: Option<(PathBuf, bool, Instant)>,
+    ejecting: Option<Volume>,
+    eject_feedback: Option<(Volume, bool, Instant)>,
     estimate: Option<(i64, plx_appkit::player_hud::model::FinishClock)>,
     next_estimate: Option<Instant>,
     estimate_anchor: Option<(i64, i32)>,
@@ -295,7 +297,9 @@ impl Browser {
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
             queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_view: None,
             favorite_section: (false, now, 0.0),
-            dialog_started: None, button_motion: None, favorite_motion: None, estimate: None, next_estimate: None, estimate_anchor: None,
+            dialog_started: None, button_motion: None, favorite_motion: None,
+            ejecting: None, eject_feedback: None,
+            estimate: None, next_estimate: None, estimate_anchor: None,
         }
     }
 
@@ -417,16 +421,19 @@ impl Browser {
                         }
                     }
                     DiskResult::Eject(volume, result) => {
-                        if result.is_ok() {
+                        let success = result.is_ok();
+                        if success {
                             self.scan.volumes.retain(|item| *item != volume);
                             self.leave_favorites();
                             self.folders.clear();
                             self.action = None;
                             self.select(0, true);
                         }
-                        self.finish_mutation(result, tr("Ya puedes retirar el disco USB.", "Ja pots treure el disc USB."),
+                        self.finish_mutation(result, tr("USB expulsado correctamente.", "USB expulsat correctament."),
                             tr("No se pudo expulsar el USB. Cierra las apps que lo usan y vuelve a intentarlo.",
-                                "No s’ha pogut expulsar l’USB. Tanca les aplicacions que el fan servir i torna-ho a provar."));
+                                "No s'ha pogut expulsar l'USB. Tanca les aplicacions que el fan servir i torna-ho a provar."));
+                        self.ejecting = None;
+                        self.eject_feedback = Some((volume, success, Instant::now()));
                     }
                 }
             }
@@ -434,6 +441,9 @@ impl Browser {
                 self.pending = None;
                 self.mutating = false;
                 self.progress = None;
+                if let Some(volume) = self.ejecting.take() {
+                    self.eject_feedback = Some((volume, false, Instant::now()));
+                }
                 self.status = tr("Se interrumpió la operación.", "L’operació s’ha interromput.").into();
                 changed = true;
             }
@@ -500,6 +510,12 @@ impl Browser {
         changed |= self.button_motion.is_some_and(|(_, started)| now.duration_since(started) < MOTION);
         changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < MOTION);
         changed |= self.favorite_section.1.elapsed() < MOTION;
+        if self.eject_feedback.as_ref().is_some_and(|(_, success, start)| *success && start.elapsed() >= Duration::from_secs(3)) {
+            self.eject_feedback = None;
+            changed = true;
+        }
+        changed |= self.eject_feedback.as_ref().is_some_and(|(_, success, start)|
+            *success && start.elapsed() < Duration::from_secs(3));
         changed |= self.update_video_details();
         if self.action.is_some_and(|action| !self.action_available(action)) {
             self.action = None;
@@ -1112,11 +1128,14 @@ impl Browser {
             Some(Dialog::Eject(volume)) if self.option == 1 => {
                 if !self.scan.volumes.contains(&volume) { return; }
                 self.status = tr("Expulsando disco…", "Expulsant el disc…").into();
+                self.ejecting = Some(volume.clone());
+                self.eject_feedback = None;
                 self.request(move || {
                     let result = mutate_usb(Mutation::Eject, &volume, &volume.path);
                     DiskResult::Eject(volume, result)
                 });
                 self.mutating = self.pending.is_some();
+                if !self.mutating { self.ejecting = None; }
             }
             _ => {}
         }
@@ -1320,6 +1339,12 @@ impl Browser {
     }
 
     fn click(&mut self, x: f32, y: f32) {
+        if self.eject_feedback.is_some() {
+            if hit(Rect::new(510.0, 292.0, 900.0, 496.0), x, y) {
+                self.eject_feedback = None;
+            }
+            return;
+        }
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
@@ -1361,6 +1386,17 @@ impl Browser {
     }
 
     fn key(&mut self, key: Key, repeat: bool) {
+        if self.eject_feedback.is_some() {
+            if !repeat && matches!(key, Key::Ok | Key::Back) {
+                if let Some((volume, success, _)) = self.eject_feedback.take() {
+                    if !success && matches!(key, Key::Ok) && self.scan.volumes.contains(&volume) {
+                        self.dialog = Some(Dialog::Eject(volume));
+                        self.option = 1;
+                    }
+                }
+            }
+            return;
+        }
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
@@ -1595,6 +1631,39 @@ impl Browser {
             cursor = draw_hint(p, cursor, HintKey::Ok, primary);
             draw_hint(p, cursor, HintKey::Icon(Icon::ChevronLeft), back);
         }
+        self.draw_eject_feedback(p);
+    }
+
+    fn draw_eject_feedback(&self, p: Painter) {
+        let state = self.eject_feedback.as_ref().map(|(volume, success, at)| (volume, Some(*success), *at))
+            .or_else(|| self.ejecting.as_ref().map(|volume| (volume, None, Instant::now())));
+        let Some((volume, result, started)) = state else { return };
+        let progress = (started.elapsed().as_secs_f32() / 0.75).clamp(0.0, 1.0);
+        let smooth = progress * progress * (3.0 - 2.0 * progress);
+        let panel = Rect::new(550.0, 300.0, 820.0, 480.0);
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.72), theme::scrim_black(0.72), 0.0);
+        p.shadow_outside(panel, 28.0, theme::MENU_SHADOW_BLUR, theme::MENU_SHADOW_DY, theme::MENU_SHADOW);
+        p.rect_sheened(panel, 28.0, theme::MENU_GLASS_TOP, theme::MENU_GLASS_BOT);
+        let center = Rect::new(906.0, 344.0 - smooth * 16.0, 106.0, 106.0).scaled(0.9 + 0.1 * smooth);
+        match result {
+            Some(true) if smooth > 0.65 => icons::draw(p, Icon::Check, center, theme::USB_FAVORITES),
+            Some(false) => icons::draw(p, Icon::Alert, center, theme::DANGER),
+            _ => draw_glyph(p, Glyph::Eject, center, theme::TEXT_PRIMARY),
+        }
+        let headline = match result {
+            Some(true) => tr("USB expulsado correctamente", "USB expulsat correctament"),
+            Some(false) => tr("No se pudo expulsar el USB", "No s'ha pogut expulsar l'USB"),
+            None => tr("Expulsando USB…", "Expulsant l'USB…"),
+        };
+        draw_line(p, headline, Rect::new(630.0, 477.0, 660.0, 58.0), theme::size::HEADLINE, true);
+        draw_line(p, &volume_name(volume), Rect::new(655.0, 539.0, 610.0, 48.0), theme::size::BODY, false);
+        let description = match result {
+            Some(true) => tr("Ya puedes desconectar el dispositivo con seguridad.", "Ja pots desconnectar el dispositiu amb seguretat."),
+            Some(false) => tr("Comprueba que no haya archivos en uso. Pulsa OK para reintentar o Atrás para cerrar.",
+                "Comprova que no hi hagi fitxers oberts. Prem OK per reintentar o Enrere per tancar."),
+            None => tr("Espera a que termine la operación.", "Espera que acabi l'operació."),
+        };
+        draw_line(p, description, Rect::new(620.0, 602.0, 690.0, 85.0), theme::size::CAPTION, false);
     }
 
     fn draw_storage(&self, p: Painter, volume: &Volume, (total, used, free, readonly): (u64, u64, u64, bool)) {
