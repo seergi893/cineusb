@@ -3006,17 +3006,27 @@ mod usb_browser_tests {
     }
 
     #[test]
-    fn favorite_actions_live_in_the_video_dialog_not_the_folder_header() {
-        // Header actions are only selection and deletion; no favorite button
-        // overlaps them or appears on a series/category folder.
-        assert_eq!(ACTIONS.len(), 2);
-        assert!(matches!(ACTIONS[0].0, Action::Select));
-        assert!(matches!(ACTIONS[1].0, Action::DeleteFolders));
-        assert!(ACTIONS[0].1.x + ACTIONS[0].1.w < ACTIONS[1].1.x);
-        assert!(ACTIONS[1].1.x + ACTIONS[1].1.w <= 1920.0);
-        // The fourth video-dialog action is the dedicated favorite chip.
-        assert_eq!(VIDEO_OPTIONS.len(), 4);
-        assert!(VIDEO_OPTIONS[3].x + VIDEO_OPTIONS[3].w <= PANEL.x + PANEL.w);
+    fn series_favorite_is_a_distinct_header_action_with_no_overlap() {
+        assert_eq!(ACTIONS.len(), 3);
+        assert!(matches!(ACTIONS[0].0, Action::ToggleFavorite));
+        assert!(matches!(ACTIONS[1].0, Action::Select));
+        assert!(matches!(ACTIONS[2].0, Action::DeleteFolders));
+        for pair in ACTIONS.windows(2) {
+            assert!(pair[0].1.x + pair[0].1.w < pair[1].1.x);
+        }
+        assert!(ACTIONS[2].1.x + ACTIONS[2].1.w <= 1920.0);
+        assert_eq!(VIDEO_OPTIONS.len(), 4, "movies keep the favorite option");
+    }
+
+    #[test]
+    fn reversible_favorite_fill_is_clamped_and_never_snaps_to_yellow() {
+        assert_eq!(favorite_ease(-1.0), 0.0);
+        assert_eq!(favorite_ease(1.5), 1.0);
+        assert!(favorite_ease(0.25) < 0.25);
+        assert!(favorite_ease(0.75) > 0.75);
+        assert_eq!(favorite_lerp([0.0; 4], FAVORITE_YELLOW, 0.0), [0.0; 4]);
+        assert_eq!(favorite_lerp([0.0; 4], FAVORITE_YELLOW, 1.0), FAVORITE_YELLOW);
+        assert_eq!(FAVORITE_MOTION, Duration::from_millis(340));
     }
 
     #[test]
@@ -3050,6 +3060,10 @@ mod usb_browser_tests {
         });
         assert_eq!(browser.series_root(), Some(series.clone()));
         assert_eq!(browser.video_favorite_target(&volume, &episode), series);
+        assert!(browser.video_is_episode(&volume, &episode));
+        browser.dialog = Some(Dialog::Video { volume: volume.clone(), path: episode });
+        assert_eq!(browser.horizontal_options().len(), 3, "episodes never show a favorite action");
+        assert!(!browser.option_available(3));
     }
 
     #[test]
@@ -3065,7 +3079,22 @@ mod usb_browser_tests {
         browser.open();
         assert!(matches!(browser.dialog, Some(Dialog::Video { ref volume, ref path })
             if volume == &browser.scan.volumes[0] && path == &movie));
-        assert_eq!(VIDEO_OPTIONS.len(), 4);
+        assert_eq!(browser.horizontal_options().len(), 4);
+        assert!(!browser.video_is_episode(&volume, &movie));
+    }
+
+    #[test]
+    fn empty_series_still_has_one_series_root_not_a_season_root() {
+        let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: None, system: false };
+        let mut browser = Browser::new();
+        let series = volume.path.join("SERIES/Empty Show");
+        browser.folders.push(Folder { volume: volume.clone(), path: series.clone(),
+            entries: vec![], collection: Some(Cover::Series), selected: 0, scroll: 0.0 });
+        assert_eq!(browser.series_root(), Some(series));
+        assert!(!browser.video_is_episode(&volume, &volume.path.join("PELIS/Movie.mkv")));
+        browser.folders.push(Folder { volume: volume.clone(), path: volume.path.join("SERIES/Empty Show/Season 01"),
+            entries: vec![], collection: Some(Cover::Series), selected: 0, scroll: 0.0 });
+        assert_eq!(browser.series_root(), Some(volume.path.join("SERIES/Empty Show")));
     }
 
     #[test]
@@ -3078,10 +3107,39 @@ mod usb_browser_tests {
         browser.discovery_cache.insert((volume.path.clone(), 121, 1), vec![first.clone(), second.clone()]);
         browser.open_nav_tab(1);
         assert_eq!(browser.nav_tab, 1);
-        assert_eq!(browser.media_cards().unwrap().paths, vec![first, second]);
+        assert_eq!(browser.media_cards().unwrap().paths, vec![first.clone(), second]);
+        assert!(browser.pending.is_some(), "Pelis loads the category's files directly");
+        assert_eq!(browser.nav_tab, 1);
+        assert!(browser.folders.is_empty(), "the category isn't a visible card");
+        browser.pending = None;
+        browser.folders.push(Folder { volume: volume.clone(), path: first.clone(),
+            entries: vec![], collection: Some(Cover::Movie), selected: 0, scroll: 0.0 });
+        assert!(browser.media_cards().is_none(), "category contents replace the folder picker");
+        browser.back();
+        assert!(browser.folders.is_empty(), "Back skips the category container");
+        assert_eq!(browser.nav_tab, 0);
         browser.leave_media();
         assert_eq!(browser.nav_tab, 0);
         assert!(browser.media_cards().is_none());
+    }
+
+    #[test]
+    fn series_tab_opens_directly_and_a_missing_category_has_an_empty_view() {
+        let volume = Volume { path: "/tmp/usb/sdb/sdb1".into(), label: None, mount_id: None, system: false };
+        let mut browser = Browser::new();
+        browser.scan.volumes.push(volume.clone());
+        let series = volume.path.join("SERIES");
+        browser.discovery_cache.insert((volume.path.clone(), 0, 2), vec![series]);
+        browser.open_nav_tab(2);
+        assert_eq!(browser.nav_tab, 2);
+        assert!(browser.pending.is_some());
+        browser.pending = None;
+        browser.leave_media();
+        browser.discovery_cache.insert((volume.path.clone(), 0, 2), vec![]);
+        browser.open_nav_tab(2);
+        assert!(browser.media_cards().is_some_and(|view| view.paths.is_empty()));
+        assert_eq!(browser.len(), 0);
+        assert!(browser.pending.is_none());
     }
 
     #[test]
