@@ -350,6 +350,7 @@ pub(super) struct Browser {
     favorite_motion: Option<(PathBuf, bool, Instant)>,
     ejecting: Option<(Volume, Instant)>,
     eject_feedback: Option<(Volume, bool, Instant)>,
+    eject_uncertain: bool,
     estimate: Option<(i64, plx_appkit::player_hud::model::FinishClock)>,
     next_estimate: Option<Instant>,
     estimate_anchor: Option<(i64, i32)>,
@@ -377,7 +378,7 @@ impl Browser {
             search_key: 0, nav_tab: 0, nav_focus: None, discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
             dialog_started: None, button_motion: None, favorite_motion: None,
-            ejecting: None, eject_feedback: None,
+            ejecting: None, eject_feedback: None, eject_uncertain: false,
             estimate: None, next_estimate: None, estimate_anchor: None,
         }
     }
@@ -522,6 +523,8 @@ impl Browser {
                     }
                     DiskResult::Eject(volume, result) => {
                         let success = result.is_ok();
+                        self.eject_uncertain = result.as_ref().err()
+                            .is_some_and(|error| error.starts_with("safe eject unconfirmed:"));
                         if success {
                             self.scan.volumes.retain(|item| *item != volume);
                             self.discovery_cache.retain(|(path, _, _), _| *path != volume.path);
@@ -1337,6 +1340,7 @@ impl Browser {
                 self.status = tr("Expulsando disco…", "Expulsant el disc…").into();
                 self.ejecting = Some((volume.clone(), Instant::now()));
                 self.eject_feedback = None;
+                self.eject_uncertain = false;
                 self.request(move || {
                     let result = mutate_usb(Mutation::Eject, &volume, &volume.path);
                     DiskResult::Eject(volume, result)
@@ -1936,6 +1940,7 @@ impl Browser {
         }
         let headline = match result {
             Some(true) => tr("USB expulsado correctamente", "USB expulsat correctament"),
+            Some(false) if self.eject_uncertain => tr("Expulsión USB sin confirmar", "Expulsió USB sense confirmar"),
             Some(false) => tr("No se pudo expulsar el USB", "No s'ha pogut expulsar l'USB"),
             None => tr("Expulsando USB…", "Expulsant l'USB…"),
         };
@@ -1943,6 +1948,8 @@ impl Browser {
         draw_line(p, &volume_name(volume), Rect::new(655.0, 539.0, 610.0, 48.0), theme::size::BODY, false);
         let description = match result {
             Some(true) => tr("Ya puedes desconectar el dispositivo con seguridad.", "Ja pots desconnectar el dispositiu amb seguretat."),
+            Some(false) if self.eject_uncertain => tr("No desconectes el disco: webOS aún muestra particiones montadas.",
+                "No desconnectis el disc: webOS encara mostra particions muntades."),
             Some(false) => tr("Comprueba que no haya archivos en uso. Pulsa OK para reintentar o Atrás para cerrar.",
                 "Comprova que no hi hagi fitxers oberts. Prem OK per reintentar o Enrere per tancar."),
             None => tr("Espera a que termine la operación.", "Espera que acabi l'operació."),
