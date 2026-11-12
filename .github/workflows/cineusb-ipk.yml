@@ -10,9 +10,14 @@ on:
       - ci/check-package.py
       - pkg/appinfo.json
       - ipkroot/ctl/control
-      - rust-modules/Cargo.toml
-      - rust-modules/Cargo.lock
-      - rust-modules/src/app/local_usb/**
+      # Rebuild for all Rust sources, including local_usb.rs and the privileged
+      # storage helper usb_open.rs (not just the local_usb/ directory).
+      - rust-modules/**
+      - .github/actions/**
+      - Makefile
+      - ci/**
+      - pkg/**
+      - ipkroot/**
   workflow_dispatch:
 
 permissions:
