@@ -89,6 +89,17 @@ impl Pointer {
         }
     }
 
+    pub(crate) fn enter_dpad_mode(&mut self) {
+        if !self.dpad_mode || !self.cur_hidden {
+            unsafe { hide_cursor(); }
+        }
+        self.dpad_mode = true;
+        self.cur_hidden = true;
+        self.back_cursor = None;
+        self.mot_accum = 0.0;
+        self.edge.stop();
+    }
+
     pub(crate) fn click_is_ok(&self, on_control: bool, transparent: bool) -> bool {
         (transparent && self.back_cursor_active())
             || click_is_ok(self.dpad_mode, self.mot_accum, on_control, transparent)
@@ -1281,14 +1292,7 @@ pub(crate) unsafe fn begin_fresh_press(
         key,
         Key::Up | Key::Down | Key::Left { alt: false } | Key::Right { alt: false }
     ) {
-        if !ptr.dpad_mode || !ptr.cur_hidden {
-            hide_cursor();
-        }
-        ptr.dpad_mode = true;
-        ptr.cur_hidden = true;
-        ptr.back_cursor = None;
-        ptr.mot_accum = 0.0;
-        ptr.edge.stop();
+        ptr.enter_dpad_mode();
     }
 }
 

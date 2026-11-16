@@ -1510,6 +1510,14 @@ pub fn usb_accent(index: usize) -> [f32; 4] {
     [rgb8(0xa7, 0x8b, 0xfa), rgb8(0x91, 0xbc, 0xff), rgb8(0xc2, 0xc6, 0xcc)][index]
 }
 
+/// Blue-gray ground and translucent chrome for the USB drive picker.
+pub const USB_HOME_TOP: [f32; 4] = rgb8(0x30, 0x46, 0x5e);
+pub const USB_HOME_BOTTOM: [f32; 4] = rgb8(0x3b, 0x55, 0x70);
+pub const USB_CHROME_TOP: [f32; 4] = with_a(WHITE, 0.085);
+pub const USB_CHROME_BOTTOM: [f32; 4] = with_a(WHITE, 0.045);
+pub const USB_DRIVE_TOP: [f32; 4] = rgb8(0x34, 0x56, 0x73);
+pub const USB_DRIVE_BOTTOM: [f32; 4] = rgb8(0x1b, 0x34, 0x50);
+
 /// Watched USB cards use green independently of the chosen accent.
 pub const USB_WATCHED_TOP: [f32; 4] = rgb8(0x16, 0x3b, 0x2c);
 pub const USB_WATCHED_BOTTOM: [f32; 4] = rgb8(0x20, 0x54, 0x3d);

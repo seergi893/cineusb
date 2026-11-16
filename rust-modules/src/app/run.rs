@@ -1237,7 +1237,10 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
             } else {
                 key
             };
-            if et == SDL_KEYDOWN {
+            if et == SDL_KEYDOWN || usb_key == Key::PointerHidden {
+                if matches!(usb_key, Key::Up | Key::Down | Key::Left { alt: false } | Key::Right { alt: false }) {
+                    app.ptr.enter_dpad_mode();
+                }
                 super::local_usb::key(app, usb_key, state & 0x100 != 0);
             }
             return;
@@ -1586,6 +1589,13 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
             }
             app.ptr.dpad_mode = false;
         }
+        #[cfg(feature = "local-usb")]
+        if app.route() == AppArg::LocalUsb {
+            if !super::bridge::player_arriving(&app.pages) {
+                super::local_usb::pointer(app, mx, my);
+            }
+            return;
+        }
         // Hover is the tree's on every screen it owns — `ui::route_screen`'s rule 11
         // ("hover parks focus on every screen in the family") is the HIT MAP's job now.
         // Three hand-written arms stood here, keyed by the same open-state flags the key
@@ -1619,8 +1629,12 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // otherwise the selected USB volume looks clickable but never opens.
         #[cfg(feature = "local-usb")]
         if app.route() == AppArg::LocalUsb && !super::bridge::player_arriving(&app.pages) {
-            let (cx, cy) = ptr_xy(&app.ev);
-            super::local_usb::click(app, cx, cy);
+            if app.ptr.dpad_mode && super::boot::cursor_is_transparent() {
+                super::local_usb::key(app, Key::Ok, false);
+            } else {
+                let (cx, cy) = ptr_xy(&app.ev);
+                super::local_usb::click(app, cx, cy);
+            }
             return;
         }
         // OK on a set whose pointer the app can only make transparent: see `click_is_ok`. Pushed
