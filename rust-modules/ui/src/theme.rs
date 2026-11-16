@@ -1515,6 +1515,8 @@ pub const USB_HOME_TOP: [f32; 4] = rgb8(0x30, 0x46, 0x5e);
 pub const USB_HOME_BOTTOM: [f32; 4] = rgb8(0x3b, 0x55, 0x70);
 pub const USB_CHROME_TOP: [f32; 4] = with_a(WHITE, 0.085);
 pub const USB_CHROME_BOTTOM: [f32; 4] = with_a(WHITE, 0.045);
+pub const USB_DIALOG_TOP: [f32; 4] = with_a(USB_HOME_BOTTOM, 0.98);
+pub const USB_DIALOG_BOTTOM: [f32; 4] = with_a(USB_HOME_TOP, 0.98);
 pub const USB_DRIVE_TOP: [f32; 4] = rgb8(0x34, 0x56, 0x73);
 pub const USB_DRIVE_BOTTOM: [f32; 4] = rgb8(0x1b, 0x34, 0x50);
 

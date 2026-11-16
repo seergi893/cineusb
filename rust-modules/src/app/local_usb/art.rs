@@ -23,7 +23,7 @@ thread_local! {
 }
 
 /// The in-app brand mark uses the same CineUSB artwork as the launcher.
-/// The texture is created once, and its dark square is clipped to a rounded tile.
+/// The circular mark is rasterized once and retains its transparent corners.
 pub(super) fn draw_brand(p: Painter, rect: Rect) {
     if p.is_recording() { return; }
     let texture = BRAND_TEXTURE.with(|cache| {
