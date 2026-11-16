@@ -133,6 +133,7 @@ fn unpack_progress(value: u64) -> (u64, u64) {
 }
 
 const TOP: f32 = 284.0;
+const HOME_GRID_TOP: f32 = 326.0;
 const GRID_BOTTOM: f32 = 965.0;
 const GRID_WIDTH: f32 = 1920.0 - 2.0 * plx_ui::consts::MARGIN_X;
 
@@ -447,6 +448,7 @@ pub(super) struct Browser {
     media_view: Option<FavoriteView>,
     nav_tab: usize,
     nav_focus: Option<usize>,
+    nav_hover: Option<usize>,
     nav_strip: widgets::TabStrip,
     discovery_cache: BTreeMap<(PathBuf, u64, usize), Vec<PathBuf>>,
     favorite_section: (bool, Instant, f32),
@@ -483,7 +485,7 @@ impl Browser {
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
             queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_view: None,
             media_view: None,
-            nav_tab: 0, nav_focus: None, nav_strip: widgets::TabStrip::new(), discovery_cache: BTreeMap::new(),
+            nav_tab: 0, nav_focus: None, nav_hover: None, nav_strip: widgets::TabStrip::new(), discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
             dialog_started: None, settings_exit: None, settings_return_focus: None,
             button_motion: None, settings_focus_motion: None, favorite_motion: None,
@@ -738,7 +740,7 @@ impl Browser {
         changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < FAVORITE_MOTION);
         changed |= self.favorite_section.1.elapsed() < MOTION;
         let selected_tab = if self.favorite_section.0 { FAVORITES_TAB } else { self.nav_tab };
-        let focused_tab = self.nav_focus.unwrap_or(selected_tab);
+        let focused_tab = self.nav_hover.or(self.nav_focus).unwrap_or(selected_tab);
         self.nav_strip.update(selected_tab as i32, focused_tab as i32,
             |index| NAV_TABS.get(index).map(|rect| (rect.x, rect.w)), widgets::SelMark::Travels, dt);
         changed |= self.nav_strip.moving();
@@ -759,10 +761,14 @@ impl Browser {
         let before = self.scroll.pos;
         self.scroll.step(target, 240.0, dt);
         self.scroll.land(target, dt);
-        let focused = (self.len() > 0).then_some(Card { cell: self.selected, key: self.selected as u64 });
-        let scale = self.pop.scale(self.selected, true, &USB_STYLE);
+        let grid_focused = self.len() > 0 && self.grid_has_focus();
+        let focused = grid_focused.then_some(Card { cell: self.selected, key: self.selected as u64 });
+        let scale = self.pop.scale(self.selected, self.pop.cell() == Some(self.selected), &USB_STYLE);
+        if let Some(card) = focused.filter(|card| self.drive_picker() && self.pop.cell() != Some(card.cell)) {
+            self.pop.arm(card);
+        }
         self.pop.tick(focused, &USB_STYLE, dt);
-        if changed || before != self.scroll.pos || scale != self.pop.scale(self.selected, true, &USB_STYLE) {
+        if changed || before != self.scroll.pos || scale != self.pop.scale(self.selected, grid_focused, &USB_STYLE) {
             plx_machine::idle::invalidate();
         }
         video
@@ -771,9 +777,21 @@ impl Browser {
     fn scroll_target(&self) -> f32 {
         let grid = grid_geometry(self.len(), self.settings.cards);
         let row = self.selected / grid.cols;
-        let viewport = GRID_BOTTOM - TOP - 22.0;
+        let viewport = GRID_BOTTOM - self.grid_top() - 22.0;
         let top = row as f32 * grid.pitch();
         self.scroll.pos.clamp((top + grid.h - viewport).max(0.0), top)
+    }
+
+    fn drive_picker(&self) -> bool {
+        self.folders.is_empty() && self.media_view.is_none() && self.favorite_view.is_none()
+    }
+
+    fn grid_has_focus(&self) -> bool {
+        !self.drive_picker() || (self.nav_focus.is_none() && self.nav_hover.is_none())
+    }
+
+    fn grid_top(&self) -> f32 {
+        if self.drive_picker() { HOME_GRID_TOP } else { TOP }
     }
 
     fn tile_rect(&self, index: usize) -> Rect {
@@ -782,7 +800,7 @@ impl Browser {
         let count = self.len().saturating_sub(first).min(grid.cols).max(1);
         let row_width = count as f32 * grid.w + (count - 1) as f32 * grid.gap;
         grid.left = (1920.0 - row_width) * 0.5;
-        poster_grid::cell_in(&grid, index, TOP, self.scroll.pos, &[])
+        poster_grid::cell_in(&grid, index, self.grid_top(), self.scroll.pos, &[])
     }
 
     fn update_volume_facts(&mut self) -> bool {
@@ -1029,8 +1047,9 @@ impl Browser {
 
     fn open_nav_tab(&mut self, tab: usize) {
         if self.pending.is_some() || self.mutating { return; }
-        let previous_focus = self.nav_focus;
+        let previous_focus = self.nav_hover.or(self.nav_focus);
         self.nav_focus = None;
+        self.nav_hover = None;
         self.action = None;
         self.option = 0;
         match tab {
@@ -1248,7 +1267,7 @@ impl Browser {
             None if self.favorite_cards().is_none() && self.pending.is_none() => {
                 self.folders.last().and_then(|folder| {
                     let grid = grid_geometry(self.len(), self.settings.cards);
-                    poster_grid::visible_in(&grid, self.len(), TOP, self.scroll.pos)
+                    poster_grid::visible_in(&grid, self.len(), self.grid_top(), self.scroll.pos)
                         .filter_map(|index| folder.entries.get(index))
                         .filter(|entry| entry.kind == Kind::Video)
                         .map(|entry| Self::detail_key(folder, entry))
@@ -1732,13 +1751,30 @@ impl Browser {
         self.button_motion = Some((rect, Instant::now()));
     }
 
+    fn nav_available(&self) -> bool {
+        self.dialog.is_none() && self.eject_feedback.is_none() && !self.mutating
+    }
+
+    fn pointer(&mut self, x: f32, y: f32) -> bool {
+        let previous = self.nav_hover;
+        self.nav_hover = if self.nav_available() && hit(NAV_PILL, x, y) {
+            // Keep the capsule on its last tab while crossing the gap to the next.
+            NAV_TABS.iter().position(|rect| hit(*rect, x, y)).or(previous)
+        } else {
+            None
+        };
+        previous != self.nav_hover
+    }
+
     fn click(&mut self, x: f32, y: f32) {
-        if self.dialog.is_none() && self.eject_feedback.is_none() && !self.mutating {
+        if self.nav_available() && hit(NAV_PILL, x, y) {
             if let Some(tab) = NAV_TABS.iter().position(|rect| hit(*rect, x, y)) {
+                self.nav_hover = Some(tab);
                 self.open_nav_tab(tab);
-                return;
             }
+            return;
         }
+        self.nav_hover = None;
         if self.eject_feedback.is_some() {
             if hit(Rect::new(510.0, 292.0, 900.0, 496.0), x, y) {
                 self.eject_feedback = None;
@@ -1760,6 +1796,7 @@ impl Browser {
             }
             return;
         }
+        self.nav_focus = None;
         if let Some((action, rect)) = ACTIONS.iter().find(|(action, rect)| self.action_available(*action) && hit(*rect, x, y)) {
             self.press_button(*rect);
             self.action = Some(*action);
@@ -1771,9 +1808,10 @@ impl Browser {
         // or activate the focused card (the physical OK button may arrive with
         // the pointer parked outside the cards).
         let grid = grid_geometry(self.len(), self.settings.cards);
-        let visible = poster_grid::visible_in(&grid, self.len(), TOP, self.scroll.pos);
+        let top = self.grid_top();
+        let visible = poster_grid::visible_in(&grid, self.len(), top, self.scroll.pos);
         if let Some(index) = visible.into_iter().find(|&index| {
-            y >= TOP - 14.0 && y < GRID_BOTTOM && hit(self.tile_rect(index), x, y)
+            y >= top - 14.0 && y < GRID_BOTTOM && hit(self.tile_rect(index), x, y)
         }) {
             self.select(index, false);
             self.action = None;
@@ -1786,6 +1824,18 @@ impl Browser {
     }
 
     fn key(&mut self, key: Key, repeat: bool) {
+        match key {
+            Key::PointerHidden => {
+                self.nav_hover = None;
+                return;
+            }
+            Key::Ok if repeat => {}
+            Key::Up | Key::Down | Key::Left { alt: false } | Key::Right { alt: false } | Key::Ok => {
+                self.nav_focus = self.nav_hover.take().or(self.nav_focus);
+            }
+            Key::Back => self.nav_hover = None,
+            _ => {}
+        }
         if let Some(tab) = self.nav_focus {
             match key {
                 Key::Left { alt: false } => self.nav_focus = Some(tab.saturating_sub(1)),
@@ -1931,9 +1981,17 @@ impl Browser {
     }
 
     pub(super) fn draw(&self) {
-        let (r, g, b) = theme::CLEAR_RGB;
-        gfx::frame_clear(r, g, b);
-        let p = Painter::root().alpha(plx_ui::nav::page_alpha());
+        let home = self.drive_picker();
+        let root = Painter::root();
+        if home {
+            let [r, g, b, _] = theme::USB_HOME_TOP;
+            gfx::frame_clear(r, g, b);
+            root.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::USB_HOME_TOP, theme::USB_HOME_BOTTOM, 0.0);
+        } else {
+            let (r, g, b) = theme::CLEAR_RGB;
+            gfx::frame_clear(r, g, b);
+        }
+        let p = root.alpha(plx_ui::nav::page_alpha());
         let x = plx_ui::consts::MARGIN_X;
         let width = 1920.0 - 2.0 * x;
         self.draw_nav_pill(p);
@@ -1980,26 +2038,32 @@ impl Browser {
                 Some(_) => (tr("Buenas noches", "Bona nit"), Some(Glyph::Moon)),
                 None => (tr("Te damos la bienvenida", "Benvingut a CineUSB"), None),
             };
-            (greeting.0, tr("Tus películas y series, desde USB", "Les teves pel·lícules i sèries, a l’USB"), greeting.1)
+            (greeting.0, tr("Tus películas, series y documentales en el USB",
+                "Les teves pel·lícules, sèries i documentals a l’USB"), greeting.1)
         } else {
             focused.as_ref().map_or(("Biblioteca USB", "Carpeta", None), |(title, kind, _)| (title.as_str(), *kind, None))
         };
-        let title_size = if TtfMeasure.width_str(title, theme::size::DISPLAY, true) <= width {
+        let title_size = if home {
+            theme::size::HERO
+        } else if TtfMeasure.width_str(title, theme::size::DISPLAY, true) <= width {
             theme::size::DISPLAY
         } else { theme::size::TITLE };
+        let title_y = if home { 133.0 } else { 116.0 };
         plx_ui::text_view::TextView::new(title, title_size, theme::TEXT_PRIMARY)
-            .with_measure(&TtfMeasure).bold().break_long_words().leading(42.0).max_lines(2)
-            .draw(p, Rect::new(x, 116.0, width, 84.0));
+            .with_measure(&TtfMeasure).bold().break_long_words().leading(if home { 76.0 } else { 42.0 })
+            .max_lines(if home { 1 } else { 2 }).draw(p, Rect::new(x, title_y, width, 84.0));
         if let Some(icon) = greeting_icon {
             let after_title = x + TtfMeasure.width_str(title, title_size, true) + 16.0;
-            draw_glyph(p, icon, Rect::new(after_title, 112.0, 39.0, 39.0), theme::USB_FAVORITES);
+            draw_glyph(p, icon, Rect::new(after_title, title_y + 7.0, 48.0, 48.0), theme::USB_FAVORITES);
         }
         let count = self.selection.as_ref().map(|marked| {
             format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"))
         });
         let section = breadcrumb.as_deref().unwrap_or(if self.favorite_cards().is_some() { "" } else { tr("Discos conectados", "Discos connectats") });
-        draw_line(p, section, Rect::new(x, 191.0, width, 33.0), theme::size::BODY, false);
-        draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, 226.0, 920.0, 37.0), theme::size::CAPTION, false);
+        let section_y = if home { 220.0 } else { 191.0 };
+        draw_line(p, section, Rect::new(x, section_y, width, 34.0),
+            if home { theme::size::HEADLINE } else { theme::size::BODY }, home);
+        draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, section_y + 35.0, 920.0, 37.0), theme::size::CAPTION, false);
 
         if self.len() == 0 {
             let message = if self.media_cards().is_some() && self.pending.is_some() {
@@ -2020,11 +2084,13 @@ impl Browser {
             };
             draw_line(p, message, Rect::new(x, 380.0, width, 70.0), theme::size::BODY, false);
         } else {
-            p.clip(Rect::new(0.0, TOP - 14.0, 1920.0, GRID_BOTTOM - TOP + 14.0));
+            let top = self.grid_top();
+            let bleed = if home { 26.0 } else { 14.0 };
+            p.clip(Rect::new(0.0, top - bleed, 1920.0, GRID_BOTTOM - top + bleed));
             let grid = grid_geometry(self.len(), self.settings.cards);
-            let cells = poster_grid::visible_in(&grid, self.len(), TOP, self.scroll.pos);
+            let cells = poster_grid::visible_in(&grid, self.len(), top, self.scroll.pos);
             for i in cells.filter(|index| *index != self.selected) { self.draw_tile(p, i, false); }
-            self.draw_tile(p, self.selected, true);
+            self.draw_tile(p, self.selected, self.grid_has_focus());
             p.clip_clear();
         }
         let storage = self.facts.as_ref().filter(|(disk, _)| self.volume() == Some(disk))
@@ -2040,7 +2106,7 @@ impl Browser {
             let alpha = 1.0 - settings_ease(started);
             self.draw_unified_settings(p, alpha);
         } else if !self.status.is_empty() {
-            draw_line(p, &self.status, Rect::new(x, 990.0, width - if storage.is_some() { 610.0 } else { 0.0 }, 48.0), theme::size::CAPTION, false);
+            draw_line(p, &self.status, Rect::new(x, 990.0, width - if storage.is_some() { 696.0 } else { 0.0 }, 48.0), theme::size::CAPTION, false);
         } else {
             let primary = if self.selection.is_some() && self.action.is_none() {
                 tr("Marcar", "Marca")
@@ -2102,8 +2168,7 @@ impl Browser {
     }
 
     fn draw_nav_pill(&self, p: Painter) {
-        p.rect_sheened(NAV_PILL, 35.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
-        p.rring(NAV_PILL, 35.0, 1.0, theme::TEXT_SECONDARY);
+        p.rect(NAV_PILL, 35.0, theme::USB_CHROME_TOP, theme::USB_CHROME_BOTTOM, 0.0);
         // Same spring capsules as PlxNative; labels and track stay in place.
         self.nav_strip.draw(p, NAV_TABS[0].y, NAV_TABS[0].h, widgets::TabGround::Tracked { glass: false });
         for (index, rect) in NAV_TABS.into_iter().enumerate() {
@@ -2135,26 +2200,38 @@ impl Browser {
                 Label::new(run.as_ptr(), theme::size::CAPTION, widgets::TabPill::mixed_ink(fm, sm))
                     .h(HAlign::Center).bold().draw(p, Rect::new(x + icon_space, rect.y, width, rect.h));
             });
-            if self.nav_focus == Some(index) { p.rring(rect, 24.0, 1.5, self.accent()); }
+            if self.nav_hover.is_none() && self.nav_focus == Some(index) {
+                p.rring(rect, 24.0, 1.5, self.accent());
+            }
         }
     }
 
     fn draw_storage(&self, p: Painter, volume: &Volume, (total, used, free, readonly): (u64, u64, u64, bool)) {
-        let rect = Rect::new(1234.0, 984.0, 590.0, 56.0);
-        p.rect(rect, 16.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL, 0.0);
-        draw_glyph(p, Glyph::Drive, Rect::new(rect.x + 13.0, rect.y + 8.0, 19.0, 19.0), theme::TEXT_PRIMARY);
+        let rect = Rect::new(1148.0, if readonly { 964.0 } else { 984.0 }, 676.0,
+            if readonly { 80.0 } else { 60.0 });
+        p.rect(rect, 21.0, theme::USB_CHROME_TOP, theme::USB_CHROME_BOTTOM, 0.0);
+        p.rring(rect, 21.0, 1.0, theme::HAIRLINE);
+        draw_glyph(p, Glyph::Drive, Rect::new(rect.x + 14.0, rect.y + 7.0, 27.0, 27.0), theme::TEXT_PRIMARY);
         let name = volume_name(volume);
-        draw_line(p, &name, Rect::new(rect.x + 39.0, rect.y + 4.0, 110.0, 30.0), theme::size::DIAGNOSTIC, true);
+        draw_line(p, &name, Rect::new(rect.x + 47.0, rect.y + 5.0, 128.0, 32.0), theme::size::MICRO, true);
         let fraction = if total == 0 { 0.0 } else { (used as f64 / total as f64).clamp(0.0, 1.0) };
-        let usage = format!("{:.0} % · {} / {} {}", fraction * 100.0, video_size(free), video_size(total),
-            tr("libres", "lliures"));
-        let mode = if readonly { tr(" · Solo lectura", " · Només lectura") } else { "" };
-        draw_line(p, &format!("{usage}{mode}"), Rect::new(rect.x + 154.0, rect.y + 4.0, 420.0, 30.0), theme::size::DIAGNOSTIC, false);
-        let bar = Rect::new(rect.x + 15.0, rect.y + 39.0, rect.w - 30.0, 5.0);
+        let percent = format!("{:.0} %", fraction * 100.0);
+        let capacity = format!("{} / {} {}", video_size(free), video_size(total), tr("libres", "lliures"));
+        for offset in [184.0, 284.0] {
+            p.rrect(Rect::new(rect.x + offset, rect.y + 12.0, 1.0, 18.0), 0.0, 0.0, theme::GLASS_RIM);
+        }
+        draw_line(p, &percent, Rect::new(rect.x + 200.0, rect.y + 5.0, 76.0, 32.0), theme::size::MICRO, true);
+        draw_line(p, &capacity, Rect::new(rect.x + 300.0, rect.y + 5.0, 360.0, 32.0), theme::size::MICRO, false);
+        if readonly {
+            draw_line(p, tr("Solo lectura", "Només lectura"),
+                Rect::new(rect.x + 300.0, rect.y + 35.0, 360.0, 25.0), theme::size::MICRO, false);
+        }
+        let bar = Rect::new(rect.x + 18.0, rect.y + rect.h - 17.0, rect.w - 36.0, 5.0);
         p.rect(bar, 2.5, theme::RAIL_TRACK, theme::RAIL_TRACK, 0.0);
         if fraction > 0.0 {
-            let fill = Rect::new(bar.x, bar.y, bar.w * fraction as f32, bar.h);
-            p.rect(fill, 2.5, self.accent(), self.accent(), 0.0);
+            let width = bar.w * fraction as f32;
+            let radius = 2.5_f32.min(width * 0.5);
+            p.rrect(Rect::new(bar.x, bar.y, width, bar.h), radius, radius, self.accent());
         }
     }
 
@@ -2441,6 +2518,25 @@ impl Browser {
         let card = frame.scaled(scale);
         let radius = USB_STYLE.tile_radius(card, scale);
         let lift = ((scale - 1.0) / (USB_STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
+        if cover == Cover::Drive {
+            p.shadow_outside(card, radius, 21.0, 9.0, theme::CARD_SHADOW);
+            if lift > 0.0 {
+                p.shadow_outside(card, radius, 21.0, 5.0, theme::with_a(self.accent(), lift * 0.42));
+            }
+            cover.draw(p, card, radius, lift);
+            let accent = theme::mix(self.accent(), theme::TEXT_PRIMARY, 0.38);
+            if lift > 0.0 {
+                p.rring(card, radius, 2.5, theme::with_a(accent, lift));
+            }
+            let icon_size = card.w * 0.54;
+            draw_glyph(p, Glyph::Drive, Rect::new(card.x + (card.w - icon_size) * 0.5,
+                card.y + card.h * 0.36 - icon_size * 0.5, icon_size, icon_size), theme::TEXT_PRIMARY);
+            let text_x = card.x + 19.0;
+            let text_width = card.w - 38.0;
+            draw_line(p, kind, Rect::new(text_x, card.y + card.h - 82.0, text_width, 33.0), theme::size::LABEL, true);
+            draw_line(p, &title, Rect::new(text_x, card.y + card.h - 49.0, text_width, 30.0), theme::size::CAPTION, false);
+            return;
+        }
         let current = self.folders.last().filter(|_| self.favorite_cards().is_none() && self.media_cards().is_none()).and_then(|folder| folder.entries.get(index).map(|entry| (folder, entry)));
         let record = current.and_then(|(folder, entry)| {
             let identity = self.identity(&folder.volume)?;
@@ -2573,20 +2669,20 @@ fn hit(rect: Rect, x: f32, y: f32) -> bool {
 enum HintKey { Ok, Icon(Icon) }
 
 fn draw_hint(p: Painter, x: f32, key: HintKey, text: &str) -> f32 {
-    let width = if matches!(key, HintKey::Ok) { 44.0 } else { 34.0 };
-    let rect = Rect::new(x, 999.0, width, 30.0);
-    p.rect_sheened(rect, 9.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+    let width = if matches!(key, HintKey::Ok) { 42.0 } else { 30.0 };
+    let rect = Rect::new(x, 1001.0, width, 26.0);
+    p.rring(rect, 7.0, 1.0, theme::PILL_KEYLINE);
     match key {
         HintKey::Ok => {
-            let run = TtfMeasure.fit_line("OK", width, 17, true);
-            Label::new(run.as_ptr(), 17, theme::TEXT_READING).h(HAlign::Center).bold().draw(p, rect);
+            let run = TtfMeasure.fit_line("OK", width, theme::size::MICRO, true);
+            Label::new(run.as_ptr(), theme::size::MICRO, theme::TEXT_READING).h(HAlign::Center).bold().draw(p, rect);
         }
-        HintKey::Icon(icon) => icons::draw(p, icon, Rect::new(x + 6.0, 1003.0, 22.0, 22.0), theme::TEXT_READING),
+        HintKey::Icon(icon) => icons::draw(p, icon, Rect::new(x + 5.0, 1004.0, 20.0, 20.0), theme::TEXT_READING),
     }
-    let (run, text_width) = TtfMeasure.fit_line_measured(text, 300.0, theme::size::CAPTION, false);
-    Label::new(run.as_ptr(), theme::size::CAPTION, theme::TEXT_SECONDARY).h(HAlign::Left)
+    let (run, text_width) = TtfMeasure.fit_line_measured(text, 300.0, theme::size::MICRO, false);
+    Label::new(run.as_ptr(), theme::size::MICRO, theme::TEXT_SECONDARY).h(HAlign::Left)
         .draw(p, Rect::new(x + width + 10.0, 990.0, text_width, 48.0));
-    x + width + 10.0 + text_width + 28.0
+    x + width + 10.0 + text_width + 24.0
 }
 
 fn video_size(bytes: u64) -> String {
@@ -3022,6 +3118,12 @@ pub(super) fn click(app: &mut App, x: f32, y: f32) {
     plx_machine::idle::invalidate();
 }
 
+pub(super) fn pointer(app: &mut App, x: f32, y: f32) {
+    if app.usb.pointer(x, y) {
+        plx_machine::idle::invalidate();
+    }
+}
+
 pub(super) fn key(app: &mut App, key: Key, repeat: bool) {
     if key == Key::Exit { app.running = false; }
     else if !super::bridge::player_arriving(&app.pages) { app.usb.key(key, repeat); }
@@ -3288,6 +3390,61 @@ mod usb_browser_tests {
         assert!(browser.dialog.is_none());
         assert_eq!(browser.nav_focus, Some(SETTINGS_TAB));
         assert!(browser.settings_exit.is_some());
+    }
+
+    #[test]
+    fn magic_remote_hover_previews_tabs_until_ok_and_yields_to_dpad() {
+        let mut browser = Browser::new();
+        let documentals = NAV_TABS[DOCUMENTALS_TAB];
+        let favorites = NAV_TABS[FAVORITES_TAB];
+        let settings = NAV_TABS[SETTINGS_TAB];
+
+        assert!(browser.pointer(documentals.x + 1.0, documentals.y + 1.0));
+        assert_eq!(browser.nav_hover, Some(DOCUMENTALS_TAB));
+        assert_eq!(browser.nav_tab, 0);
+        assert!(browser.pending.is_none());
+        assert!(!browser.pointer(favorites.x - 1.0, favorites.y + 1.0));
+        assert!(browser.pointer(favorites.x + 1.0, favorites.y + 1.0));
+
+        browser.key(Key::Right { alt: false }, false);
+        assert_eq!(browser.nav_hover, None);
+        assert_eq!(browser.nav_focus, Some(SETTINGS_TAB));
+        assert!(browser.dialog.is_none());
+        browser.key(Key::Ok, false);
+        assert!(matches!(browser.dialog, Some(Dialog::Settings)));
+        assert!(!browser.pointer(settings.x + 1.0, settings.y + 1.0));
+        browser.back();
+        assert_eq!(browser.nav_focus, Some(SETTINGS_TAB));
+        browser.key(Key::Down, false);
+        assert!(browser.grid_has_focus());
+    }
+
+    #[test]
+    fn hidden_pointer_clears_hover_and_click_opens_the_tab_at_its_coordinates() {
+        let mut browser = Browser::new();
+        let settings = NAV_TABS[SETTINGS_TAB];
+        let (x, y) = (settings.x + 1.0, settings.y + 1.0);
+        assert!(browser.pointer(x, y));
+        assert!(browser.dialog.is_none());
+        browser.key(Key::PointerHidden, false);
+        assert_eq!(browser.nav_hover, None);
+        assert!(browser.grid_has_focus());
+        browser.click(x, y);
+        assert!(matches!(browser.dialog, Some(Dialog::Settings)));
+        assert_eq!(browser.nav_hover, None);
+    }
+
+    #[test]
+    fn clicking_between_tabs_does_not_activate_a_usb_drive() {
+        let mut browser = Browser::new();
+        browser.scan.volumes.push(Volume {
+            path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: None, system: false,
+        });
+        let first = NAV_TABS[0];
+        assert!(browser.pointer(first.x + 1.0, first.y + 1.0));
+        browser.click(first.x + first.w + 1.0, first.y + 1.0);
+        assert!(browser.pending.is_none());
+        assert_eq!(browser.nav_hover, Some(0));
     }
 
     #[test]

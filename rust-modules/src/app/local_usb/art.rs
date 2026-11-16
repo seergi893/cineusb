@@ -14,7 +14,7 @@ pub(super) enum Cover {
 
 thread_local! {
     // One texture per illustration, shared by every visible card of that kind.
-    static TEXTURES: Cell<[Option<u32>; 4]> = const { Cell::new([None; 4]) };
+    static TEXTURES: Cell<[Option<u32>; 3]> = const { Cell::new([None; 3]) };
 }
 
 thread_local! {
@@ -41,17 +41,20 @@ pub(super) fn draw_brand(p: Painter, rect: Rect) {
 
 impl Cover {
     pub(super) fn draw(self, p: Painter, card: Rect, radius: f32, lift: f32) {
+        let (index, source) = match self {
+            Self::Drive => {
+                p.rect_sheened(card, radius, theme::USB_DRIVE_TOP, theme::USB_DRIVE_BOTTOM);
+                return;
+            }
+            Self::Folder => (0, include_str!("../../../../assets/cineusb/folder.svg")),
+            Self::Movie => (1, include_str!("../../../../assets/cineusb/movie.svg")),
+            Self::Series => (2, include_str!("../../../../assets/cineusb/series.svg")),
+        };
         if p.is_recording() { return; }
         let texture = TEXTURES.with(|cache| {
             let mut textures = cache.get();
-            let slot = &mut textures[self as usize];
+            let slot = &mut textures[index];
             let texture = *slot.get_or_insert_with(|| {
-                let source = match self {
-                    Self::Drive => include_str!("../../../../assets/cineusb/drive.svg"),
-                    Self::Folder => include_str!("../../../../assets/cineusb/folder.svg"),
-                    Self::Movie => include_str!("../../../../assets/cineusb/movie.svg"),
-                    Self::Series => include_str!("../../../../assets/cineusb/series.svg"),
-                };
                 const WIDTH: i32 = 300;
                 const HEIGHT: i32 = 450;
                 svg::rasterize(source, WIDTH, HEIGHT)
