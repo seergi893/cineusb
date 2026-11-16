@@ -281,8 +281,14 @@ const ACTIONS: [(Action, Rect); 3] = [
 ];
 
 const UNIFIED_SETTINGS_COUNT: usize = 8;
+const SETTINGS_GROUPS: [(usize, usize, f32); 4] = [
+    (0, 2, 142.0), (2, 5, 352.0), (5, 6, 630.0), (6, 8, 772.0),
+];
+const SETTING_ROW_PITCH: f32 = 68.0;
 fn unified_setting_rect(index: usize) -> Rect {
-    Rect::new(825.0, 168.0 + index as f32 * 98.0, 975.0, 58.0)
+    let (first, _, top) = SETTINGS_GROUPS.iter().copied()
+        .find(|&(first, end, _)| (first..end).contains(&index)).expect("valid setting");
+    Rect::new(700.0, top + 40.0 + (index - first) as f32 * SETTING_ROW_PITCH, 1108.0, 64.0)
 }
 
 fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'static str, String) {
@@ -456,7 +462,7 @@ pub(super) struct Browser {
     settings_exit: Option<Instant>,
     settings_return_focus: Option<usize>,
     button_motion: Option<(Rect, Instant)>,
-    settings_focus_motion: Option<(usize, usize, Instant)>,
+    settings_focus_y: Spring,
     favorite_motion: Option<(PathBuf, bool, Instant)>,
     ejecting: Option<(Volume, Instant)>,
     eject_feedback: Option<(Volume, bool, Instant)>,
@@ -488,13 +494,14 @@ impl Browser {
             nav_tab: 0, nav_focus: None, nav_hover: None, nav_strip: widgets::TabStrip::new(), discovery_cache: BTreeMap::new(),
             favorite_section: (false, now, 0.0),
             dialog_started: None, settings_exit: None, settings_return_focus: None,
-            button_motion: None, settings_focus_motion: None, favorite_motion: None,
+            button_motion: None, settings_focus_y: Spring::at(unified_setting_rect(0).y), favorite_motion: None,
             ejecting: None, eject_feedback: None, eject_uncertain: false,
             estimate: None, next_estimate: None, estimate_anchor: None,
         }
     }
 
     fn len(&self) -> usize {
+        if self.tab_waiting_for_volume() { return 0; }
         if let Some(view) = self.media_cards() {
             return if self.documental_folder_picker(view) { view.paths.len() } else { 0 };
         }
@@ -551,8 +558,9 @@ impl Browser {
                         plx_base::eventlog::log(&format!("cineusb: USB folder listing failed: {error}"));
                         // A directory renamed on Windows can remain in the
                         // navigation stack after the same USB disk is reinserted.
-                        // Recover from the live mount root, never keep a dead path.
-                        if path != volume.path && self.scan.volumes.contains(&volume) {
+                        // Recover manual browsing at the live mount root. A media
+                        // tab retains its own navigation floor and reports the error.
+                        if self.media_view.is_none() && path != volume.path && self.scan.volumes.contains(&volume) {
                             self.discovery_cache.retain(|(root, _, _), _| *root != volume.path);
                             self.leave_media();
                             self.leave_favorites();
@@ -736,7 +744,13 @@ impl Browser {
             changed = true;
         } else { self.settings_exit = None; }
         changed |= self.button_motion.is_some_and(|(_, started)| now.duration_since(started) < MOTION);
-        changed |= self.settings_focus_motion.is_some_and(|(_, _, at)| now.duration_since(at) < MOTION);
+        if matches!(self.dialog, Some(Dialog::Settings)) {
+            let target = unified_setting_rect(self.option).y;
+            let previous = self.settings_focus_y.pos;
+            self.settings_focus_y.step(target, 240.0, dt);
+            self.settings_focus_y.land(target, dt);
+            changed |= previous != self.settings_focus_y.pos;
+        }
         changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < FAVORITE_MOTION);
         changed |= self.favorite_section.1.elapsed() < MOTION;
         let selected_tab = if self.favorite_section.0 { FAVORITES_TAB } else { self.nav_tab };
@@ -783,7 +797,13 @@ impl Browser {
     }
 
     fn drive_picker(&self) -> bool {
-        self.folders.is_empty() && self.media_view.is_none() && self.favorite_view.is_none()
+        self.nav_tab == 0 && self.folders.is_empty() && self.media_view.is_none() && self.favorite_view.is_none()
+    }
+
+    fn tab_waiting_for_volume(&self) -> bool {
+        matches!(self.nav_tab, 1 | 2 | DOCUMENTALS_TAB | FAVORITES_TAB)
+            && self.media_view.is_none() && self.favorite_view.is_none() && self.folders.is_empty()
+            && !self.loading_favorites && !self.favorite_section.0
     }
 
     fn grid_has_focus(&self) -> bool {
@@ -1046,7 +1066,13 @@ impl Browser {
     }
 
     fn open_nav_tab(&mut self, tab: usize) {
-        if self.pending.is_some() || self.mutating { return; }
+        if self.mutating { return; }
+        if matches!(tab, 0 | 1 | 2 | DOCUMENTALS_TAB | FAVORITES_TAB) {
+            // A new section supersedes reads from the previous section.
+            self.pending = None;
+        } else if self.pending.is_some() {
+            return;
+        }
         let previous_focus = self.nav_hover.or(self.nav_focus);
         self.nav_focus = None;
         self.nav_hover = None;
@@ -1070,6 +1096,9 @@ impl Browser {
             }
             1 | 2 | DOCUMENTALS_TAB => {
                 let Some(volume) = self.volume().cloned() else {
+                    self.leave_favorites();
+                    self.leave_media();
+                    self.nav_tab = tab;
                     self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
                     return;
                 };
@@ -1077,11 +1106,14 @@ impl Browser {
                 // mount ID or USB serial can be reused after unplug/replug;
                 // caching by either one retains paths renamed on Windows.
                 self.discovery_cache.remove(&(volume.path.clone(), volume.mount_id.unwrap_or(0), tab));
+                self.enter_media(volume.clone(), tab, Vec::new());
                 self.status = tr("Buscando carpetas multimedia…", "Buscant carpetes multimèdia…").into();
                 self.request(move || DiskResult::Discovered(volume.clone(), tab, discover_media_folders(&volume, tab)));
             }
             FAVORITES_TAB => {
                 if self.volume().is_none() {
+                    self.leave_media();
+                    self.nav_tab = FAVORITES_TAB;
                     self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
                     return;
                 }
@@ -1093,6 +1125,7 @@ impl Browser {
             SETTINGS_TAB => {
                 self.settings_exit = None;
                 self.settings_return_focus = previous_focus.or(Some(SETTINGS_TAB));
+                self.settings_focus_y = Spring::at(unified_setting_rect(0).y);
                 self.dialog = Some(Dialog::Settings);
                 self.dialog_started = Some(Instant::now());
                 self.status.clear();
@@ -1140,6 +1173,7 @@ impl Browser {
     }
 
     fn leave_favorites(&mut self) {
+        self.loading_favorites = false;
         if let Some(view) = self.favorite_view.take() {
             self.folders.truncate(view.depth);
             self.restore_view(view.library_selected, view.library_scroll);
@@ -1394,6 +1428,7 @@ impl Browser {
     }
 
     fn cycle_unified_setting(&mut self, direction: i32) {
+        if self.settings_job.is_some() { return; }
         let mut next = self.settings;
         let step = |value: usize, count: usize| (value as i32 + direction).rem_euclid(count as i32) as usize;
         match self.option {
@@ -1412,12 +1447,12 @@ impl Browser {
 
     fn choose_option(&mut self) {
         if self.settings_job.is_some() { return; }
+        if matches!(self.dialog, Some(Dialog::Settings)) {
+            self.cycle_unified_setting(1);
+            return;
+        }
         self.dialog_started = None;
         match self.dialog.take() {
-            Some(Dialog::Settings) => {
-                self.dialog = Some(Dialog::Settings);
-                self.cycle_unified_setting(1);
-            }
             Some(Dialog::Appearance) => {
                 (self.dialog, self.option) = match self.option {
                     0 => (Some(Dialog::Accent), self.settings.accent),
@@ -1570,11 +1605,17 @@ impl Browser {
 
     fn open(&mut self) {
         if self.pending.is_some() { return; }
+        if self.tab_waiting_for_volume() {
+            self.open_nav_tab(self.nav_tab);
+            return;
+        }
         if let Some(view) = self.media_cards() {
             if self.documental_folder_picker(view) {
                 if let Some(path) = view.paths.get(self.selected) {
                     self.open_folder(view.volume.clone(), path.clone());
                 }
+            } else {
+                self.open_nav_tab(self.nav_tab);
             }
             return;
         }
@@ -1703,6 +1744,10 @@ impl Browser {
             self.status.clear();
             return;
         }
+        if self.tab_waiting_for_volume() {
+            self.open_nav_tab(0);
+            return;
+        }
         if self.favorite_cards().is_some() {
             self.leave_favorites();
             self.status.clear();
@@ -1756,6 +1801,13 @@ impl Browser {
     }
 
     fn pointer(&mut self, x: f32, y: f32) -> bool {
+        if matches!(self.dialog, Some(Dialog::Settings)) {
+            let previous = self.option;
+            if let Some(index) = (0..UNIFIED_SETTINGS_COUNT).find(|&i| hit(unified_setting_rect(i), x, y)) {
+                self.option = index;
+            }
+            return previous != self.option;
+        }
         let previous = self.nav_hover;
         self.nav_hover = if self.nav_available() && hit(NAV_PILL, x, y) {
             // Keep the capsule on its last tab while crossing the gap to the next.
@@ -1763,6 +1815,7 @@ impl Browser {
         } else {
             None
         };
+        if self.nav_hover.is_some() { self.nav_focus = None; }
         previous != self.nav_hover
     }
 
@@ -1866,7 +1919,6 @@ impl Browser {
         if self.dialog.is_some() {
             let vertical = self.vertical_options();
             let settings = vertical > 0;
-            let previous_setting = self.option;
             match key {
                 Key::Up if settings => self.option = self.option.saturating_sub(1),
                 Key::Down if settings => self.option = (self.option + 1).min(vertical - 1),
@@ -1888,9 +1940,6 @@ impl Browser {
                 }
                 Key::Back if !repeat => self.back(),
                 _ => {}
-            }
-            if matches!(self.dialog, Some(Dialog::Settings)) && self.option != previous_setting {
-                self.settings_focus_motion = Some((previous_setting, self.option, Instant::now()));
             }
             return;
         }
@@ -1982,16 +2031,22 @@ impl Browser {
 
     pub(super) fn draw(&self) {
         let home = self.drive_picker();
+        let [r, g, b, _] = theme::USB_HOME_TOP;
+        let [rb, gb, bb, _] = theme::USB_HOME_BOTTOM;
+        gfx::frame_clear(r, g, b);
         let root = Painter::root();
-        if home {
-            let [r, g, b, _] = theme::USB_HOME_TOP;
-            gfx::frame_clear(r, g, b);
-            root.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::USB_HOME_TOP, theme::USB_HOME_BOTTOM, 0.0);
-        } else {
-            let (r, g, b) = theme::CLEAR_RGB;
-            gfx::frame_clear(r, g, b);
+        root.ambient(Rect::new(0.0, 0.0, 1920.0, 1080.0), 1.0,
+            [[r, g, b], [r, g, b], [rb, gb, bb], [rb, gb, bb]], false);
+        let page = root.alpha(plx_ui::nav::page_alpha());
+        let settings_enter = matches!(self.dialog, Some(Dialog::Settings))
+            .then(|| self.dialog_started.map_or(1.0, settings_ease));
+        if settings_enter == Some(1.0) {
+            self.draw_unified_settings(page, 1.0);
+            return;
         }
-        let p = root.alpha(plx_ui::nav::page_alpha());
+        let settings_exit = self.settings_exit.map_or(0.0, |started| 1.0 - settings_ease(started));
+        let settings_alpha = settings_enter.unwrap_or(settings_exit);
+        let p = page.alpha(1.0 - settings_alpha);
         let x = plx_ui::consts::MARGIN_X;
         let width = 1920.0 - 2.0 * x;
         self.draw_nav_pill(p);
@@ -2027,10 +2082,10 @@ impl Browser {
             parts.join("   /   ")
         });
         let focused = self.item(self.selected);
-        let (title, detail, greeting_icon) = if self.media_cards().is_some() {
-            (media_tab_title(self.nav_tab), "", None)
-        } else if self.favorite_cards().is_some() {
+        let (title, detail, greeting_icon) = if self.favorite_cards().is_some() || (self.tab_waiting_for_volume() && self.nav_tab == FAVORITES_TAB) {
             (tr("Favoritos", "Favorits"), "", None)
+        } else if self.media_cards().is_some() || self.tab_waiting_for_volume() {
+            (media_tab_title(self.nav_tab), "", None)
         } else if breadcrumb.is_none() {
             let greeting = match self.hour {
                 Some(6..=11) => (tr("Buenos días", "Bon dia"), Some(Glyph::Sun)),
@@ -2059,18 +2114,28 @@ impl Browser {
         let count = self.selection.as_ref().map(|marked| {
             format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"))
         });
-        let section = breadcrumb.as_deref().unwrap_or(if self.favorite_cards().is_some() { "" } else { tr("Discos conectados", "Discos connectats") });
+        let section = breadcrumb.as_deref().unwrap_or(if home { tr("Discos conectados", "Discos connectats") } else { "" });
         let section_y = if home { 220.0 } else { 191.0 };
         draw_line(p, section, Rect::new(x, section_y, width, 34.0),
             if home { theme::size::HEADLINE } else { theme::size::BODY }, home);
         draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, section_y + 35.0, 920.0, 37.0), theme::size::CAPTION, false);
 
         if self.len() == 0 {
-            let message = if self.media_cards().is_some() && self.pending.is_some() {
+            let message = if self.tab_waiting_for_volume() {
+                if self.scan.volumes.is_empty() {
+                    tr("Conecta un disco USB directamente a la televisión.", "Connecta un disc USB a la tele.")
+                } else {
+                    tr("Pulsa OK para abrir el disco USB.", "Prem OK per obrir el disc USB.")
+                }
+            } else if self.media_cards().is_some() && self.pending.is_some() {
                 tr("Cargando el contenido del disco…", "Carregant el contingut del disc…")
-            } else if self.media_cards().is_some() {
-                tr("No hay carpetas de esta categoría. Pulsa Inicio para navegar manualmente.",
-                    "No hi ha carpetes d'aquesta categoria. Prem Inici per navegar manualment.")
+            } else if let Some(view) = self.media_cards() {
+                if !view.paths.is_empty() && !self.status.is_empty() {
+                    self.status.as_str()
+                } else {
+                    tr("No hay carpetas de esta categoría. Pulsa Inicio para navegar manualmente.",
+                        "No hi ha carpetes d'aquesta categoria. Prem Inici per navegar manualment.")
+                }
             } else if self.favorite_cards().is_some() {
                 tr("No hay favoritos en este USB.", "No hi ha cap favorit en aquest USB.")
             } else if self.folders.last().is_some() {
@@ -2082,7 +2147,14 @@ impl Browser {
             } else {
                 tr("Conecta un disco USB directamente a la televisión.", "Connecta un disc USB a la tele.")
             };
-            draw_line(p, message, Rect::new(x, 380.0, width, 70.0), theme::size::BODY, false);
+            if home && !self.scan.hidden_mounts {
+                draw_glyph(p, Glyph::Drive, Rect::new(892.0, 435.0, 136.0, 136.0), theme::TEXT_SECONDARY);
+                let run = TtfMeasure.fit_line(message, width, theme::size::BODY, false);
+                Label::new(run.as_ptr(), theme::size::BODY, theme::TEXT_SECONDARY).h(HAlign::Center)
+                    .draw(p, Rect::new(x, 575.0, width, 54.0));
+            } else {
+                draw_line(p, message, Rect::new(x, 380.0, width, 70.0), theme::size::BODY, false);
+            }
         } else {
             let top = self.grid_top();
             let bleed = if home { 26.0 } else { 14.0 };
@@ -2100,11 +2172,10 @@ impl Browser {
                 self.draw_storage(p, disk, facts);
             }
         }
-        if let Some(dialog) = &self.dialog {
+        if settings_enter.is_some() || self.settings_exit.is_some() {
+            self.draw_unified_settings(page, settings_alpha);
+        } else if let Some(dialog) = &self.dialog {
             self.draw_dialog(p, dialog);
-        } else if let Some(started) = self.settings_exit {
-            let alpha = 1.0 - settings_ease(started);
-            self.draw_unified_settings(p, alpha);
         } else if !self.status.is_empty() {
             draw_line(p, &self.status, Rect::new(x, 990.0, width - if storage.is_some() { 696.0 } else { 0.0 }, 48.0), theme::size::CAPTION, false);
         } else {
@@ -2236,90 +2307,60 @@ impl Browser {
     }
 
     fn draw_unified_settings(&self, p: Painter, progress: f32) {
-        // The main frame already clears to theme::CLEAR_RGB (SURFACE_APP).
-        // Never place a black scrim over settings: keep one continuous surface.
-        // Animate only opacity and a small content rise, not a second framebuffer.
         let p = p.alpha(progress);
-        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0,
-            theme::SURFACE_APP, theme::SURFACE_APP, 0.0);
-        let shift = (1.0 - progress) * 12.0;
-        let p = p.translate(0.0, shift);
+        let x = plx_ui::consts::MARGIN_X;
+        art::draw_brand(p, Rect::new(x, 58.0, 66.0, 66.0));
         draw_line(p, tr("Configuración", "Configuració"),
-            Rect::new(110.0, 169.0, 650.0, 80.0), theme::size::HEADLINE, true);
-        let (_, description, _) = unified_setting_text(self.option, &self.settings);
+            Rect::new(x, 172.0, 530.0, 76.0), theme::size::DISPLAY, true);
+        let (name, description, _) = unified_setting_text(self.option, &self.settings);
+        draw_line(p, name, Rect::new(x, 297.0, 530.0, 40.0), theme::size::LABEL, true);
         plx_ui::text_view::TextView::new(description, theme::size::BODY, theme::TEXT_SECONDARY)
-            .with_measure(&TtfMeasure).break_long_words().leading(34.0).max_lines(5)
-            .draw(p, Rect::new(110.0, 281.0, 590.0, 240.0));
-        draw_line(p, tr("← → Cambiar · OK Seleccionar · Atrás Cerrar",
-                "← → Canvia · OK Selecciona · Enrere Tanca"),
-            Rect::new(110.0, 879.0, 650.0, 50.0), theme::size::CAPTION, false);
-        // Each group is a subtle raised surface. Headings live outside the
-        // surfaces and are never interactive.
-        for (first, last, heading) in [
-            (0, 1, tr("BIBLIOTECA / USB", "BIBLIOTECA / USB")),
-            (2, 4, tr("REPRODUCCIÓN", "REPRODUCCIÓ")),
-            (5, 5, tr("SISTEMA", "SISTEMA")),
-            (6, 7, tr("APARIENCIA", "APARENÇA")),
-        ] {
+            .with_measure(&TtfMeasure).break_long_words().leading(38.0).max_lines(4)
+            .draw(p, Rect::new(x, 353.0, 505.0, 156.0));
+        let back = draw_hint(p, x, HintKey::Ok, tr("Cambiar", "Canvia"));
+        draw_hint(p, back, HintKey::Icon(Icon::ChevronLeft), tr("Volver", "Torna"));
+
+        let headings = [
+            tr("Biblioteca / USB", "Biblioteca / USB"), tr("Reproducción", "Reproducció"),
+            tr("Sistema", "Sistema"), tr("Apariencia", "Aparença"),
+        ];
+        for ((first, end, heading_y), heading) in SETTINGS_GROUPS.into_iter().zip(headings) {
             let top = unified_setting_rect(first);
-            let bottom = unified_setting_rect(last);
-            let group = Rect::new(top.x, top.y - 8.0, top.w,
-                bottom.y + bottom.h - top.y + 16.0);
-            p.rect_sheened(group, 16.0, theme::MENU_GLASS_TOP, theme::MENU_GLASS_BOT);
-            let accent = theme::usb_accent(self.settings.accent);
-            let heading_text = TtfMeasure.fit_line(heading, top.w - 24.0, theme::size::MICRO, true);
-            Label::new(heading_text.as_ptr(), theme::size::MICRO, accent).bold()
-                .h(HAlign::Left).draw(p,
-                    Rect::new(top.x + 12.0, top.y - 35.0, top.w - 24.0, 26.0));
-            p.rect(Rect::new(top.x + 8.0, top.y - 9.0, 56.0, 2.0),
-                1.0, accent, accent, 0.0);
-            for index in first..last {
+            let bottom = unified_setting_rect(end - 1);
+            let group = Rect::new(top.x - 8.0, top.y - 6.0, top.w + 16.0, bottom.y + bottom.h - top.y + 12.0);
+            p.rect(group, 19.0, theme::USB_CHROME_TOP, theme::USB_CHROME_BOTTOM, 0.0);
+            draw_line(p, heading, Rect::new(top.x + 14.0, heading_y, top.w - 28.0, 27.0),
+                theme::size::CAPTION, true);
+            for index in first..end - 1 {
                 let divider = unified_setting_rect(index);
-                p.rect(Rect::new(divider.x + 22.0, divider.y + divider.h + 18.0,
+                p.rect(Rect::new(divider.x + 22.0, divider.y + divider.h + 1.0,
                     divider.w - 44.0, 1.0), 0.0,
-                    theme::HEADER_DIVIDER_INK, theme::HEADER_DIVIDER_INK, 0.0);
+                    theme::HAIRLINE, theme::HAIRLINE, 0.0);
             }
         }
+        let focus = unified_setting_rect(self.option);
+        let highlight = Rect::new(focus.x, self.settings_focus_y.pos, focus.w, focus.h);
+        let fill = theme::with_a(self.accent(), 0.20);
+        p.rect(highlight, 15.0, fill, fill, 0.0);
         for i in 0..UNIFIED_SETTINGS_COUNT {
             let rect = unified_setting_rect(i);
-            let mut focus_alpha = if self.option == i { 1.0 } else { 0.0 };
-            if let Some((from, to, started)) = self.settings_focus_motion {
-                let t = (started.elapsed().as_secs_f32() / MOTION.as_secs_f32()).clamp(0.0, 1.0);
-                let eased = t * t * (3.0 - 2.0 * t);
-                if from == i { focus_alpha = 1.0 - eased; }
-                if to == i { focus_alpha = eased; }
-            }
-            if focus_alpha > 0.0 {
-                let mut fill = theme::usb_accent(self.settings.accent);
-                fill[3] = 0.24 * focus_alpha;
-                p.rect_sheened(rect, 12.0, fill, fill);
-                let mut edge = theme::usb_accent(self.settings.accent);
-                edge[3] = 0.52 * focus_alpha;
-                p.rring(rect, 12.0, 1.5, edge);
-            }
             let (name, _, value) = unified_setting_text(i, &self.settings);
-            let label = TtfMeasure.fit_line(name, 590.0, theme::size::CAPTION, self.option == i);
-            Label::new(label.as_ptr(), theme::size::CAPTION, theme::TEXT_PRIMARY)
-                .h(HAlign::Left).draw(p, Rect::new(rect.x + 24.0, rect.y + 6.0, 600.0, 46.0));
-            let fit = TtfMeasure.fit_line(&value, 260.0, theme::size::CAPTION, false);
-            Label::new(fit.as_ptr(), theme::size::CAPTION, theme::TEXT_SECONDARY)
-                .h(HAlign::Right).draw(p, Rect::new(rect.x + rect.w - 312.0, rect.y + 6.0, 282.0, 46.0));
+            draw_line(p, name, Rect::new(rect.x + 22.0, rect.y, 694.0, rect.h),
+                theme::size::LABEL, self.option == i);
+            let (value_run, value_width) = TtfMeasure.fit_line_measured(&value, 315.0, theme::size::CAPTION, false);
+            let value_x = rect.x + rect.w - 24.0 - value_width;
+            Label::new(value_run.as_ptr(), theme::size::CAPTION, theme::TEXT_SECONDARY)
+                .h(HAlign::Right).draw(p, Rect::new(value_x, rect.y, value_width, rect.h));
             if i == 6 {
-                let swatch = theme::usb_accent(self.settings.accent);
-                p.rect_sheened(Rect::new(rect.x + rect.w - 332.0, rect.y + 18.0, 17.0, 17.0),
-                    8.0, swatch, swatch);
+                p.rrect(Rect::new(value_x - 30.0, rect.y + 24.0, 16.0, 16.0), 8.0, 8.0, self.accent());
             }
         }
         if !self.status.is_empty() {
-            draw_line(p, &self.status, Rect::new(110.0, 941.0, 1630.0, 53.0), theme::size::CAPTION, false);
+            draw_line(p, &self.status, Rect::new(x, 926.0, 530.0, 48.0), theme::size::CAPTION, false);
         }
     }
 
     fn draw_dialog(&self, p: Painter, dialog: &Dialog) {
-        if matches!(dialog, Dialog::Settings) {
-            self.draw_unified_settings(p, self.dialog_started.map_or(1.0, settings_ease));
-            return;
-        }
         let cancel = tr("Cancelar", "Cancel·la");
         let save_status = |description: &'static str| {
             if matches!(self.settings_job, Some(SettingsJob::Save(_))) { tr("Guardando…", "Desant…") }
@@ -2362,7 +2403,8 @@ impl Browser {
         let (x, w) = (PANEL.x + 45.0, PANEL.w - 90.0);
         p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.48), theme::scrim_black(0.48), 0.0);
         p.shadow_outside(PANEL, theme::ALERT_PANEL_RAD, theme::MENU_SHADOW_BLUR, theme::MENU_SHADOW_DY, theme::MENU_SHADOW);
-        p.rect_sheened(PANEL, theme::ALERT_PANEL_RAD, theme::MENU_GLASS_TOP, theme::MENU_GLASS_BOT);
+        p.rect(PANEL, theme::ALERT_PANEL_RAD, theme::USB_DIALOG_TOP, theme::USB_DIALOG_BOTTOM, 0.0);
+        p.rring(PANEL, theme::ALERT_PANEL_RAD, 1.0, theme::HAIRLINE);
         let destructive = matches!(dialog, Dialog::Delete { .. } | Dialog::DeleteFolders);
         let eject = matches!(dialog, Dialog::Eject(_));
         let glyph_rect = Rect::new(x, 326.0, 80.0, 80.0);
@@ -3445,6 +3487,56 @@ mod usb_browser_tests {
         browser.click(first.x + first.w + 1.0, first.y + 1.0);
         assert!(browser.pending.is_none());
         assert_eq!(browser.nav_hover, Some(0));
+    }
+
+    #[test]
+    fn clicking_a_tab_without_a_disk_keeps_it_active_when_the_pointer_leaves() {
+        let mut browser = Browser::new();
+        let rect = NAV_TABS[DOCUMENTALS_TAB];
+        let (x, y) = (rect.x + 5.0, rect.y + 5.0);
+        assert!(browser.pointer(x, y));
+        assert_eq!(browser.nav_tab, 0);
+        browser.click(x, y);
+        assert_eq!(browser.nav_tab, DOCUMENTALS_TAB);
+        assert!(browser.tab_waiting_for_volume());
+        assert!(browser.pointer(x, y));
+        assert!(browser.pointer(x, y + 140.0));
+        assert_eq!(browser.nav_hover, None);
+        assert_eq!(browser.nav_focus, None);
+        assert_eq!(browser.nav_tab, DOCUMENTALS_TAB);
+    }
+
+    #[test]
+    fn a_tab_click_supersedes_an_inflight_section_read() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(volume.clone());
+        browser.enter_media(volume, 1, Vec::new());
+        let (stale, pending) = mpsc::sync_channel(1);
+        browser.pending = Some(pending);
+        let rect = NAV_TABS[2];
+        browser.click(rect.x + 5.0, rect.y + 5.0);
+        assert_eq!(browser.nav_tab, 2);
+        assert!(browser.pending.is_some());
+        assert!(stale.send(DiskResult::Discovered(browser.volume().unwrap().clone(), 1, vec![])).is_err());
+    }
+
+    #[test]
+    fn settings_hover_click_and_dpad_target_the_same_rows() {
+        let mut browser = Browser::new();
+        browser.open_nav_tab(SETTINGS_TAB);
+        let language = unified_setting_rect(5);
+        assert!(browser.pointer(language.x + 15.0, language.y + 15.0));
+        assert_eq!(browser.option, 5);
+        browser.key(Key::Up, false);
+        assert_eq!(browser.option, 4);
+        // Keep the click on its normal path without writing real preferences.
+        let (_load, pending) = mpsc::sync_channel(1);
+        browser.settings_job = Some(SettingsJob::Load(pending));
+        let accent = unified_setting_rect(6);
+        browser.click(accent.x + 15.0, accent.y + 15.0);
+        assert_eq!(browser.option, 6);
+        assert!(matches!(browser.dialog, Some(Dialog::Settings)));
     }
 
     #[test]
