@@ -116,7 +116,7 @@ fn compact_badge_text(value: &str, compact: bool) -> String {
 }
 
 fn nav_glyph_ink(index: usize, focus: f32, selected: f32) -> [f32; 4] {
-    if index == 3 { theme::USB_FAVORITES }
+    if index == FAVORITES_TAB { theme::USB_FAVORITES }
     else { widgets::TabPill::mixed_ink(focus, selected) }
 }
 
@@ -190,6 +190,13 @@ fn folder_fold(name: &str) -> String {
 }
 
 fn media_folder_score(name: &str, kind: usize) -> u8 {
+    if kind == DOCUMENTALS_TAB {
+        return if name.eq_ignore_ascii_case("documentals") || name.eq_ignore_ascii_case("documentales") {
+            3
+        } else {
+            0
+        };
+    }
     let name = folder_fold(name);
     let exact: &[&str] = if kind == 1 {
         &["pelis", "peliculas", "movies", "films", "film", "cine", "cinema", "moviecollection", "pelicules", "pellicules"]
@@ -240,16 +247,31 @@ fn discover_media_folders(volume: &Volume, kind: usize) -> Vec<PathBuf> {
     matched.into_iter().map(|(_, _, path)| path).collect()
 }
 
-// Stable six-action PlxNative-style navigation track.
-const NAV_PILL: Rect = Rect::new(352.0, 32.0, 1216.0, 70.0);
-const NAV_TABS: [Rect; 6] = [
-    Rect::new(365.0, 42.0, 125.0, 48.0),
-    Rect::new(500.0, 42.0, 205.0, 48.0),
-    Rect::new(715.0, 42.0, 155.0, 48.0),
-    Rect::new(880.0, 42.0, 195.0, 48.0),
-    Rect::new(1085.0, 42.0, 170.0, 48.0),
-    Rect::new(1265.0, 42.0, 290.0, 48.0),
+const DOCUMENTALS_TAB: usize = 3;
+const FAVORITES_TAB: usize = 4;
+const SETTINGS_TAB: usize = 5;
+const EJECT_TAB: usize = 6;
+
+// Stable PlxNative-style navigation track.
+const NAV_PILL: Rect = Rect::new(247.0, 32.0, 1426.0, 70.0);
+const NAV_TABS: [Rect; EJECT_TAB + 1] = [
+    Rect::new(260.0, 42.0, 125.0, 48.0),
+    Rect::new(395.0, 42.0, 205.0, 48.0),
+    Rect::new(610.0, 42.0, 155.0, 48.0),
+    Rect::new(775.0, 42.0, 200.0, 48.0),
+    Rect::new(985.0, 42.0, 195.0, 48.0),
+    Rect::new(1190.0, 42.0, 170.0, 48.0),
+    Rect::new(1370.0, 42.0, 290.0, 48.0),
 ];
+
+fn media_tab_title(tab: usize) -> &'static str {
+    match tab {
+        1 => tr("Películas", "Pel·lícules"),
+        2 => tr("Series", "Sèries"),
+        DOCUMENTALS_TAB => "Documentals",
+        _ => unreachable!("expected a media tab"),
+    }
+}
 // Folder-specific controls sit in the content header, not the navigation.
 const ACTIONS: [(Action, Rect); 3] = [
     (Action::ToggleFavorite, Rect::new(1020.0, 218.0, 396.0, 55.0)),
@@ -471,9 +493,9 @@ impl Browser {
     }
 
     fn len(&self) -> usize {
-        // A direct media tab is a navigation floor, not a list of category
-        // folders. Its pending first directory is never painted as a card.
-        if self.media_cards().is_some() { return 0; }
+        if let Some(view) = self.media_cards() {
+            return if self.documental_folder_picker(view) { view.paths.len() } else { 0 };
+        }
         self.favorite_cards().map_or_else(|| self.folders.last().map_or(self.scan.volumes.len(), |folder| folder.entries.len()), |view| view.paths.len())
     }
 
@@ -715,7 +737,7 @@ impl Browser {
         changed |= self.settings_focus_motion.is_some_and(|(_, _, at)| now.duration_since(at) < MOTION);
         changed |= self.favorite_motion.as_ref().is_some_and(|(_, _, started)| now.duration_since(*started) < FAVORITE_MOTION);
         changed |= self.favorite_section.1.elapsed() < MOTION;
-        let selected_tab = if self.favorite_section.0 { 3 } else { self.nav_tab };
+        let selected_tab = if self.favorite_section.0 { FAVORITES_TAB } else { self.nav_tab };
         let focused_tab = self.nav_focus.unwrap_or(selected_tab);
         self.nav_strip.update(selected_tab as i32, focused_tab as i32,
             |index| NAV_TABS.get(index).map(|rect| (rect.x, rect.w)), widgets::SelMark::Travels, dt);
@@ -971,6 +993,10 @@ impl Browser {
         self.media_view.as_ref().filter(|view| view.depth == self.folders.len())
     }
 
+    fn documental_folder_picker(&self, view: &FavoriteView) -> bool {
+        self.nav_tab == DOCUMENTALS_TAB && view.paths.len() > 1
+    }
+
     fn leave_media(&mut self) {
         if let Some(view) = self.media_view.take() {
             self.folders.truncate(view.depth);
@@ -994,9 +1020,10 @@ impl Browser {
         // A media tab opens the *contents* of the discovered category folder,
         // not another card representing PELIS or SERIES. Keep media_view as
         // the navigation floor so Back never exposes that container card.
-        if let Some(path) = self.media_view.as_ref().and_then(|view| view.paths.first().cloned()) {
-            let volume = self.media_view.as_ref().expect("media view created").volume.clone();
-            self.open_folder(volume, path);
+        if let Some(view) = self.media_cards().filter(|view| !self.documental_folder_picker(view)) {
+            if let Some(path) = view.paths.first() {
+                self.open_folder(view.volume.clone(), path.clone());
+            }
         }
     }
 
@@ -1022,7 +1049,7 @@ impl Browser {
                 self.restore_view(selected, 0.0);
                 self.status.clear();
             }
-            1 | 2 => {
+            1 | 2 | DOCUMENTALS_TAB => {
                 let Some(volume) = self.volume().cloned() else {
                     self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
                     return;
@@ -1034,24 +1061,24 @@ impl Browser {
                 self.status = tr("Buscando carpetas multimedia…", "Buscant carpetes multimèdia…").into();
                 self.request(move || DiskResult::Discovered(volume.clone(), tab, discover_media_folders(&volume, tab)));
             }
-            3 => {
+            FAVORITES_TAB => {
                 if self.volume().is_none() {
                     self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
                     return;
                 }
                 self.leave_media();
-                self.nav_tab = 3;
+                self.nav_tab = FAVORITES_TAB;
                 self.set_favorite_section(true);
                 self.show_favorites();
             }
-            4 => {
+            SETTINGS_TAB => {
                 self.settings_exit = None;
-                self.settings_return_focus = previous_focus.or(Some(4));
+                self.settings_return_focus = previous_focus.or(Some(SETTINGS_TAB));
                 self.dialog = Some(Dialog::Settings);
                 self.dialog_started = Some(Instant::now());
                 self.status.clear();
             }
-            5 => {
+            EJECT_TAB => {
                 if let Some(volume) = self.volume().cloned().filter(|volume| system_mount(volume).is_some()) {
                     self.dialog = Some(Dialog::Eject(volume));
                     self.status.clear();
@@ -1088,7 +1115,7 @@ impl Browser {
             library_selected, library_scroll,
         });
         self.set_favorite_section(true);
-        self.nav_tab = 3;
+        self.nav_tab = FAVORITES_TAB;
         self.action = None;
         self.restore_view(0, 0.0);
     }
@@ -1099,7 +1126,7 @@ impl Browser {
             self.restore_view(view.library_selected, view.library_scroll);
         }
         self.set_favorite_section(false);
-        if self.nav_tab == 3 { self.nav_tab = 0; }
+        if self.nav_tab == FAVORITES_TAB { self.nav_tab = 0; }
     }
 
     fn restore_view(&mut self, selected: usize, scroll: f32) {
@@ -1524,7 +1551,15 @@ impl Browser {
 
     fn open(&mut self) {
         if self.pending.is_some() { return; }
-        if let Some(view) = self.media_cards().or_else(|| self.favorite_cards()) {
+        if let Some(view) = self.media_cards() {
+            if self.documental_folder_picker(view) {
+                if let Some(path) = view.paths.get(self.selected) {
+                    self.open_folder(view.volume.clone(), path.clone());
+                }
+            }
+            return;
+        }
+        if let Some(view) = self.favorite_cards() {
             if let Some(path) = view.paths.get(self.selected) {
                 if is_video_path(path) {
                     self.dialog = Some(Dialog::Video { volume: view.volume.clone(), path: path.clone() });
@@ -1660,7 +1695,7 @@ impl Browser {
             return;
         }
         if self.media_view.as_ref().is_some_and(|view| {
-            self.folders.len() == view.depth + 1
+            !self.documental_folder_picker(view) && self.folders.len() == view.depth + 1
                 && self.folders.last().is_some_and(|folder| view.paths.first() == Some(&folder.path))
         }) {
             // At the direct category root, Back returns to the drive picker.
@@ -1935,7 +1970,7 @@ impl Browser {
         });
         let focused = self.item(self.selected);
         let (title, detail, greeting_icon) = if self.media_cards().is_some() {
-            (if self.nav_tab == 1 { tr("Películas", "Pel·lícules") } else { tr("Series", "Sèries") }, "", None)
+            (media_tab_title(self.nav_tab), "", None)
         } else if self.favorite_cards().is_some() {
             (tr("Favoritos", "Favorits"), "", None)
         } else if breadcrumb.is_none() {
@@ -2074,10 +2109,9 @@ impl Browser {
         for (index, rect) in NAV_TABS.into_iter().enumerate() {
             let (title, glyph) = match index {
                 0 => (tr("Inicio", "Inici"), None),
-                1 => (tr("Películas", "Pel·lícules"), None),
-                2 => (tr("Series", "Sèries"), None),
-                3 => (tr("Favoritos", "Favorits"), Some(Glyph::Star(false))),
-                4 => (tr("Ajustes", "Ajustos"), Some(Glyph::Settings)),
+                1 | 2 | DOCUMENTALS_TAB => (media_tab_title(index), None),
+                FAVORITES_TAB => (tr("Favoritos", "Favorits"), Some(Glyph::Star(false))),
+                SETTINGS_TAB => (tr("Ajustes", "Ajustos"), Some(Glyph::Settings)),
                 _ => (tr("Expulsar disco", "Expulsar disc"), Some(Glyph::Eject)),
             };
             let (focus, selected) = self.nav_strip.mixes((rect.x, rect.w));
@@ -2086,7 +2120,7 @@ impl Browser {
             let x = rect.x + (rect.w - width - icon_space) * 0.5;
             if let Some(glyph) = glyph {
                 let icon = Rect::new(x, rect.y + (rect.h - 26.0) * 0.5, 26.0, 26.0);
-                if index == 3 && selected > 0.1 {
+                if index == FAVORITES_TAB && selected > 0.1 {
                     // Tiny dark under-stroke keeps the yellow outline legible
                     // against the travelling light selection capsule.
                     let shadow = Rect::new(icon.x + 1.0, icon.y + 1.0, icon.w, icon.h);
@@ -3239,7 +3273,7 @@ mod usb_browser_tests {
     fn favorite_nav_star_uses_yellow_in_every_state() {
         for selected in [0.0, 0.25, 0.75, 1.0] {
             for focus in [0.0, 0.5, 1.0] {
-                assert_eq!(nav_glyph_ink(3, focus, selected), theme::USB_FAVORITES);
+                assert_eq!(nav_glyph_ink(FAVORITES_TAB, focus, selected), theme::USB_FAVORITES);
             }
         }
     }
@@ -3248,17 +3282,17 @@ mod usb_browser_tests {
     fn leaving_settings_restores_previous_navigation_focus() {
         let mut browser = Browser::new();
         browser.nav_tab = 2;
-        browser.open_nav_tab(4);
+        browser.open_nav_tab(SETTINGS_TAB);
         assert!(matches!(browser.dialog, Some(Dialog::Settings)));
         browser.back();
         assert!(browser.dialog.is_none());
-        assert_eq!(browser.nav_focus, Some(4));
+        assert_eq!(browser.nav_focus, Some(SETTINGS_TAB));
         assert!(browser.settings_exit.is_some());
     }
 
     #[test]
-    fn six_navigation_destinations_stay_in_one_stationary_track() {
-        assert_eq!(NAV_TABS.len(), 6);
+    fn seven_navigation_destinations_stay_in_one_stationary_track() {
+        assert_eq!(NAV_TABS.len(), 7);
         let first = NAV_TABS.first().unwrap();
         let last = NAV_TABS.last().unwrap();
         assert!(first.x >= NAV_PILL.x && first.y >= NAV_PILL.y);
@@ -3446,6 +3480,34 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn documentals_finds_both_folder_names_and_can_open_either_match() {
+        assert_eq!(media_folder_score("DoCuMeNtAlS", DOCUMENTALS_TAB), 3);
+        assert_eq!(media_folder_score("DOCUMENTALES", DOCUMENTALS_TAB), 3);
+        assert_eq!(media_folder_score("Documentales 4K", DOCUMENTALS_TAB), 0);
+        assert_eq!(media_folder_score("Series", DOCUMENTALS_TAB), 0);
+
+        let root = plx_base::testscratch::process_dir("cineusb-documentals-category");
+        let first = root.join("DOCUMENTALES");
+        let second = root.join("Documentals");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir_all(root.join("Series")).unwrap();
+        let volume = Volume { path: root.clone(), label: None, mount_id: None, system: false };
+        let paths = discover_media_folders(&volume, DOCUMENTALS_TAB);
+        assert_eq!(paths, vec![first, second.clone()]);
+
+        let mut browser = Browser::new();
+        browser.scan.volumes.push(volume.clone());
+        browser.enter_media(volume, DOCUMENTALS_TAB, paths);
+        assert_eq!(browser.len(), 2);
+        browser.selected = 1;
+        browser.open();
+        let result = browser.pending.take().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(result, DiskResult::Folder(_, path, Ok(_)) if path == second));
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
     fn favorites_keeps_its_section_through_folders_and_returns_to_its_cards() {
         let mut browser = Browser::new();
         let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: Some(42), system: true };
@@ -3455,7 +3517,7 @@ mod usb_browser_tests {
         assert_eq!(browser.len(), 1);
         assert_eq!(browser.item(0).unwrap().0, "Breaking Bad");
         browser.folders.push(Folder { volume, path, entries: vec![], collection: None, selected: 0, scroll: 0.0 });
-        browser.nav_focus = Some(4);
+        browser.nav_focus = Some(SETTINGS_TAB);
         assert!(browser.favorite_section.0 && browser.favorite_cards().is_none());
         browser.nav_focus = None;
         browser.dialog = Some(Dialog::Settings);
