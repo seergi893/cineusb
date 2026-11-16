@@ -1070,6 +1070,8 @@ impl Browser {
         if matches!(tab, 0 | 1 | 2 | DOCUMENTALS_TAB | FAVORITES_TAB) {
             // A new section supersedes reads from the previous section.
             self.pending = None;
+        } else if self.pending.is_some() {
+            return;
         }
         let previous_focus = self.nav_hover.or(self.nav_focus);
         self.nav_focus = None;

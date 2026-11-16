@@ -1584,14 +1584,7 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
             return;
         }
         if app.ptr.dpad_mode {
-            // CineUSB's pointer only steers an explicit tab or settings row.
-            // Small deliberate moves should give control back without requiring
-            // a sweep across several controls.
-            #[cfg(feature = "local-usb")]
-            let motion_gate = if app.route() == AppArg::LocalUsb { 4.0 } else { super::input::DPAD_MOTION_GATE };
-            #[cfg(not(feature = "local-usb"))]
-            let motion_gate = super::input::DPAD_MOTION_GATE;
-            if app.ptr.mot_accum < motion_gate {
+            if app.ptr.mot_accum < super::input::DPAD_MOTION_GATE {
                 return;
             }
             app.ptr.dpad_mode = false;
