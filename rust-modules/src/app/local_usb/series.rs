@@ -48,7 +48,7 @@ mod usb_browser_tests {
         let root = plx_base::testscratch::process_dir("cineusb-series-structure");
         for file in [
             "Mixed/Primer.mkv", "Mixed/Season 1/Segon.mp4", "Mixed/Season 1/Arxiu/Tercer.mkv",
-            "Mixed/Temporada 2/Quart.mkv", "Mixed/S03/Cinquè.mkv", "Mixed/S03/Cinquè.srt",
+            "Mixed/Temporada 2 - Títol/Quart.mkv", "Mixed/S03/Cinquè.mkv", "Mixed/S03/Cinquè.srt",
             "Mixed/Episodes from elsewhere/Another.mkv", "Mixed/Seasonal/Other.mp4",
             "Direct/One.mkv", "Direct/Two.mp4", "Episodes/Show.S01E01.mkv",
         ] {
