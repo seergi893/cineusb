@@ -105,7 +105,7 @@ pub(super) fn entry_cover(entry: &Entry, parent: Option<Cover>) -> (Cover, &'sta
     }
 }
 
-fn is_season(name: &str) -> bool {
+pub(super) fn is_season(name: &str) -> bool {
     ["temporada", "season"].into_iter().any(|prefix| {
         name.strip_prefix(prefix).is_some_and(|suffix| small_number(suffix.trim_start_matches([' ', '.', '_', '-'])))
     }) || name.strip_prefix('s').is_some_and(small_number)

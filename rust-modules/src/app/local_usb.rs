@@ -2,6 +2,7 @@
 mod art;
 mod continuity;
 mod disk;
+mod series;
 
 use art::Cover;
 use super::{App, Key, playback};
@@ -417,6 +418,39 @@ struct DetailsRequest {
     reply: Receiver<plx_play_feed::LocalVideoDetails>,
 }
 
+const SERIES_REFRESH: Duration = Duration::from_secs(60);
+
+struct SeriesCard<'a> {
+    volume: &'a Volume,
+    path: PathBuf,
+    modified: Option<i64>,
+    known: bool,
+}
+
+struct SeriesRequest {
+    volume: Volume,
+    path: PathBuf,
+    modified: Option<i64>,
+    known: bool,
+    invalidated: bool,
+    reply: Receiver<Option<series::Counts>>,
+}
+
+struct SeriesCacheEntry {
+    checked: Instant,
+    modified: Option<i64>,
+    known: bool,
+    counts: Option<series::Counts>,
+}
+
+impl SeriesCacheEntry {
+    fn fresh(&self, card: &SeriesCard<'_>, now: Instant) -> bool {
+        now.duration_since(self.checked) < SERIES_REFRESH
+            && (card.modified.is_none() || card.modified == self.modified)
+            && (!card.known || self.known || self.counts.is_some())
+    }
+}
+
 pub(super) struct Browser {
     scan: Scan,
     folders: Vec<Folder>,
@@ -438,6 +472,8 @@ pub(super) struct Browser {
     scanning: Option<Receiver<Scan>>,
     details_job: Option<DetailsRequest>,
     details: BTreeMap<DetailKey, plx_play_feed::LocalVideoDetails>,
+    series_job: Option<SeriesRequest>,
+    series_cache: BTreeMap<PathBuf, SeriesCacheEntry>,
     facts: Option<(Volume, VolumeFacts)>,
     facts_job: Option<VolumeFactsJob>,
     prepared: Option<PreparedVideo>,
@@ -487,6 +523,7 @@ impl Browser {
             settings_job: None, settings_started: false,
             pending: None, scanning: None, next_scan: now, last_tick: now,
             details_job: None, details: BTreeMap::new(),
+            series_job: None, series_cache: BTreeMap::new(),
             facts: None, facts_job: None, prepared: None, ready: None, playing: None,
             progress_job: None, queued_progress: Default::default(), countdown_display: 0,
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
@@ -563,6 +600,7 @@ impl Browser {
                         // tab retains its own navigation floor and reports the error.
                         if self.media_view.is_none() && path != volume.path && self.scan.volumes.contains(&volume) {
                             self.discovery_cache.retain(|(root, _, _), _| *root != volume.path);
+                            self.invalidate_series_counts();
                             self.leave_media();
                             self.leave_favorites();
                             self.folders.clear();
@@ -686,6 +724,7 @@ impl Browser {
                         && (self.scan != scan || self.status == tr("Buscando discos USB…", "Buscant discos USB…")) {
                         let selected = self.scan.volumes.get(self.selected).cloned();
                         self.details.clear();
+                        self.invalidate_series_counts();
                         self.scan = scan;
                         self.discovery_cache.retain(|(path, id, _), _| self.scan.volumes.iter()
                             .any(|volume| volume.path == *path && volume.mount_id.unwrap_or(0) == *id));
@@ -767,6 +806,7 @@ impl Browser {
             *success && start.elapsed() < Duration::from_secs(3));
         changed |= self.ejecting.as_ref().is_some_and(|(_, start)| start.elapsed() < Duration::from_millis(800));
         changed |= self.update_video_details();
+        changed |= self.update_series_counts(now);
         if self.action.is_some_and(|action| !self.action_available(action)) {
             self.action = None;
             changed = true;
@@ -1120,6 +1160,7 @@ impl Browser {
                 // External renames and NTFS remounts must be rediscovered.
                 // Do not reuse a previously cached PELIS/SERIES path.
                 self.discovery_cache.clear();
+                self.invalidate_series_counts();
                 self.next_scan = Instant::now();
                 self.loading_favorites = false;
                 self.nav_tab = 0;
@@ -1356,6 +1397,75 @@ impl Browser {
             self.details_job = Some(DetailsRequest { volume, key, reply });
         } else {
             self.details.insert(key, Default::default());
+        }
+        changed
+    }
+
+    fn series_card(&self, index: usize) -> Option<SeriesCard<'_>> {
+        let card = if let Some(view) = self.favorite_cards() {
+            let path = view.paths.get(index)?;
+            if is_video_path(path) { return None; }
+            SeriesCard { volume: &view.volume, path: path.clone(), modified: None, known: true }
+        } else {
+            if !matches!(self.nav_tab, 0 | 2 | FAVORITES_TAB) || self.media_cards().is_some() { return None; }
+            let folder = self.folders.last()?;
+            let entry = folder.entries.get(index)?;
+            if entry.kind != Kind::Folder { return None; }
+            let parent_is_category = self.media_view.as_ref().and_then(|view| view.paths.first()) == Some(&folder.path)
+                || folder.path.file_name().is_some_and(|name| media_folder_score(&name.to_string_lossy(), 2) == 3);
+            SeriesCard { volume: &folder.volume, path: folder.path.join(&entry.name),
+                modified: entry.modified, known: parent_is_category }
+        };
+        let name = card.path.file_name()?.to_string_lossy();
+        if art::is_season(&name.to_lowercase()) || (!card.known && media_folder_score(&name, 2) == 3) {
+            return None;
+        }
+        Some(card)
+    }
+
+    fn invalidate_series_counts(&mut self) {
+        self.series_cache.clear();
+        if let Some(job) = &mut self.series_job {
+            job.invalidated = true;
+        }
+    }
+
+    fn update_series_counts(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        if let Some(job) = &self.series_job {
+            let counts = match job.reply.try_recv() {
+                Ok(counts) => counts,
+                Err(TryRecvError::Disconnected) => None,
+                Err(TryRecvError::Empty) => return false,
+            };
+            let job = self.series_job.take().expect("series request just polled");
+            if !job.invalidated && self.scan.volumes.contains(&job.volume) {
+                if self.series_cache.len() >= 512 && !self.series_cache.contains_key(&job.path) {
+                    let oldest = self.series_cache.iter().min_by_key(|(_, entry)| entry.checked)
+                        .map(|(path, _)| path.clone());
+                    if let Some(path) = oldest { self.series_cache.remove(&path); }
+                }
+                let previous = self.series_cache.insert(job.path, SeriesCacheEntry {
+                    checked: now, modified: job.modified, known: job.known, counts,
+                });
+                changed = previous.and_then(|entry| entry.counts) != counts;
+            }
+        }
+        if self.dialog.is_some() || self.pending.is_some() { return changed; }
+        let grid = self.grid();
+        let target = poster_grid::visible_in(&grid, self.len(), self.grid_top(), self.scroll.pos)
+            .filter_map(|index| self.series_card(index))
+            .find(|card| !self.series_cache.get(&card.path).is_some_and(|entry| entry.fresh(card, now)));
+        let Some(card) = target else { return changed };
+        let SeriesCard { volume, path, modified, known } = card;
+        let volume = volume.clone();
+        let folder = path.clone();
+        let mount = system_mount(&volume);
+        let (send, reply) = mpsc::sync_channel(1);
+        if plx_base::task::spawn_off_frame("cineusb-series-counts", move |_| {
+            let _ = send.send(series::count(&folder, mount, known).ok().flatten());
+        }) {
+            self.series_job = Some(SeriesRequest { volume, path, modified, known, invalidated: false, reply });
         }
         changed
     }
@@ -1613,6 +1723,7 @@ impl Browser {
     }
 
     fn finish_mutation(&mut self, result: Result<(), String>, success: &str, failure: &str) {
+        self.invalidate_series_counts();
         self.scanning = None;
         self.next_scan = Instant::now();
         self.status = match result {
@@ -1832,10 +1943,6 @@ impl Browser {
         self.dialog.is_none() && self.eject_feedback.is_none() && !self.mutating
     }
 
-    fn pointer_media_cards(&self) -> bool {
-        self.media_library() || self.nav_tab == FAVORITES_TAB
-    }
-
     fn card_at(&self, x: f32, y: f32) -> Option<usize> {
         let top = self.grid_top();
         let bleed = if self.drive_picker() { 26.0 } else { 14.0 };
@@ -1862,7 +1969,7 @@ impl Browser {
         };
         if self.nav_hover.is_some() {
             self.nav_focus = None;
-        } else if self.pointer_media_cards() && self.nav_available() {
+        } else if self.nav_available() {
             if let Some(index) = self.card_at(x, y) {
                 let left_nav = self.nav_focus.take().is_some();
                 let left_action = self.action.take().is_some();
@@ -1921,13 +2028,8 @@ impl Browser {
             self.open();
             return;
         }
-        // Media clicks require a hit. Keep the legacy physical-OK fallback
-        // in the drive picker and manual USB browser.
-        if self.pointer_media_cards() { return; }
-        self.nav_focus = None;
-        if let Some(action) = self.action {
-            self.open_action(action);
-        } else {
+        // With no drive cards, clicking the empty Home still retries detection.
+        if self.drive_picker() && self.len() == 0 {
             self.open();
         }
     }
@@ -2699,6 +2801,9 @@ impl Browser {
         let video = current.is_some_and(|(_, entry)| entry.kind == Kind::Video)
             || self.favorite_cards().and_then(|view| view.paths.get(index)).is_some_and(|path| is_video_path(path));
         if video { widgets::art_scrim(p, card, radius, 68.0, widgets::STILL_SCRIM_A); }
+        let series_counts = if video { None } else {
+            self.series_card(index).and_then(|series| self.series_cache.get(&series.path)?.counts)
+        };
         let caption = if video {
             // Fixed two-line title zone: a long filename never moves the
             // episode, running time or resolution labels below it.
@@ -2717,6 +2822,8 @@ impl Browser {
                     .draw(p, frame);
             } else { normal.draw(p, frame); }
             frame
+        } else if let Some(counts) = series_counts {
+            draw_series_caption(p, card, radius, &title, counts)
         } else { widgets::poster_title(p, card, radius, &title, false, &TtfMeasure) };
         let status_y = if video { card.y + card.h - 44.0 } else { caption.y - 30.0 };
         let (position, duration) = unpack_progress(record);
@@ -2768,10 +2875,49 @@ impl Browser {
         if record == WATCHED {
             icons::draw(p, Icon::Check, Rect::new(card.x + 15.0, status_y + 5.0, 22.0, 22.0), theme::USB_WATCHED_EDGE);
             draw_line(p, tr("Visto", "Vist"), Rect::new(card.x + 44.0, status_y, card.w - 58.0, 28.0), theme::size::MICRO, true);
-        } else {
-        draw_line(p, kind, Rect::new(card.x + 16.0, status_y, card.w - 32.0, 28.0), theme::size::CAPTION, false);
+        } else if series_counts.is_none() {
+            draw_line(p, kind, Rect::new(card.x + 16.0, status_y, card.w - 32.0, 28.0), theme::size::CAPTION, false);
         }
     }
+}
+
+fn draw_series_caption(p: Painter, card: Rect, radius: f32, title: &str, counts: series::Counts) -> Rect {
+    let episodes = format!("{} {}", counts.episodes, if counts.episodes == 1 {
+        tr("episodio", "capítol")
+    } else {
+        tr("episodios", "capítols")
+    });
+    let seasons = format!("{} {}", counts.seasons, if counts.seasons == 1 {
+        tr("temporada", "temporada")
+    } else {
+        tr("temporadas", "temporades")
+    });
+    let combined = format!("{seasons} · {episodes}");
+    let width = card.w - 24.0;
+    let x = card.x + 12.0;
+    let text_size = theme::size::MICRO;
+    let episodes_only = [episodes.as_str()];
+    let single_line = [combined.as_str()];
+    let stacked = [seasons.as_str(), episodes.as_str()];
+    let rows: &[&str] = if counts.seasons == 0 {
+        &episodes_only
+    } else if TtfMeasure.width_str(&combined, text_size, false) <= width {
+        &single_line
+    } else {
+        &stacked
+    };
+    let row_height = 27.0;
+    let meta_y = card.y + card.h - 8.0 - rows.len() as f32 * row_height;
+    let title = plx_ui::text_view::TextView::new(title, theme::size::LABEL, theme::TEXT_PRIMARY)
+        .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2);
+    let title_height = title.measure_h(width);
+    let frame = Rect::new(x, meta_y - 4.0 - title_height, width, title_height);
+    widgets::art_scrim(p, card, radius, card.y + card.h - frame.y + 38.0, widgets::STILL_SCRIM_A);
+    title.draw(p, frame);
+    for (index, row) in rows.iter().enumerate() {
+        draw_line(p, row, Rect::new(x, meta_y + index as f32 * row_height, width, row_height), text_size, false);
+    }
+    frame
 }
 
 fn hit(rect: Rect, x: f32, y: f32) -> bool {
@@ -3227,7 +3373,7 @@ fn draw_line(p: Painter, line: &str, frame: Rect, size: i32, strong: bool) {
 
 pub(super) fn click(app: &mut App, x: f32, y: f32, multi_click: bool) {
     // The first press may have opened a video dialog beneath the pointer.
-    if multi_click && app.usb.pointer_media_cards() && matches!(app.usb.dialog, Some(Dialog::Video { .. })) {
+    if multi_click && matches!(app.usb.dialog, Some(Dialog::Video { .. })) {
         return;
     }
     app.usb.click(x, y);
@@ -3420,6 +3566,79 @@ pub(super) fn flush_playback(app: &mut App) {
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn home_pointer_opens_the_exact_drive_and_ignores_space_between_drives() {
+        let root = plx_base::testscratch::process_dir("cineusb-pointer-home");
+        let first = root.join("unit-a");
+        let second = root.join("unit-b");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let mut browser = Browser::new();
+        for path in [first, second.clone()] {
+            browser.scan.volumes.push(Volume { path, label: None, mount_id: None, system: false });
+        }
+        let a = browser.tile_rect(0);
+        let b = browser.tile_rect(1);
+        assert!(browser.pointer(b.x + 20.0, b.y + 20.0));
+        assert_eq!(browser.selected, 1);
+        browser.click(a.x + a.w + 1.0, a.y + 20.0);
+        assert!(browser.pending.is_none());
+        browser.click(b.x + 20.0, b.y + 20.0);
+        let result = browser.pending.take().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(result, DiskResult::Folder(_, path, Ok(_)) if path == second));
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn home_pointer_opens_nested_folders_and_the_episode_under_it() {
+        let root = plx_base::testscratch::process_dir("cineusb-home-nested-pointer");
+        let show = root.join("Biblioteca/Sèries/Una sèrie");
+        let season = show.join("Temporada 1");
+        let episode = season.join("Una sèrie S01E01.mkv");
+        std::fs::create_dir_all(&season).unwrap();
+        std::fs::write(&episode, []).unwrap();
+        let volume = Volume { path: root.clone(), label: None, mount_id: None, system: false };
+        let mut browser = Browser::new();
+        browser.folders.push(Folder {
+            volume, path: show.clone(), entries: disk::listing(&show).unwrap(),
+            collection: Some(Cover::Series), selected: 0, scroll: 0.0,
+        });
+        let card = browser.tile_rect(0);
+        browser.click(card.x + 20.0, card.y + 20.0);
+        let result = browser.pending.take().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+        let DiskResult::Folder(volume, path, Ok(entries)) = result else { panic!("expected season folder") };
+        assert_eq!(path, season);
+        browser.folders.push(Folder { volume, path, entries, collection: Some(Cover::Series), selected: 0, scroll: 0.0 });
+        let card = browser.tile_rect(0);
+        browser.click(card.x + 20.0, card.y + 20.0);
+        assert!(matches!(browser.dialog, Some(Dialog::Video { path, .. }) if path == episode));
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn series_counts_expire_and_an_invalidated_request_cannot_restore_stale_counts() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
+        let path = volume.path.join("Sèries/Una sèrie");
+        let now = Instant::now();
+        let counts = Some(series::Counts { seasons: 2, episodes: 13 });
+        let entry = SeriesCacheEntry { checked: now, modified: Some(1), known: true, counts };
+        let mut card = SeriesCard { volume: &volume, path: path.clone(), modified: Some(1), known: true };
+        assert!(entry.fresh(&card, now));
+        assert!(!entry.fresh(&card, now + SERIES_REFRESH));
+        card.modified = Some(2);
+        assert!(!entry.fresh(&card, now));
+        browser.scan.volumes.push(volume.clone());
+        browser.series_cache.insert(path.clone(), entry);
+        let (send, reply) = mpsc::sync_channel(1);
+        browser.series_job = Some(SeriesRequest { volume, path, modified: Some(1), known: true, invalidated: false, reply });
+        browser.invalidate_series_counts();
+        send.send(counts).unwrap();
+        browser.update_series_counts(now);
+        assert!(browser.series_cache.is_empty());
+        assert!(browser.series_job.is_none());
+    }
 
     #[test]
     fn media_hover_and_click_use_the_same_grid_without_activating_gaps() {
