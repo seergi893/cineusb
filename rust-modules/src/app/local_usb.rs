@@ -433,6 +433,7 @@ struct SeriesRequest {
     modified: Option<i64>,
     known: bool,
     invalidated: bool,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     reply: Receiver<Option<series::Counts>>,
 }
 
@@ -756,7 +757,7 @@ impl Browser {
                 Some(Err(TryRecvError::Disconnected)) => self.scanning = None,
                 _ => {}
             }
-            if self.scanning.is_none() && now >= self.next_scan {
+            if !self.mutating && self.scanning.is_none() && now >= self.next_scan {
                 self.next_scan = now + Duration::from_secs(5);
                 let hour = i18n::local_hour();
                 changed |= hour != self.hour;
@@ -808,6 +809,19 @@ impl Browser {
         changed |= self.ejecting.as_ref().is_some_and(|(_, start)| start.elapsed() < Duration::from_millis(800));
         changed |= self.update_video_details();
         changed |= self.update_series_counts(now);
+        if self.mutating && self.ejecting.is_some() && self.usb_reads_drained() {
+            let volume = self.ejecting.as_ref().expect("eject requested").0.clone();
+            self.request(move || {
+                let result = mutate_usb(Mutation::Eject, &volume, &volume.path);
+                DiskResult::Eject(volume, result)
+            });
+            if self.pending.is_none() {
+                self.mutating = false;
+                if let Some((volume, _)) = self.ejecting.take() {
+                    self.eject_feedback = Some((volume, false, Instant::now()));
+                }
+            }
+        }
         if self.action.is_some_and(|action| !self.action_available(action)) {
             self.action = None;
             changed = true;
@@ -850,6 +864,11 @@ impl Browser {
 
     fn grid_has_focus(&self) -> bool {
         !self.drive_picker() || (self.nav_focus.is_none() && self.nav_hover.is_none())
+    }
+
+    fn usb_reads_drained(&self) -> bool {
+        self.pending.is_none() && self.details_job.is_none() && self.series_job.is_none()
+            && self.facts_job.is_none() && self.scanning.is_none()
     }
 
     fn grid_top(&self) -> f32 {
@@ -908,6 +927,7 @@ impl Browser {
                 }
             }
         }
+        if self.mutating { return changed; }
         let Some(volume) = self.volume().cloned() else { self.facts = None; return changed };
         if self.facts.as_ref().is_some_and(|(last, _)| *last == volume) { return changed; }
         let requested = volume.clone();
@@ -1367,6 +1387,7 @@ impl Browser {
                 }
             }
         }
+        if self.mutating { return changed; }
         let target = match &self.dialog {
             Some(Dialog::Video { volume, path }) => {
                 let key = self.detail_key_for(path);
@@ -1428,6 +1449,7 @@ impl Browser {
         self.series_cache.clear();
         if let Some(job) = &mut self.series_job {
             job.invalidated = true;
+            job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -1452,7 +1474,7 @@ impl Browser {
                 changed = previous.and_then(|entry| entry.counts) != counts;
             }
         }
-        if self.dialog.is_some() || self.pending.is_some() { return changed; }
+        if self.mutating || self.dialog.is_some() || self.pending.is_some() { return changed; }
         let grid = self.grid();
         let target = poster_grid::visible_in(&grid, self.len(), self.grid_top(), self.scroll.pos)
             .filter_map(|index| self.series_card(index))
@@ -1463,10 +1485,12 @@ impl Browser {
         let folder = path.clone();
         let mount = system_mount(&volume);
         let (send, reply) = mpsc::sync_channel(1);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
         if plx_base::task::spawn_off_frame("cineusb-series-counts", move |_| {
-            let _ = send.send(series::count(&folder, mount, known).ok().flatten());
+            let _ = send.send(series::count_cancellable(&folder, mount, known, &worker_cancelled).ok().flatten());
         }) {
-            self.series_job = Some(SeriesRequest { volume, path, modified, known, invalidated: false, reply });
+            self.series_job = Some(SeriesRequest { volume, path, modified, known, invalidated: false, cancelled, reply });
         }
         changed
     }
@@ -1685,13 +1709,10 @@ impl Browser {
                 self.prepared = None;
                 self.ready = None;
                 self.details.clear();
-                self.details_job = None;
-                self.request(move || {
-                    let result = mutate_usb(Mutation::Eject, &volume, &volume.path);
-                    DiskResult::Eject(volume, result)
-                });
-                self.mutating = self.pending.is_some();
-                if !self.mutating { self.ejecting = None; }
+                // Drain in-flight workers before ejecting. Dropping their reply
+                // channels does not close descriptors held by those workers.
+                self.invalidate_series_counts();
+                self.mutating = true;
             }
             _ => {}
         }
@@ -2400,15 +2421,16 @@ impl Browser {
         };
         draw_line(p, headline, Rect::new(630.0, 477.0, 660.0, 58.0), theme::size::HEADLINE, true);
         draw_line(p, &volume_name(volume), Rect::new(655.0, 539.0, 610.0, 48.0), theme::size::BODY, false);
+        let failure_detail = format!("{} {}",
+            tr("No desconectes el disco.", "No desconnectis el disc."), self.status);
         let description = match result {
             Some(true) => tr("Ya puedes desconectar el dispositivo con seguridad.", "Ja pots desconnectar el dispositiu amb seguretat."),
-            Some(false) if self.eject_uncertain => tr("No desconectes el disco: webOS aún muestra particiones montadas.",
-                "No desconnectis el disc: webOS encara mostra particions muntades."),
-            Some(false) => tr("Comprueba que no haya archivos en uso. Pulsa OK para reintentar o Atrás para cerrar.",
-                "Comprova que no hi hagi fitxers oberts. Prem OK per reintentar o Enrere per tancar."),
+            Some(false) => failure_detail.as_str(),
             None => tr("Espera a que termine la operación.", "Espera que acabi l'operació."),
         };
-        draw_line(p, description, Rect::new(620.0, 602.0, 690.0, 85.0), theme::size::CAPTION, false);
+        plx_ui::text_view::TextView::new(description, theme::size::CAPTION, theme::TEXT_SECONDARY)
+            .with_measure(&TtfMeasure).break_long_words().max_lines(4)
+            .draw(p, Rect::new(620.0, 595.0, 690.0, 132.0));
     }
 
     fn draw_nav_pill(&self, p: Painter) {
@@ -3569,6 +3591,28 @@ mod usb_browser_tests {
     use super::*;
 
     #[test]
+    fn eject_keeps_inflight_probe_tracked_until_its_file_is_released() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(volume.clone());
+        let (send, reply) = mpsc::sync_channel(1);
+        browser.details_job = Some(DetailsRequest {
+            volume: volume.clone(), key: (volume.path.join("video.mkv"), None, None), reply,
+        });
+        browser.dialog = Some(Dialog::Eject(volume));
+        browser.option = 1;
+        browser.choose_option();
+        assert!(browser.mutating);
+        assert!(browser.pending.is_none());
+        assert!(!browser.usb_reads_drained());
+        assert!(!browser.update_video_details());
+        send.send(Default::default()).unwrap();
+        assert!(browser.update_video_details());
+        assert!(browser.details_job.is_none());
+        assert!(browser.usb_reads_drained());
+    }
+
+    #[test]
     fn home_pointer_opens_the_exact_drive_and_ignores_space_between_drives() {
         let root = plx_base::testscratch::process_dir("cineusb-pointer-home");
         let first = root.join("unit-a");
@@ -3633,7 +3677,8 @@ mod usb_browser_tests {
         browser.scan.volumes.push(volume.clone());
         browser.series_cache.insert(path.clone(), entry);
         let (send, reply) = mpsc::sync_channel(1);
-        browser.series_job = Some(SeriesRequest { volume, path, modified: Some(1), known: true, invalidated: false, reply });
+        browser.series_job = Some(SeriesRequest { volume, path, modified: Some(1), known: true, invalidated: false,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), reply });
         browser.invalidate_series_counts();
         send.send(counts).unwrap();
         browser.update_series_counts(now);
