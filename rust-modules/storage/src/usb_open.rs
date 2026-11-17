@@ -416,6 +416,7 @@ fn verify_eject(
     mut pause: impl FnMut(),
 ) -> io::Result<()> {
     let mut reason = request.err().map(|error| error.to_string());
+    let mut retried_pdm = false;
     // Give PDM time to complete before the NTFS fallback. Retry a clean
     // unmount while other processes release handles. Mounts, not presence in
     // PDM's device list, are the final authority on safe removal.
@@ -426,7 +427,10 @@ fn verify_eject(
             match unmount(&table, drives) {
                 Ok(_) => {
                     if !device_partitions_mounted(&mounts()?, drives) { return Ok(()); }
-                    if let Err(error) = retry() { reason = Some(error.to_string()); }
+                    if !retried_pdm {
+                        retried_pdm = true;
+                        if let Err(error) = retry() { reason = Some(error.to_string()); }
+                    }
                 }
                 Err(error) => reason = Some(error.to_string()),
             }
