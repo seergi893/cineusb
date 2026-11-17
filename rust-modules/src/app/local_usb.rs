@@ -1832,6 +1832,19 @@ impl Browser {
         self.dialog.is_none() && self.eject_feedback.is_none() && !self.mutating
     }
 
+    fn pointer_media_cards(&self) -> bool {
+        self.media_library() || self.nav_tab == FAVORITES_TAB
+    }
+
+    fn card_at(&self, x: f32, y: f32) -> Option<usize> {
+        let top = self.grid_top();
+        let bleed = if self.drive_picker() { 26.0 } else { 14.0 };
+        if y < top - bleed || y >= GRID_BOTTOM { return None; }
+        // Keep hit targets stable while the existing focus spring scales the artwork.
+        poster_grid::visible_in(&self.grid(), self.len(), top, self.scroll.pos)
+            .find(|&index| hit(self.tile_rect(index), x, y))
+    }
+
     fn pointer(&mut self, x: f32, y: f32) -> bool {
         if matches!(self.dialog, Some(Dialog::Settings)) {
             let previous = self.option;
@@ -1847,7 +1860,19 @@ impl Browser {
         } else {
             None
         };
-        if self.nav_hover.is_some() { self.nav_focus = None; }
+        if self.nav_hover.is_some() {
+            self.nav_focus = None;
+        } else if self.pointer_media_cards() && self.nav_available() {
+            if let Some(index) = self.card_at(x, y) {
+                let left_nav = self.nav_focus.take().is_some();
+                let left_action = self.action.take().is_some();
+                if index != self.selected {
+                    self.select(index, false);
+                    return true;
+                }
+                return previous.is_some() || left_nav || left_action;
+            }
+        }
         previous != self.nav_hover
     }
 
@@ -1881,27 +1906,25 @@ impl Browser {
             }
             return;
         }
-        self.nav_focus = None;
         if let Some((action, rect)) = self.content_actions().into_iter()
             .find(|(action, rect)| self.action_available(*action) && hit(*rect, x, y)) {
+            self.nav_focus = None;
             self.press_button(rect);
             self.action = Some(action);
             self.open_action(action);
             return;
         }
-        // Magic Remote clicks are pointer events on webOS; the standalone USB
-        // browser has no shared hit-map. Pick the clicked card when possible,
-        // or activate the focused card (the physical OK button may arrive with
-        // the pointer parked outside the cards).
-        let grid = self.grid();
-        let top = self.grid_top();
-        let visible = poster_grid::visible_in(&grid, self.len(), top, self.scroll.pos);
-        if let Some(index) = visible.into_iter().find(|&index| {
-            y >= top - 14.0 && y < GRID_BOTTOM && hit(self.tile_rect(index), x, y)
-        }) {
-            self.select(index, false);
+        if let Some(index) = self.card_at(x, y) {
+            self.nav_focus = None;
+            if index != self.selected { self.select(index, false); }
             self.action = None;
+            self.open();
+            return;
         }
+        // Media clicks require a hit. Keep the legacy physical-OK fallback
+        // in the drive picker and manual USB browser.
+        if self.pointer_media_cards() { return; }
+        self.nav_focus = None;
         if let Some(action) = self.action {
             self.open_action(action);
         } else {
@@ -3202,7 +3225,11 @@ fn draw_line(p: Painter, line: &str, frame: Rect, size: i32, strong: bool) {
     if strong { label.bold().draw(p, frame); } else { label.draw(p, frame); }
 }
 
-pub(super) fn click(app: &mut App, x: f32, y: f32) {
+pub(super) fn click(app: &mut App, x: f32, y: f32, multi_click: bool) {
+    // The first press may have opened a video dialog beneath the pointer.
+    if multi_click && app.usb.pointer_media_cards() && matches!(app.usb.dialog, Some(Dialog::Video { .. })) {
+        return;
+    }
     app.usb.click(x, y);
     plx_machine::idle::invalidate();
 }
@@ -3393,6 +3420,73 @@ pub(super) fn flush_playback(app: &mut App) {
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn media_hover_and_click_use_the_same_grid_without_activating_gaps() {
+        let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
+        let folder = volume.path.join("Temporada 1");
+        for tab in [1, 2, DOCUMENTALS_TAB, FAVORITES_TAB] {
+            let mut browser = Browser::new();
+            let names = ["Primer.S01E01.mkv", "Segon.S01E02.mkv", "Tercer.S01E03.mkv"];
+            if tab == FAVORITES_TAB {
+                browser.enter_favorites(volume.clone(), names.map(|name| folder.join(name)).to_vec());
+            } else {
+                browser.nav_tab = tab;
+                browser.folders.push(Folder {
+                    volume: volume.clone(), path: folder.clone(),
+                    entries: names.into_iter().map(|name| disk::media_entry(name.into(), false).unwrap()).collect(),
+                    collection: None, selected: 0, scroll: 0.0,
+                });
+            }
+            let first = browser.tile_rect(0);
+            let second = browser.tile_rect(1);
+            let third = browser.tile_rect(2);
+            assert!(browser.pointer(second.x + 20.0, second.y + 20.0));
+            assert_eq!(browser.selected, 1);
+            assert!(browser.pending.is_none() && browser.dialog.is_none());
+            assert!(!browser.pointer(second.x + 21.0, second.y + 20.0));
+            browser.key(Key::Right { alt: false }, false);
+            assert_eq!(browser.selected, 2);
+            browser.click(first.x + first.w + 1.0, first.y + 20.0);
+            assert_eq!(browser.selected, 2);
+            assert!(browser.pending.is_none() && browser.dialog.is_none());
+            assert!(browser.pointer(second.x + 20.0, second.y + 20.0));
+            browser.click(third.x + 20.0, third.y + 20.0);
+            assert_eq!(browser.selected, 2);
+            assert!(matches!(browser.dialog, Some(Dialog::Video { path, .. }) if path == folder.join(names[2])));
+        }
+    }
+
+    #[test]
+    fn media_pointer_opens_the_hit_folder_and_ok_still_opens_the_focused_card() {
+        let root = plx_base::testscratch::process_dir("cineusb-pointer-folders");
+        let series = root.join("Sèries");
+        let second_show = series.join("Segona sèrie");
+        std::fs::create_dir_all(&second_show).unwrap();
+        let volume = Volume { path: root.clone(), label: None, mount_id: None, system: false };
+        let mut browser = Browser::new();
+        browser.nav_tab = 2;
+        browser.folders.push(Folder {
+            volume,
+            path: series,
+            entries: ["Primera sèrie", "Segona sèrie"].into_iter()
+                .map(|name| disk::media_entry(name.into(), true).unwrap()).collect(),
+            collection: Some(Cover::Series), selected: 0, scroll: 0.0,
+        });
+        let first = browser.tile_rect(0);
+        let second = browser.tile_rect(1);
+        assert!(browser.pointer(second.x + 20.0, second.y + 20.0));
+        browser.click(second.x + 20.0, second.y + 20.0);
+        let result = browser.pending.take().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(result, DiskResult::Folder(_, path, Ok(_)) if path == second_show));
+
+        assert!(browser.pointer(first.x + 20.0, first.y + 20.0));
+        browser.key(Key::Right { alt: false }, false);
+        browser.key(Key::Ok, false);
+        let result = browser.pending.take().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(result, DiskResult::Folder(_, path, Ok(_)) if path == second_show));
+        plx_base::testscratch::remove_tree(&root);
+    }
 
     #[test]
     fn media_rows_share_a_left_edge_and_column_width_at_every_card_size() {
