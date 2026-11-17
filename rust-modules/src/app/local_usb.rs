@@ -470,7 +470,9 @@ pub(super) struct Browser {
     settings_job: Option<SettingsJob>,
     settings_started: bool,
     pending: Option<Receiver<DiskResult>>,
+    retired_reads: Vec<Receiver<DiskResult>>,
     scanning: Option<Receiver<Scan>>,
+    retired_scans: Vec<Receiver<Scan>>,
     details_job: Option<DetailsRequest>,
     details: BTreeMap<DetailKey, plx_play_feed::LocalVideoDetails>,
     series_job: Option<SeriesRequest>,
@@ -523,6 +525,7 @@ impl Browser {
             settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0, extensions: false },
             settings_job: None, settings_started: false,
             pending: None, scanning: None, next_scan: now, last_tick: now,
+            retired_reads: Vec::new(), retired_scans: Vec::new(),
             details_job: None, details: BTreeMap::new(),
             series_job: None, series_cache: BTreeMap::new(),
             facts: None, facts_job: None, prepared: None, ready: None, playing: None,
@@ -557,6 +560,8 @@ impl Browser {
     }
 
     fn update(&mut self) -> Option<PreparedVideo> {
+        self.retired_reads.retain(|reply| matches!(reply.try_recv(), Err(TryRecvError::Empty)));
+        self.retired_scans.retain(|reply| matches!(reply.try_recv(), Err(TryRecvError::Empty)));
         let now = Instant::now();
         let dt = (now - self.last_tick).as_secs_f32().min(0.05);
         self.last_tick = now;
@@ -663,7 +668,7 @@ impl Browser {
                             self.status.push_str(" · ");
                             self.status.push_str(&error);
                         }
-                        self.scanning = None;
+                        self.retire_scan();
                         self.next_scan = Instant::now();
                     }
                     DiskResult::Discovered(volume, kind, paths) => {
@@ -869,6 +874,21 @@ impl Browser {
     fn usb_reads_drained(&self) -> bool {
         self.pending.is_none() && self.details_job.is_none() && self.series_job.is_none()
             && self.facts_job.is_none() && self.scanning.is_none()
+            && self.retired_reads.is_empty() && self.retired_scans.is_empty()
+    }
+
+    fn retire_read(&mut self) -> bool {
+        if let Some(reply) = self.pending.take() {
+            self.retired_reads.push(reply);
+            return true;
+        }
+        false
+    }
+
+    fn retire_scan(&mut self) {
+        if let Some(reply) = self.scanning.take() {
+            self.retired_scans.push(reply);
+        }
     }
 
     fn grid_top(&self) -> f32 {
@@ -1162,7 +1182,7 @@ impl Browser {
         if self.mutating { return; }
         if matches!(tab, 0 | 1 | 2 | DOCUMENTALS_TAB | FAVORITES_TAB) {
             // A new section supersedes reads from the previous section.
-            self.pending = None;
+            self.retire_read();
         } else if self.pending.is_some() {
             return;
         }
@@ -1746,7 +1766,7 @@ impl Browser {
 
     fn finish_mutation(&mut self, result: Result<(), String>, success: &str, failure: &str) {
         self.invalidate_series_counts();
-        self.scanning = None;
+        self.retire_scan();
         self.next_scan = Instant::now();
         self.status = match result {
             Ok(()) => success.into(),
@@ -1904,7 +1924,7 @@ impl Browser {
         }
         if self.action.take().is_some() { return; }
         if self.selection.take().is_some() { self.status.clear(); return; }
-        if self.pending.take().is_some() {
+        if self.retire_read() {
             if self.favorite_view.is_none() { self.set_favorite_section(false); }
             self.status.clear();
             return;
@@ -3963,7 +3983,11 @@ mod usb_browser_tests {
         browser.click(rect.x + 5.0, rect.y + 5.0);
         assert_eq!(browser.nav_tab, 2);
         assert!(browser.pending.is_some());
-        assert!(stale.send(DiskResult::Discovered(browser.volume().unwrap().clone(), 1, vec![])).is_err());
+        stale.send(DiskResult::Discovered(browser.volume().unwrap().clone(), 1, vec![])).unwrap();
+        assert_eq!(browser.retired_reads.len(), 1);
+        assert!(!browser.usb_reads_drained());
+        assert!(matches!(browser.retired_reads[0].try_recv(), Ok(DiskResult::Discovered(_, 1, _))));
+        assert_eq!(browser.nav_tab, 2);
     }
 
     #[test]
