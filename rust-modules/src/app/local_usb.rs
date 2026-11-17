@@ -639,6 +639,7 @@ impl Browser {
                                 "No s’ha pogut esborrar el fitxer. Comprova si es pot escriure al disc."));
                     }
                     DiskResult::DeleteFolders { removed, total, error, entries } => {
+                        self.invalidate_series_counts();
                         if let Some(folder) = self.folders.last() {
                             let (volume, parent) = (folder.volume.clone(), folder.path.clone());
                             for name in &removed { self.remove_history_under(&volume, &parent.join(name)); }
