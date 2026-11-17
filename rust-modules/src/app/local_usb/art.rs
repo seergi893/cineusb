@@ -35,7 +35,7 @@ pub(super) fn draw_brand(p: Painter, rect: Rect) {
         texture
     });
     if texture != 0 {
-        p.tex_carded(texture, [0.0, 0.0, 1.0, 1.0], rect, 16.0, theme::TINT_WHITE, 0.0);
+        p.tex(texture, rect, 0.0, theme::TINT_WHITE);
     }
 }
 

@@ -133,14 +133,15 @@ fn unpack_progress(value: u64) -> (u64, u64) {
 }
 
 const TOP: f32 = 284.0;
+const MEDIA_GRID_TOP: f32 = 204.0;
 const HOME_GRID_TOP: f32 = 326.0;
 const GRID_BOTTOM: f32 = 965.0;
 const GRID_WIDTH: f32 = 1920.0 - 2.0 * plx_ui::consts::MARGIN_X;
 
-fn grid_geometry(len: usize, size: usize) -> Geom {
+fn grid_geometry(len: usize, size: usize, media_library: bool) -> Geom {
     let (limit, gap, max_width) = [(8, 22.0, 214.0), (10, 18.0, 174.0), (6, 26.0, 270.0)][size];
     let rows = len.max(1).div_ceil(limit);
-    let cols = len.max(1).div_ceil(rows);
+    let cols = if media_library { limit } else { len.max(1).div_ceil(rows) };
     let width = ((GRID_WIDTH - (cols - 1) as f32 * gap) / cols as f32).min(max_width);
     Geom { cols, left: plx_ui::consts::MARGIN_X, w: width, h: width * 1.5, gap, value_line: false }
 }
@@ -789,7 +790,7 @@ impl Browser {
     }
 
     fn scroll_target(&self) -> f32 {
-        let grid = grid_geometry(self.len(), self.settings.cards);
+        let grid = self.grid();
         let row = self.selected / grid.cols;
         let viewport = GRID_BOTTOM - self.grid_top() - 22.0;
         let top = row as f32 * grid.pitch();
@@ -811,15 +812,46 @@ impl Browser {
     }
 
     fn grid_top(&self) -> f32 {
-        if self.drive_picker() { HOME_GRID_TOP } else { TOP }
+        if self.media_library() { MEDIA_GRID_TOP }
+        else if self.drive_picker() { HOME_GRID_TOP }
+        else { TOP }
+    }
+
+    fn media_library(&self) -> bool {
+        matches!(self.nav_tab, 1 | 2 | DOCUMENTALS_TAB)
+    }
+
+    fn grid(&self) -> Geom {
+        grid_geometry(self.len(), self.settings.cards, self.media_library())
+    }
+
+    fn media_series_name(&self) -> Option<std::borrow::Cow<'_, str>> {
+        if self.nav_tab != 2 { return None; }
+        let category = self.media_view.as_ref()?.paths.first()?;
+        let current = &self.folders.last()?.path;
+        let show = current.strip_prefix(category).ok()?.components().next()?;
+        Some(show.as_os_str().to_string_lossy())
+    }
+
+    fn content_actions(&self) -> [(Action, Rect); 3] {
+        if self.media_library() {
+            ACTIONS.map(|(action, mut rect)| {
+                rect.y -= 90.0;
+                (action, rect)
+            })
+        } else {
+            ACTIONS
+        }
     }
 
     fn tile_rect(&self, index: usize) -> Rect {
-        let mut grid = grid_geometry(self.len(), self.settings.cards);
-        let first = index / grid.cols * grid.cols;
-        let count = self.len().saturating_sub(first).min(grid.cols).max(1);
-        let row_width = count as f32 * grid.w + (count - 1) as f32 * grid.gap;
-        grid.left = (1920.0 - row_width) * 0.5;
+        let mut grid = self.grid();
+        if !self.media_library() {
+            let first = index / grid.cols * grid.cols;
+            let count = self.len().saturating_sub(first).min(grid.cols).max(1);
+            let row_width = count as f32 * grid.w + (count - 1) as f32 * grid.gap;
+            grid.left = (1920.0 - row_width) * 0.5;
+        }
         poster_grid::cell_in(&grid, index, self.grid_top(), self.scroll.pos, &[])
     }
 
@@ -1300,7 +1332,7 @@ impl Browser {
             }
             None if self.favorite_cards().is_none() && self.pending.is_none() => {
                 self.folders.last().and_then(|folder| {
-                    let grid = grid_geometry(self.len(), self.settings.cards);
+                    let grid = self.grid();
                     poster_grid::visible_in(&grid, self.len(), self.grid_top(), self.scroll.pos)
                         .filter_map(|index| folder.entries.get(index))
                         .filter(|entry| entry.kind == Kind::Video)
@@ -1850,17 +1882,18 @@ impl Browser {
             return;
         }
         self.nav_focus = None;
-        if let Some((action, rect)) = ACTIONS.iter().find(|(action, rect)| self.action_available(*action) && hit(*rect, x, y)) {
-            self.press_button(*rect);
-            self.action = Some(*action);
-            self.open_action(*action);
+        if let Some((action, rect)) = self.content_actions().into_iter()
+            .find(|(action, rect)| self.action_available(*action) && hit(*rect, x, y)) {
+            self.press_button(rect);
+            self.action = Some(action);
+            self.open_action(action);
             return;
         }
         // Magic Remote clicks are pointer events on webOS; the standalone USB
         // browser has no shared hit-map. Pick the clicked card when possible,
         // or activate the focused card (the physical OK button may arrive with
         // the pointer parked outside the cards).
-        let grid = grid_geometry(self.len(), self.settings.cards);
+        let grid = self.grid();
         let top = self.grid_top();
         let visible = poster_grid::visible_in(&grid, self.len(), top, self.scroll.pos);
         if let Some(index) = visible.into_iter().find(|&index| {
@@ -1954,7 +1987,7 @@ impl Browser {
                 Key::Up => { self.action = None; self.nav_focus = Some(self.nav_tab); },
                 Key::Back if !repeat => self.back(),
                 Key::Ok if !repeat => {
-                    if let Some((_, rect)) = ACTIONS.iter().find(|(item, _)| *item == action) { self.press_button(*rect); }
+                    if let Some((_, rect)) = self.content_actions().into_iter().find(|(item, _)| *item == action) { self.press_button(rect); }
                     self.open_action(action);
                 }
                 _ => {}
@@ -1962,7 +1995,7 @@ impl Browser {
             return;
         }
         let dir = match key {
-            Key::Up if self.selected < grid_geometry(self.len(), self.settings.cards).cols => {
+            Key::Up if self.selected < self.grid().cols => {
                 self.nav_focus = Some(self.nav_tab);
                 return;
             }
@@ -1974,7 +2007,7 @@ impl Browser {
             Key::Back if !repeat => return self.back(),
             _ => return,
         };
-        if let Some(index) = poster_grid::neighbour(self.selected, self.len(), grid_geometry(self.len(), self.settings.cards).cols, dir) {
+        if let Some(index) = poster_grid::neighbour(self.selected, self.len(), self.grid().cols, dir) {
             self.select(index, false);
         }
     }
@@ -2051,7 +2084,7 @@ impl Browser {
         let width = 1920.0 - 2.0 * x;
         self.draw_nav_pill(p);
         art::draw_brand(p, Rect::new(x, 29.0, 76.0, 76.0));
-        for (action, rect) in ACTIONS {
+        for (action, rect) in self.content_actions() {
             if self.action_available(action) {
                 if action == Action::ToggleFavorite {
                     self.draw_series_favorite(p, rect);
@@ -2075,6 +2108,81 @@ impl Browser {
                 }
             }
         }
+        if self.media_library() {
+            if let Some(name) = self.media_series_name() {
+                draw_line(p, &name, Rect::new(x, 122.0, 880.0, 42.0), theme::size::HEADLINE, true);
+            }
+            if let Some(marked) = &self.selection {
+                let count = format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"));
+                draw_line(p, &count, Rect::new(x, 161.0, 880.0, 28.0), theme::size::CAPTION, false);
+            }
+        } else {
+            self.draw_browser_header(p, home, x, width);
+        }
+
+        let no_drive = self.scan.volumes.is_empty() && !self.scan.hidden_mounts;
+        let media_status_in_body = self.media_cards().is_some_and(|view| {
+            self.len() == 0 && (self.pending.is_some() || !view.paths.is_empty())
+        });
+        if self.len() == 0 {
+            let message = if no_drive {
+                tr("Conecta un disco USB.", "Connecta un disc USB.")
+            } else if self.tab_waiting_for_volume() {
+                tr("Pulsa OK para abrir el disco USB.", "Prem OK per obrir el disc USB.")
+            } else if self.media_cards().is_some() && self.pending.is_some() {
+                tr("Cargando…", "Carregant…")
+            } else if let Some(view) = self.media_cards() {
+                if !view.paths.is_empty() && !self.status.is_empty() {
+                    self.status.as_str()
+                } else {
+                    tr("No hay contenido en esta sección.", "No hi ha contingut en aquest apartat.")
+                }
+            } else if self.favorite_cards().is_some() {
+                tr("No hay favoritos en este USB.", "No hi ha cap favorit en aquest USB.")
+            } else if self.folders.last().is_some() {
+                tr("No hay contenido disponible.", "No hi ha contingut disponible.")
+            } else {
+                tr("CineUSB aún no puede leer el disco. Pulsa OK para volver a intentarlo.",
+                    "CineUSB encara no pot llegir el disc. Prem OK per tornar-ho a provar.")
+            };
+            if no_drive {
+                draw_glyph(p, Glyph::Drive, Rect::new(900.0, 438.0, 120.0, 120.0), theme::TEXT_SECONDARY);
+                let run = TtfMeasure.fit_line(message, width, theme::size::BODY, false);
+                Label::new(run.as_ptr(), theme::size::BODY, theme::TEXT_SECONDARY).h(HAlign::Center)
+                    .draw(p, Rect::new(x, 565.0, width, 54.0));
+            } else {
+                draw_line(p, message, Rect::new(x, 380.0, width, 70.0), theme::size::BODY, false);
+            }
+        } else {
+            let top = self.grid_top();
+            let bleed = if home { 26.0 } else { 14.0 };
+            p.clip(Rect::new(0.0, top - bleed, 1920.0, GRID_BOTTOM - top + bleed));
+            let grid = self.grid();
+            let cells = poster_grid::visible_in(&grid, self.len(), top, self.scroll.pos);
+            for i in cells.filter(|index| *index != self.selected) { self.draw_tile(p, i, false); }
+            self.draw_tile(p, self.selected, self.grid_has_focus());
+            p.clip_clear();
+        }
+        let storage = self.facts.as_ref().filter(|(disk, _)| self.volume() == Some(disk))
+            .and_then(|(disk, (capacity, _))| capacity.map(|facts| (disk, facts)));
+        if self.dialog.is_none() {
+            if let Some((disk, facts)) = storage {
+                self.draw_storage(p, disk, facts);
+            }
+        }
+        if settings_enter.is_some() || self.settings_exit.is_some() {
+            self.draw_unified_settings(page, settings_alpha);
+        } else if let Some(dialog) = &self.dialog {
+            self.draw_dialog(p, dialog);
+        } else if !self.status.is_empty() && !no_drive && !media_status_in_body {
+            draw_line(p, &self.status, Rect::new(x, 990.0, width - if storage.is_some() { 696.0 } else { 0.0 }, 48.0), theme::size::CAPTION, false);
+        } else {
+            self.draw_browser_hints(p, x);
+        }
+        self.draw_eject_feedback(p);
+    }
+
+    fn draw_browser_header(&self, p: Painter, home: bool, x: f32, width: f32) {
         let breadcrumb = self.folders.last().filter(|_| self.favorite_cards().is_none()).map(|folder| {
             let relative = folder.path.strip_prefix(&folder.volume.path).unwrap_or(&folder.path);
             let mut parts = vec![volume_name(&folder.volume)];
@@ -2084,8 +2192,6 @@ impl Browser {
         let focused = self.item(self.selected);
         let (title, detail, greeting_icon) = if self.favorite_cards().is_some() || (self.tab_waiting_for_volume() && self.nav_tab == FAVORITES_TAB) {
             (tr("Favoritos", "Favorits"), "", None)
-        } else if self.media_cards().is_some() || self.tab_waiting_for_volume() {
-            (media_tab_title(self.nav_tab), "", None)
         } else if breadcrumb.is_none() {
             let greeting = match self.hour {
                 Some(6..=11) => (tr("Buenos días", "Bon dia"), Some(Glyph::Sun)),
@@ -2119,88 +2225,29 @@ impl Browser {
         draw_line(p, section, Rect::new(x, section_y, width, 34.0),
             if home { theme::size::HEADLINE } else { theme::size::BODY }, home);
         draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, section_y + 35.0, 920.0, 37.0), theme::size::CAPTION, false);
+    }
 
-        if self.len() == 0 {
-            let message = if self.tab_waiting_for_volume() {
-                if self.scan.volumes.is_empty() {
-                    tr("Conecta un disco USB directamente a la televisión.", "Connecta un disc USB a la tele.")
-                } else {
-                    tr("Pulsa OK para abrir el disco USB.", "Prem OK per obrir el disc USB.")
-                }
-            } else if self.media_cards().is_some() && self.pending.is_some() {
-                tr("Cargando el contenido del disco…", "Carregant el contingut del disc…")
-            } else if let Some(view) = self.media_cards() {
-                if !view.paths.is_empty() && !self.status.is_empty() {
-                    self.status.as_str()
-                } else {
-                    tr("No hay carpetas de esta categoría. Pulsa Inicio para navegar manualmente.",
-                        "No hi ha carpetes d'aquesta categoria. Prem Inici per navegar manualment.")
-                }
-            } else if self.favorite_cards().is_some() {
-                tr("No hay favoritos en este USB.", "No hi ha cap favorit en aquest USB.")
-            } else if self.folders.last().is_some() {
-                tr("Esta carpeta no contiene subcarpetas ni vídeos compatibles.",
-                    "En aquesta carpeta no hi ha subcarpetes ni vídeos compatibles.")
-            } else if self.scan.hidden_mounts {
-                tr("CineUSB aún no puede leer el disco. Pulsa OK para volver a intentarlo.",
-                    "CineUSB encara no pot llegir el disc. Prem OK per tornar-ho a provar.")
-            } else {
-                tr("Conecta un disco USB directamente a la televisión.", "Connecta un disc USB a la tele.")
-            };
-            if home && !self.scan.hidden_mounts {
-                draw_glyph(p, Glyph::Drive, Rect::new(892.0, 435.0, 136.0, 136.0), theme::TEXT_SECONDARY);
-                let run = TtfMeasure.fit_line(message, width, theme::size::BODY, false);
-                Label::new(run.as_ptr(), theme::size::BODY, theme::TEXT_SECONDARY).h(HAlign::Center)
-                    .draw(p, Rect::new(x, 575.0, width, 54.0));
-            } else {
-                draw_line(p, message, Rect::new(x, 380.0, width, 70.0), theme::size::BODY, false);
-            }
+    fn draw_browser_hints(&self, p: Painter, x: f32) {
+        let primary = if self.selection.is_some() && self.action.is_none() {
+            tr("Marcar", "Marca")
+        } else if self.action.is_some() {
+            tr("Elegir", "Tria")
         } else {
-            let top = self.grid_top();
-            let bleed = if home { 26.0 } else { 14.0 };
-            p.clip(Rect::new(0.0, top - bleed, 1920.0, GRID_BOTTOM - top + bleed));
-            let grid = grid_geometry(self.len(), self.settings.cards);
-            let cells = poster_grid::visible_in(&grid, self.len(), top, self.scroll.pos);
-            for i in cells.filter(|index| *index != self.selected) { self.draw_tile(p, i, false); }
-            self.draw_tile(p, self.selected, self.grid_has_focus());
-            p.clip_clear();
-        }
-        let storage = self.facts.as_ref().filter(|(disk, _)| self.volume() == Some(disk))
-            .and_then(|(disk, (capacity, _))| capacity.map(|facts| (disk, facts)));
-        if self.dialog.is_none() {
-            if let Some((disk, facts)) = storage {
-                self.draw_storage(p, disk, facts);
-            }
-        }
-        if settings_enter.is_some() || self.settings_exit.is_some() {
-            self.draw_unified_settings(page, settings_alpha);
-        } else if let Some(dialog) = &self.dialog {
-            self.draw_dialog(p, dialog);
-        } else if !self.status.is_empty() {
-            draw_line(p, &self.status, Rect::new(x, 990.0, width - if storage.is_some() { 696.0 } else { 0.0 }, 48.0), theme::size::CAPTION, false);
+            tr("Abrir", "Obre")
+        };
+        let back = if self.selection.is_some() && self.action.is_none() {
+            tr("Cancelar selección", "Cancel·la la selecció")
         } else {
-            let primary = if self.selection.is_some() && self.action.is_none() {
-                tr("Marcar", "Marca")
-            } else if self.action.is_some() {
-                tr("Elegir", "Tria")
-            } else {
-                tr("Abrir", "Obre")
-            };
-            let back = if self.selection.is_some() && self.action.is_none() {
-                tr("Cancelar selección", "Cancel·la la selecció")
-            } else {
-                tr("Volver", "Torna")
-            };
-            let mut cursor = x;
-            if self.action.is_none() {
-                cursor = draw_hint(p, cursor, HintKey::Icon(Icon::ChevronUp), tr("Barra superior", "Barra superior"));
-            } else {
-                cursor = draw_hint(p, cursor, HintKey::Icon(Icon::ChevronDown), tr("Tarjetas", "Targetes"));
-            }
-            cursor = draw_hint(p, cursor, HintKey::Ok, primary);
-            draw_hint(p, cursor, HintKey::Icon(Icon::ChevronLeft), back);
+            tr("Volver", "Torna")
+        };
+        let mut cursor = x;
+        if self.action.is_none() {
+            cursor = draw_hint(p, cursor, HintKey::Icon(Icon::ChevronUp), tr("Barra superior", "Barra superior"));
+        } else {
+            cursor = draw_hint(p, cursor, HintKey::Icon(Icon::ChevronDown), tr("Tarjetas", "Targetes"));
         }
-        self.draw_eject_feedback(p);
+        cursor = draw_hint(p, cursor, HintKey::Ok, primary);
+        draw_hint(p, cursor, HintKey::Icon(Icon::ChevronLeft), back);
     }
 
     fn draw_eject_feedback(&self, p: Painter) {
@@ -3347,6 +3394,45 @@ pub(super) fn flush_playback(app: &mut App) {
 mod usb_browser_tests {
     use super::*;
 
+    #[test]
+    fn media_rows_share_a_left_edge_and_column_width_at_every_card_size() {
+        let mut browser = Browser::new();
+        for tab in [1, 2, DOCUMENTALS_TAB] {
+            browser.nav_tab = tab;
+            for (size, cols) in [8, 10, 6].into_iter().enumerate() {
+                browser.settings.cards = size;
+                let first = browser.tile_rect(0);
+                let next_row = browser.tile_rect(cols);
+                assert_eq!(browser.grid().cols, cols);
+                assert_eq!(first.x, plx_ui::consts::MARGIN_X);
+                assert_eq!(next_row.x, first.x);
+                assert_eq!(next_row.w, first.w);
+                assert!(browser.tile_rect(cols - 1).x + first.w <= 1920.0 - first.x + 0.01);
+                assert_eq!(grid_geometry(1, size, true).w, grid_geometry(cols + 1, size, true).w);
+            }
+        }
+    }
+
+    #[test]
+    fn series_heading_is_the_show_name_at_any_depth_below_the_category() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
+        let category = volume.path.join("Vídeos/SÈRIES");
+        browser.enter_media(volume.clone(), 2, Vec::new());
+        browser.media_view.as_mut().unwrap().paths.push(category.clone());
+        browser.folders.push(Folder {
+            volume, path: category.clone(), entries: vec![], collection: Some(Cover::Series),
+            selected: 0, scroll: 0.0,
+        });
+        assert_eq!(browser.media_series_name(), None);
+        browser.folders.last_mut().unwrap().path = category.join("La sèrie");
+        assert_eq!(browser.media_series_name().as_deref(), Some("La sèrie"));
+        browser.folders.last_mut().unwrap().path.push("Temporada 2");
+        assert_eq!(browser.media_series_name().as_deref(), Some("La sèrie"));
+        browser.nav_tab = DOCUMENTALS_TAB;
+        assert_eq!(browser.media_series_name(), None);
+    }
+
 
     #[test]
     fn hour_long_movies_fit_card_duration_badges_without_ellipsis() {
@@ -3363,7 +3449,7 @@ mod usb_browser_tests {
     #[test]
     fn adaptive_metadata_uses_footer_without_overlaps() {
         for preset in 0..3 {
-            let g = grid_geometry(12, preset);
+            let g = grid_geometry(12, preset, true);
             for scale in [0.97, 1.0, 1.07] {
                 let card = Rect::new(80.0, 340.0, g.w * scale, g.h * scale);
                 let slots = video_badge_slots(card);
@@ -3875,7 +3961,7 @@ mod usb_browser_tests {
         browser.scan.volumes = (0..9).map(|index| Volume {
             path: format!("/tmp/usb/sda/sda{index}").into(), label: None, mount_id: None, system: false,
         }).collect();
-        assert_eq!(grid_geometry(browser.len(), 0).cols, 5);
+        assert_eq!(browser.grid().cols, 5);
         for (first, last) in [(0, 4), (5, 8)] {
             let left = browser.tile_rect(first);
             let right = browser.tile_rect(last);
