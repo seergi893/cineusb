@@ -1583,18 +1583,25 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
             });
             return;
         }
+        #[cfg(feature = "local-usb")]
+        if app.route() == AppArg::LocalUsb {
+            // Transparent-cursor remotes can report the physical OK as a click
+            // and wobble a few pixels first. Keep the existing guard there.
+            if app.ptr.dpad_mode && super::boot::cursor_is_transparent()
+                && app.ptr.mot_accum < super::input::DPAD_MOTION_GATE {
+                return;
+            }
+            app.ptr.dpad_mode = false;
+            if !super::bridge::player_arriving(&app.pages) {
+                super::local_usb::pointer(app, mx, my);
+            }
+            return;
+        }
         if app.ptr.dpad_mode {
             if app.ptr.mot_accum < super::input::DPAD_MOTION_GATE {
                 return;
             }
             app.ptr.dpad_mode = false;
-        }
-        #[cfg(feature = "local-usb")]
-        if app.route() == AppArg::LocalUsb {
-            if !super::bridge::player_arriving(&app.pages) {
-                super::local_usb::pointer(app, mx, my);
-            }
-            return;
         }
         // Hover is the tree's on every screen it owns — `ui::route_screen`'s rule 11
         // ("hover parks focus on every screen in the family") is the HIT MAP's job now.
@@ -1629,6 +1636,9 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // otherwise the selected USB volume looks clickable but never opens.
         #[cfg(feature = "local-usb")]
         if app.route() == AppArg::LocalUsb && !super::bridge::player_arriving(&app.pages) {
+            // SDL counts subsequent presses in a double click. The first may
+            // have already opened a video dialog beneath the pointer.
+            if app.ev[18] > 1 { return; }
             if app.ptr.dpad_mode && super::boot::cursor_is_transparent() {
                 super::local_usb::key(app, Key::Ok, false);
             } else {
