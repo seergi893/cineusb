@@ -1636,14 +1636,12 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         // otherwise the selected USB volume looks clickable but never opens.
         #[cfg(feature = "local-usb")]
         if app.route() == AppArg::LocalUsb && !super::bridge::player_arriving(&app.pages) {
-            // SDL counts subsequent presses in a double click. The first may
-            // have already opened a video dialog beneath the pointer.
-            if app.ev[18] > 1 { return; }
             if app.ptr.dpad_mode && super::boot::cursor_is_transparent() {
                 super::local_usb::key(app, Key::Ok, false);
             } else {
                 let (cx, cy) = ptr_xy(&app.ev);
-                super::local_usb::click(app, cx, cy);
+                let multi_click = app.ev[18] > 1;
+                super::local_usb::click(app, cx, cy, multi_click);
             }
             return;
         }

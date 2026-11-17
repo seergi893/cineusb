@@ -3225,7 +3225,11 @@ fn draw_line(p: Painter, line: &str, frame: Rect, size: i32, strong: bool) {
     if strong { label.bold().draw(p, frame); } else { label.draw(p, frame); }
 }
 
-pub(super) fn click(app: &mut App, x: f32, y: f32) {
+pub(super) fn click(app: &mut App, x: f32, y: f32, multi_click: bool) {
+    // The first press may have opened a video dialog beneath the pointer.
+    if multi_click && app.usb.pointer_media_cards() && matches!(app.usb.dialog, Some(Dialog::Video { .. })) {
+        return;
+    }
     app.usb.click(x, y);
     plx_machine::idle::invalidate();
 }
