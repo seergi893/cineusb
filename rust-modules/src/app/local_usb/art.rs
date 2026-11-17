@@ -105,12 +105,12 @@ pub(super) fn entry_cover(entry: &Entry, parent: Option<Cover>) -> (Cover, &'sta
     }
 }
 
-fn is_season(name: &str) -> bool {
-    ["temporada", "season"].into_iter().any(|prefix| {
-        name.strip_prefix(prefix).is_some_and(|suffix| small_number(suffix.trim_start_matches([' ', '.', '_', '-'])))
-    }) || name.strip_prefix('s').is_some_and(small_number)
-}
-
-fn small_number(text: &str) -> bool {
-    (1..=2).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit())
+pub(super) fn is_season(name: &str) -> bool {
+    const SEPARATORS: [char; 4] = [' ', '.', '_', '-'];
+    ["temporada", "season", "s"].into_iter().any(|prefix| {
+        let Some(suffix) = name.strip_prefix(prefix) else { return false };
+        let suffix = suffix.trim_start_matches(SEPARATORS);
+        let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
+        (1..=3).contains(&digits) && (digits == suffix.len() || suffix[digits..].starts_with(SEPARATORS))
+    })
 }
