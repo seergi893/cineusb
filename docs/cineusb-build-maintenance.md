@@ -22,7 +22,8 @@ the cache instead of silently reusing different flags. Corruption fails closed.
 
 ## Parallelism and build scope
 
-The two outer Make jobs and each native sub-build share an explicit runner-sized budget.
+Cold native builds use two outer Make jobs and bounded native worker pools. With a
+verified native cache, Make/Cargo can use the full runner without competing native builds.
 Cargo recipes are marked recursive so GNU Make passes valid jobserver descriptors.
 Python/CMake native subprocesses clear inherited Make flags and use the explicit budget.
 CineUSB packages retain both playback backends as required by the stable release guard.

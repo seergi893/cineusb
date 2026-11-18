@@ -218,11 +218,16 @@ jobs:
         run: python3 ci/native-cache.py verify "$CACHE_KEY"
       - name: Compile and verify the webOS package
         env:
+          NATIVE_CACHE_HIT: ${{ steps.native-cache.outputs.cache-hit }}
           CACHE_KEY: cineusb-native-stable-both-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-*', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'ci/native-cache.py', 'ci/patches/**', 'Makefile', 'rust-modules/.cargo/config.toml') }}
           WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
         run: |
           export JOBS="$(python3 -c 'import os; print(max(1, (os.cpu_count() or 2) // 2))')"
-          make -j2 all
+          # Cold native sub-builds each have their own bounded worker pool.
+          # With verified native outputs, Cargo can use the full Make jobserver.
+          parallel=2
+          if [ "$NATIVE_CACHE_HIT" = true ]; then parallel="$(nproc)"; fi
+          make -j"$parallel" all
           make ipk
           python3 ci/native-cache.py seal "$CACHE_KEY"
       - name: Upload the test IPK
