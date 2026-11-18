@@ -38,6 +38,8 @@ class Pipeline(unittest.TestCase):
         self.assertIn('ci/cargo-cache.py rust-modules/target', workflow)
         self.assertIn('ci/native-cache.py verify', workflow)
         self.assertIn('ci/native-cache.py seal', workflow)
+        self.assertIn('sha256sum --strict --check .cineusb-checksums', workflow)
+        self.assertNotIn('${{ github.sha }}', workflow[workflow.index('      - name: Cache host Cargo dependencies'):workflow.index('      - name: Discard cached workspace outputs')])
         self.assertIn('ci/patches/**', workflow)
         native = workflow[workflow.index('      - name: Cache verified native dependencies'):workflow.index('      - name: Verify restored native cache')]
         self.assertNotIn('restore-keys:', native)

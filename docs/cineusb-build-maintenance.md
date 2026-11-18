@@ -8,7 +8,8 @@ compilation. The actual IPK still passes the existing ELF/link-receipt/package c
 ## Cache boundaries
 
 Cargo registry sources and compiled registry dependencies are keyed by host/target,
-architecture, toolchain, Cargo manifests and lockfile. The existing cargo-seed scrubber
+architecture, toolchain, Cargo manifests, lockfile and workflow configuration. Stable keys
+avoid uploading the same registry dependencies for every source-only commit. The existing cargo-seed scrubber
 removes every cached path-package output before building. Application code is always
 rebuilt; cached application binaries can never satisfy Make by timestamp.
 
@@ -18,7 +19,8 @@ existing ELF link receipts are checked before Make sentinels are refreshed. The 
 contains library prefixes/staged libraries, never application objects or binaries.
 The NDK is initialized at the same absolute path on every runner, and the build
 configuration stamp is initialized before restoring libraries. Changed recipes invalidate
-the cache instead of silently reusing different flags. Corruption fails closed.
+the cache instead of silently reusing different flags. Corruption fails closed. Host FFmpeg restores are also checksum-verified before the
+build recipe is skipped, and all playback fixtures still run.
 
 ## Parallelism and build scope
 
