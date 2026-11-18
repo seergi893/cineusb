@@ -2971,12 +2971,12 @@ impl Browser {
         let (position, duration) = unpack_progress(item.progress);
         if position > 0 {
             if duration > 0 {
-                let remaining = video_duration(duration.saturating_sub(position / 1_000_000_000));
+                let remaining = video_duration(duration.saturating_sub(position) / 1_000_000_000);
                 let text = format!("{} {remaining}", tr("Quedan", "Queden"));
                 draw_line(p, &text, Rect::new(x, card.y + 127.0, width, 28.0), theme::size::MICRO, false);
                 let bar = Rect::new(x, card.y + card.h - 22.0, width, 4.0);
                 p.rrect(bar, 2.0, 2.0, theme::RAIL_TRACK);
-                let fraction = (position as f64 / (duration as f64 * 1_000_000_000.0)).clamp(0.0, 1.0) as f32;
+                let fraction = (position as f64 / duration as f64).clamp(0.0, 1.0) as f32;
                 p.rrect(Rect::new(bar.x, bar.y, bar.w * fraction, bar.h), 2.0, 2.0, self.accent());
             }
         }
@@ -4518,6 +4518,11 @@ mod usb_browser_tests {
         browser.scan.volumes = (0..40).map(|i| Volume {
             path: format!("/tmp/usb/drive{i}").into(), label: None, mount_id: None, system: false,
         }).collect();
+        browser.folders.push(Folder {
+            volume: browser.scan.volumes[0].clone(), path: "/tmp/usb/drive0/Pel·lícules".into(),
+            entries: (0..40).map(|index| disk::media_entry(format!("Pel·lícula {index}.mkv").into(), false).unwrap()).collect(),
+            collection: Some(Cover::Movie), selected: 0, scroll: 0.0,
+        });
         browser.restore_view(17, 410.0);
         assert_eq!(browser.selected, 17);
         assert_eq!(browser.scroll.pos, 410.0);
@@ -4604,16 +4609,18 @@ mod usb_browser_tests {
     }
 
     #[test]
-    fn compact_grid_balances_short_rows_and_centres_the_last_row() {
+    fn home_drive_cards_align_to_three_columns() {
         let mut browser = Browser::new();
         browser.scan.volumes = (0..9).map(|index| Volume {
             path: format!("/tmp/usb/sda/sda{index}").into(), label: None, mount_id: None, system: false,
         }).collect();
-        assert_eq!(browser.grid().cols, 5);
-        for (first, last) in [(0, 4), (5, 8)] {
+        assert_eq!(browser.grid().cols, 3);
+        for (first, last) in [(0, 2), (3, 5), (6, 8)] {
             let left = browser.tile_rect(first);
             let right = browser.tile_rect(last);
-            assert!((left.x + right.x + right.w - 1920.0).abs() < 0.1);
+            assert_eq!(left.x, plx_ui::consts::MARGIN_X);
+            assert!(right.x + right.w <= 1920.0 - plx_ui::consts::MARGIN_X);
+            assert_eq!(left.y, right.y);
         }
     }
 

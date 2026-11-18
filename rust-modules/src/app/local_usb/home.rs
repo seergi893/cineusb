@@ -233,7 +233,7 @@ pub(super) fn recommendations(drive: &Drive) -> Vec<Item> {
             || video.show.as_ref().is_some_and(|show| represented.contains(show)) { continue; }
         let saved = progress(video, &drive.volume, identity, history);
         let (position, duration) = unpack_progress(saved);
-        if saved == WATCHED || saved == FAVORITE || position == 0 || (duration > 0 && position / 1_000_000_000 >= duration) { continue; }
+        if saved == WATCHED || saved == FAVORITE || position == 0 || (duration > 0 && position >= duration) { continue; }
         if let Some(show) = &video.show {
             if !represented.insert(show.clone()) { continue; }
         }
@@ -380,7 +380,7 @@ mod usb_browser_tests {
         assert_eq!(items.len(), 2);
         assert!(items[0].favorite);
         assert_eq!(items[0].episode, Some((1, 1)));
-        assert_eq!(unpack_progress(items[1].progress), (60_000_000_000, 600));
+        assert_eq!(unpack_progress(items[1].progress), (60_000_000_000, 600_000_000_000));
         plx_base::testscratch::remove_tree(&root);
     }
 
