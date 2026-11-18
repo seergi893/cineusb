@@ -59,8 +59,12 @@ Tests finish much faster than compilation; these numbers are build latency, not 
 | Run | Host job | ARM/package job | End-to-end | Notes |
 | --- | --- | --- | --- | --- |
 | Baseline c6fa23e, Actions 44311762932 | 3m38s | 5m58s | 9m44s | NDK cache only; both playback backends |
-| Updated cold | pending | pending | pending | Fresh dependency/cache keys |
-| Updated warm | pending | pending | pending | Same committed tree, restored verified caches |
+| Updated native-cold c38c347, Actions 44333918310 | 4m28s | 8m08s | 12m44s | Native/host FFmpeg caches absent; Cargo host registry cache restored |
 
-A runner comparison includes machine/network variation; no speedup is claimed until both
-updated runs complete. Physical LG playback/remote verification is a separate device check.
+The warm-cache measurement and cache-hit receipts are recorded in
+[PR #53](https://github.com/seergi893/cineusb/pull/53). Its documentation-only benchmark
+commit leaves application sources and native recipes identical to the cold run.
+The cold run had no invalid-jobserver/forced-submake warnings. Initial construction
+is deliberately bounded and costs more than reuse. A runner comparison includes
+machine/network variation; measurements are observations rather than guaranteed speedups.
+Physical LG playback/remote verification is a separate device check.
