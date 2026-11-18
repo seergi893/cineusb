@@ -20,6 +20,7 @@ class Pipeline(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/cineusb-ipk.yml').read_text()
         self.assertIn('PLAYBACK_BACKENDS: feed', workflow)
         self.assertIn('--no-default-features --features hostsim,local-usb', workflow)
+        self.assertNotIn('-p plxnative-modules -p plx_appkit', workflow)
 
     def test_notices_execute_only_the_trusted_base(self):
         workflow = (ROOT / '.github/workflows/dependabot-notices.yml').read_text()
