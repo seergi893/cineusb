@@ -328,9 +328,13 @@ fn pdm(method: &str, payload: &serde_json::Value) -> io::Result<serde_json::Valu
     let uri = format!("luna://com.webos.service.pdm/{method}");
     let output = std::process::Command::new("/usr/bin/luna-send")
         .args(["-n", "1", "-w", "4000", &uri, &payload.to_string()]).output()?;
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+    pdm_response(method, output.status.success(), &output.stdout)
+}
+
+fn pdm_response(method: &str, succeeded: bool, bytes: &[u8]) -> io::Result<serde_json::Value> {
+    let response: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|_| io::Error::other("webOS did not return USB device status"))?;
-    if !output.status.success() || response["returnValue"].as_bool() != Some(true) {
+    if !succeeded || response["returnValue"].as_bool() != Some(true) {
         let detail = response["errorText"].as_str().unwrap_or("webOS rejected the request");
         return Err(io::Error::other(format!("{detail} ({method}, {})", response["errorCode"])));
     }
@@ -499,7 +503,10 @@ fn eject_checked(mount_id: &str, path_hex: &str) -> io::Result<()> {
             .then(|| mount_source(line))?
     }).and_then(|source| source.strip_prefix(b"/dev/"))
         .and_then(|source| std::str::from_utf8(source).ok()).ok_or_else(invalid)?;
-    let status = pdm("getAttachedDeviceStatus", &serde_json::json!({"subscribe": false}))?;
+    // LG C1 firmware 03.53.45 returns returnValue:false for subscribe:false,
+    // despite listing the attached drives. luna-send -n 1 exits after the first
+    // reply, so requesting a subscription still performs a bounded snapshot.
+    let status = pdm("getAttachedDeviceStatus", &serde_json::json!({"subscribe": true}))?;
     let partition = source.rsplit('/').next().ok_or_else(invalid)?;
     let (device, drives) = pdm_device(&status, partition)?;
     require_mount(&path, id)?;
@@ -605,6 +612,25 @@ mod tests {
         assert!(!selected.exists());
         assert_eq!(fs::read(neighbour).unwrap(), b"keep");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usb_eject_c1_status_requires_an_explicit_successful_reply() {
+        // Sanitized C1 03.53.45 replies: only subscribe:true succeeded. A valid
+        // drive list or successful process exit must never override false.
+        let mut reply = serde_json::json!({"deviceStatusList":[
+            {"deviceNum":0,"deviceStatus":"NOTHING","driveStatusList":[{"driveName":"apps","driveStatus":"MOUNT_OK "}]},
+            {"deviceNum":1,"deviceStatus":"NOTHING"},
+            {"deviceNum":2,"deviceStatus":"NOTHING","driveStatusList":[{"driveName":"sdb1","driveStatus":"MOUNT_OK "}]}
+        ],"returnValue":false});
+        let method = "getAttachedDeviceStatus";
+        assert!(pdm_response(method, true, &serde_json::to_vec(&reply).unwrap()).is_err());
+        reply["returnValue"] = serde_json::json!(true);
+        let bytes = serde_json::to_vec(&reply).unwrap();
+        let status = pdm_response(method, true, &bytes).unwrap();
+        assert_eq!(pdm_device(&status, "sdb1").unwrap(), (2, vec!["sdb1"]));
+        assert!(pdm_response(method, false, &bytes).is_err());
+        assert!(pdm_response(method, true, b"{}").is_err());
     }
 
     #[test]
