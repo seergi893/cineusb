@@ -39,6 +39,7 @@ fn main() {
                 ("--cineusb-volumes", []) => Some(usb_open::list_volumes()),
                 ("--cineusb-volume-details", [id, path]) => Some(usb_open::volume_details(id, path)),
                 ("--cineusb-list", [id, path]) => Some(usb_open::list_folder(id, path)),
+                ("--cineusb-folder-stamps", [id, paths @ ..]) => Some(usb_open::folder_stamps(id, paths)),
                 ("--cineusb-delete", [id, path]) => Some(usb_open::delete(id, path)),
                 ("--cineusb-delete-folder", [id, path]) => Some(usb_open::delete_folder(id, path)),
                 ("--cineusb-eject", [id, path]) => Some(usb_open::eject(id, path)),

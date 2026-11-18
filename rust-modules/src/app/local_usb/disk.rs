@@ -188,7 +188,7 @@ pub(super) fn resort(entries: &mut [Entry], selected: usize, order: usize) -> us
     name.and_then(|name| entries.iter().position(|entry| entry.name == name)).unwrap_or_default()
 }
 
-fn natural(mut a: &[u8], mut b: &[u8]) -> std::cmp::Ordering {
+pub(super) fn natural(mut a: &[u8], mut b: &[u8]) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     while let (Some(&x), Some(&y)) = (a.first(), b.first()) {
         if x.is_ascii_digit() && y.is_ascii_digit() {
