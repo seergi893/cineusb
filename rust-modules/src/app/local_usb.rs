@@ -1672,6 +1672,7 @@ impl Browser {
         let mut changed = false;
         if self.manual_refresh.as_ref().is_some_and(|volume| !self.scan.volumes.contains(volume)) {
             self.manual_refresh = None;
+            changed = true;
             self.refresh_notice = Some((tr("Actualización interrumpida: USB desconectado.", "Actualització interrompuda: USB desconnectat.").into(), now));
         }
         let had_missing_drive = self.dashboard.drives.iter().any(|drive| !self.scan.volumes.contains(&drive.volume));
@@ -1698,7 +1699,8 @@ impl Browser {
                                     self.history_loaded.insert(prefix);
                                 }
                             }
-                            if let Some((volume, path, entries)) = dashboard.refreshed_folder.take() {
+                            if let Some((volume, path, mut entries)) = dashboard.refreshed_folder.take() {
+                                disk::sort_entries_by(&mut entries, self.settings.sort);
                                 if let Some(folder) = self.folders.last_mut().filter(|folder| folder.volume == volume && folder.path == path) {
                                     let selected = folder.entries.get(self.selected).map(|entry| entry.name.clone());
                                     folder.entries = entries;
@@ -1733,6 +1735,8 @@ impl Browser {
                             self.refresh_notice = Some((tr("No se pudo actualizar la biblioteca.", "No s’ha pogut actualitzar la biblioteca.").into(), now));
                         }
                         self.home_refresh = now + Duration::from_secs(60);
+                    } else if job.manual && !self.mutating && self.refresh_notice.is_none() {
+                        self.refresh_notice = Some((tr("Actualización interrumpida. Vuelve a intentarlo.", "Actualització interrompuda. Torna-ho a provar.").into(), now));
                     }
                 }
             }
@@ -4068,6 +4072,30 @@ mod usb_browser_tests {
         assert!(browser.manual_refresh.is_none());
         assert!(browser.refresh_notice.is_some());
         assert_eq!(browser.history["keep"]["deleted-episode"], WATCHED);
+    }
+
+    #[test]
+    fn successful_manual_refresh_publishes_entries_and_preserves_focused_filename() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/manual".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(volume.clone());
+        let entry = |name: &str| disk::media_entry(name.into(), false).unwrap();
+        browser.folders.push(Folder { volume: volume.clone(), path: volume.path.clone(), entries: vec![entry("Keep.mkv"), entry("Deleted.mkv")], collection: None, selected: 0, scroll: 0.0 });
+        browser.manual_refresh = Some(volume.clone());
+        let (send, reply) = mpsc::sync_channel(1);
+        browser.home_job = Some(HomeRequest { reply, cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), volumes: vec![volume.clone()], manual: true });
+        send.send(Ok(home::Dashboard {
+            drives: vec![home::Drive { volume: volume.clone(), facts: (None, None), stats: Some(Default::default()), videos: vec![], history: None }],
+            items: vec![], refreshed_folder: Some((volume.clone(), volume.path.clone(), vec![entry("New.mkv"), entry("Keep.mkv")])),
+        })).unwrap();
+        assert!(browser.update_home(Instant::now()));
+        let entries = &browser.folders.last().unwrap().entries;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[browser.selected].name, OsString::from("Keep.mkv"));
+        assert!(!entries.iter().any(|entry| entry.name == "Deleted.mkv"));
+        assert_eq!(browser.dashboard.drives.len(), 1);
+        assert!(browser.manual_refresh.is_none());
+        assert!(browser.refresh_notice.is_some());
     }
 
     #[test]
