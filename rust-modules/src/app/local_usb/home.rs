@@ -33,6 +33,7 @@ struct Inventory {
     stats: Stats,
     used_bytes: Option<u64>,
     directories: Vec<Directory>,
+    favorite_series: Vec<PathBuf>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -152,7 +153,8 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
     cancelled(stop)?;
     stats.series = shows.len();
     videos.sort_by(|a, b| episode_order(&a.path, &b.path));
-    Ok(Inventory { identity: identity.into(), checked: seconds(), videos, stats, used_bytes: None, directories })
+    let favorite_series = favorites.iter().filter_map(|path| path.strip_prefix(&volume.path).ok().map(Path::to_path_buf)).collect();
+    Ok(Inventory { identity: identity.into(), checked: seconds(), videos, stats, used_bytes: None, directories, favorite_series })
 }
 
 fn directory_stamps(volume: &Volume, paths: &[PathBuf]) -> io::Result<Vec<(u64, i64, i64)>> {
@@ -272,8 +274,9 @@ pub(super) fn load(volumes: Vec<Volume>, refresh: bool, stop: &AtomicBool) -> io
             .filter(|path| !super::is_video_path(path))
             .map(|path| volume.path.join(path)).collect::<Vec<_>>()).unwrap_or_default();
         let mut inventory = identity.as_deref().and_then(cached);
+        let relative_favorites: Vec<_> = favorites.iter().filter_map(|path| path.strip_prefix(&volume.path).ok().map(Path::to_path_buf)).collect();
         let used_bytes = facts.0.map(|(_, used, _, _)| used);
-        if refresh || inventory.as_ref().is_none_or(|value| value.used_bytes != used_bytes
+        if refresh || inventory.as_ref().is_none_or(|value| value.used_bytes != used_bytes || value.favorite_series != relative_favorites
             || inventory_changed(&volume, value, stop).unwrap_or(true)) {
                 match scan(&volume, identity.as_deref().unwrap_or("volatile"), &favorites, stop) {
                     Ok(mut value) => {
@@ -398,7 +401,7 @@ mod usb_browser_tests {
         assert_eq!(recommendations(&drive)[0].episode, original);
         assert!(recommendations(&drive)[0].path.starts_with("/tmp/usb/sdb/sdb1"));
         let inventory = Inventory { identity: "uuid:test".into(), checked: seconds(), stats: drive.stats.unwrap(),
-            videos: drive.videos.clone(), used_bytes: Some(200), directories: vec![] };
+            videos: drive.videos.clone(), used_bytes: Some(200), directories: vec![], favorite_series: vec![] };
         let cache = root.join("offline-inventory.json");
         plx_plex::plex::session::write_atomic(&cache, &serde_json::to_vec(&inventory).unwrap()).unwrap();
         let restored: Inventory = serde_json::from_slice(&std::fs::read(cache).unwrap()).unwrap();

@@ -1136,7 +1136,8 @@ impl Browser {
         let Some(end) = key.as_bytes().chunks_exact(2).position(|pair| pair == b"00") else { return };
         let prefix = &key[..2 * (end + 1)];
         let records = self.history.entry(prefix.to_owned()).or_default();
-        records.insert(key.clone(), value);
+        let previous = records.insert(key.clone(), value);
+        self.home_force_refresh |= value == FAVORITE || previous == Some(FAVORITE);
         self.queued_progress.insert(key, value);
         self.flush_progress(false);
         self.home_refresh = Instant::now() + Duration::from_secs(1);
