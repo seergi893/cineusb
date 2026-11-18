@@ -370,57 +370,85 @@ fn device_partitions_mounted(table: &[u8], drives: &[&str]) -> bool {
     })
 }
 
-/// A webOS PDM eject can report success while the tntfs/NTFS mount remains
-/// live. Only then try a regular, synchronous unmount. Never force/lazy-unmount,
-/// and never touch a partition outside the selected physical USB device.
-fn ntfs_mountpoints(table: &[u8], drives: &[&str]) -> io::Result<Vec<PathBuf>> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
+/// PDM may leave filesystem mounts or bind aliases behind, even on an idle USB.
+/// Only normal synchronous unmounts are permitted, scoped to the selected disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UsbMount {
+    id: u64,
+    path: PathBuf,
+}
+
+fn usb_mountpoints(table: &[u8], drives: &[&str]) -> io::Result<Vec<UsbMount>> {
+    let mut candidates = Vec::new();
     for line in table.split(|byte| *byte == b'\n') {
-        let mut fields = line.split(|byte| *byte == b' ');
-        let _ = fields.next();
-        let _ = fields.next();
-        let _ = fields.next();
-        let mount_root = fields.next().unwrap_or_default();
-        let mount_path = decode_mount(fields.next().unwrap_or_default());
-        let mut tail = line.split(|byte| *byte == b' ').skip_while(|field| *field != b"-").skip(1);
-        let filesystem = tail.next().unwrap_or_default();
-        let source = tail.next().unwrap_or_default();
-        let Some(source) = source.strip_prefix(b"/dev/") else { continue };
+        let Some(source) = mount_source(line).and_then(|source| source.strip_prefix(b"/dev/")) else { continue };
         let partition = source.rsplit(|byte| *byte == b'/').next().unwrap_or(source);
         if !drives.iter().any(|drive| drive.as_bytes().rsplit(|byte| *byte == b'/').next() == Some(partition)) {
             continue;
         }
-        // If another partition is mounted elsewhere or uses a different
-        // filesystem, do not claim the whole physical drive is safely ejected.
-        if mount_root != b"/" || !mount_path.starts_with("/tmp/usb")
-            || !matches!(filesystem, b"ntfs" | b"ntfs3" | b"tntfs" | b"fuseblk") {
-            return Err(io::Error::other("safe eject unconfirmed: a USB partition still has an unsupported or external mount"));
+        let mut fields = line.split(|byte| *byte == b' ');
+        let id = fields.next().and_then(|id| std::str::from_utf8(id).ok())
+            .and_then(|id| id.parse::<u64>().ok()).filter(|id| *id > 0).ok_or_else(invalid)?;
+        let path = decode_mount(fields.nth(3).unwrap_or_default());
+        // Alias paths and subdirectory bind mounts are valid. Never target the
+        // filesystem root or a noncanonical path, irrespective of device names.
+        if !path.is_absolute() || path == Path::new("/")
+            || path.components().any(|part| matches!(part, Component::ParentDir | Component::CurDir)) {
+            return Err(io::Error::other("invalid USB mountpoint"));
         }
-        candidates.push(mount_path);
+        candidates.push(UsbMount { id, path });
     }
-    // Child mountpoints must be unmounted before their parents.
-    candidates.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    // Children first; for stacked mounts the newer/topmost ID is tried first.
+    candidates.sort_by_key(|mount| (std::cmp::Reverse(mount.path.components().count()), std::cmp::Reverse(mount.id)));
     Ok(candidates)
 }
 
-fn unmount_still_live_ntfs(table: &[u8], drives: &[&str]) -> io::Result<usize> {
-    let candidates = ntfs_mountpoints(table, drives)?;
-    for mount in &candidates {
-        let handle = File::open(mount)?;
-        // The webOS ARM sysroot does not export the libc syncfs symbol.
-        // Invoke the Linux syncfs syscall directly, scoped to this NTFS mount.
+fn unmount_candidates(
+    candidates: &[UsbMount],
+    allowed: &[UsbMount],
+    mut unmount: impl FnMut(&UsbMount) -> io::Result<()>,
+) -> io::Result<usize> {
+    let mut error = None;
+    for mount in candidates {
+        // Freeze identity before requesting PDM eject. Do not unmount a new or
+        // replaced disk that happens to reuse the same /dev/sdX name or path.
+        let result = if allowed.contains(mount) { unmount(mount) }
+            else { Err(io::Error::other("USB mount changed during ejection")) };
+        if let Err(cause) = result {
+            error = Some(io::Error::new(cause.kind(), format!("unmount {}: {cause}", mount.path.display())));
+        }
+        // A busy alias must not prevent attempts to release the other aliases.
+    }
+    match error { Some(error) => Err(error), None => Ok(candidates.len()) }
+}
+
+fn unmount_still_live_usb(table: &[u8], drives: &[&str], allowed: &[UsbMount]) -> io::Result<usize> {
+    unmount_candidates(&usb_mountpoints(table, drives)?, allowed, |mount| {
+        let handle = OpenOptions::new().read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&mount.path)?;
+        if fd_mount_id(&handle)? != mount.id {
+            return Err(io::Error::other("USB mount changed before unmount"));
+        }
+        // The ARM sysroot does not export libc syncfs. Flush this filesystem
+        // through the existing Linux syscall before a regular unmount.
         if unsafe { libc::syscall(libc::SYS_syncfs as libc::c_long, handle.as_raw_fd()) } != 0 {
             return Err(io::Error::last_os_error());
         }
         drop(handle);
-        let path = CString::new(mount.as_os_str().as_bytes()).map_err(|_| invalid())?;
-        if unsafe { libc::umount2(path.as_ptr(), 0) } != 0 {
-            let error = io::Error::last_os_error();
-            return Err(io::Error::new(error.kind(),
-                format!("safe eject unconfirmed: unmount {}: {error}", mount.display())));
+        // PDM may have removed/replaced an alias while syncfs blocked. Resolve
+        // the path again after the flush, immediately before normal umount.
+        let current = OpenOptions::new().read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&mount.path)?;
+        if fd_mount_id(&current)? != mount.id {
+            return Err(io::Error::other("USB mount changed while flushing"));
         }
-    }
-    Ok(candidates.len())
+        drop(current);
+        let path = CString::new(mount.path.as_os_str().as_bytes()).map_err(|_| invalid())?;
+        if unsafe { libc::umount2(path.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })
 }
 
 fn verify_eject(
@@ -433,7 +461,7 @@ fn verify_eject(
 ) -> io::Result<()> {
     let mut reason = request.err().map(|error| error.to_string());
     let mut retried_pdm = false;
-    // Give PDM time to complete before the NTFS fallback. Retry a clean
+    // Give PDM time to complete before the normal-unmount fallback. Retry a clean
     // unmount while other processes release handles. Mounts, not presence in
     // PDM's device list, are the final authority on safe removal.
     for attempt in 0..24 {
@@ -475,10 +503,11 @@ fn eject_checked(mount_id: &str, path_hex: &str) -> io::Result<()> {
     let partition = source.rsplit('/').next().ok_or_else(invalid)?;
     let (device, drives) = pdm_device(&status, partition)?;
     require_mount(&path, id)?;
+    let allowed = usb_mountpoints(&table, &drives)?;
     let payload = serde_json::json!({"deviceNum": device});
     verify_eject(&drives, pdm("eject", &payload).map(|_| ()),
         || fs::read("/proc/self/mountinfo"),
-        unmount_still_live_ntfs,
+        |table, drives| unmount_still_live_usb(table, drives, &allowed),
         || pdm("eject", &payload).map(|_| ()),
         || std::thread::sleep(std::time::Duration::from_millis(500)))
 }
@@ -690,23 +719,58 @@ mod tests {
         let result = verify_eject(&["sdb1", "sdb2"], Ok(()), || {
             reads.set(reads.get() + 1);
             Ok(match reads.get() { 1 => [ntfs.as_slice(), fat.as_slice()].concat(), 2..=8 => fat.clone(), _ => vec![] })
-        }, |table, drives| ntfs_mountpoints(table, drives).map(|paths| paths.len()),
+        }, |table, drives| usb_mountpoints(table, drives).map(|paths| paths.len()),
             || Ok(()), || {});
         assert!(result.is_ok());
         assert!(reads.get() >= 9);
     }
 
     #[test]
-    fn ntfs_unmount_candidates_reject_other_devices_and_unsupported_mounts() {
-        // Pure parsing of a mount table; no unmount calls are performed here.
-        let table = b"45 1 8:17 / /tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\n46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\n";
-        assert!(device_partitions_mounted(table, &["sdb1"]));
-        assert!(!device_partitions_mounted(table, &["sdc1"]));
-        assert_eq!(ntfs_mountpoints(table, &["sdb1"]).unwrap(),
-            vec![PathBuf::from("/tmp/usb/sdb/sdb1")]);
-        assert!(ntfs_mountpoints(table, &["sdb1", "sdb2"]).is_err());
-        let unsupported = b"46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\n";
-        assert!(unmount_still_live_ntfs(unsupported, &["sdb2"]).is_err());
+    fn usb_eject_accepts_idle_partition_aliases_outside_the_browser_root() {
+        // A mounted alias does not imply an open movie. webOS/jails can bind
+        // the same partition before the user has opened any file at all.
+        let table = b"45 1 8:17 / /tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\n52 1 8:17 / /var/luna/jail/example/tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\n";
+        let mounts: Vec<_> = usb_mountpoints(table, &["sdb1"]).unwrap().into_iter().map(|mount| mount.path).collect();
+        assert_eq!(mounts.len(), 2);
+        assert!(mounts.contains(&PathBuf::from("/tmp/usb/sdb/sdb1")));
+        assert!(mounts.contains(&PathBuf::from("/var/luna/jail/example/tmp/usb/sdb/sdb1")));
+    }
+
+    #[test]
+    fn usb_unmount_candidates_accept_filesystems_and_bind_roots_of_only_the_selected_disk() {
+        // Filesystem type and alias location do not determine whether it is busy.
+        let table = b"45 1 8:17 / /tmp/usb/sdb/sdb1 rw - ufsd /dev/sdb1 rw\n46 1 8:18 /Series /media/series rw - exfat /dev/sdb2 rw\n47 1 8:33 / /media/other rw - vfat /dev/sdc1 rw\n";
+        let mounts = usb_mountpoints(table, &["sdb1", "sdb2"]).unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert!(mounts.iter().any(|mount| mount.id == 46 && mount.path == Path::new("/media/series")));
+        assert!(usb_mountpoints(table, &["sdd1"]).unwrap().is_empty());
+        assert!(usb_mountpoints(b"45 1 8:17 / / rw - tntfs /dev/sdb1 rw\n", &["sdb1"]).is_err());
+        assert!(usb_mountpoints(b"45 1 8:17 / /media/../root rw - tntfs /dev/sdb1 rw\n", &["sdb1"]).is_err());
+    }
+
+    #[test]
+    fn usb_unmount_attempts_other_aliases_after_busy_and_refuses_replacements() {
+        let table = b"45 1 8:17 / /media/disk rw - tntfs /dev/sdb1 rw\n52 1 8:17 / /media/disk/alias rw - tntfs /dev/sdb1 rw\n";
+        let allowed = usb_mountpoints(table, &["sdb1"]).unwrap();
+        let mut attempted = Vec::new();
+        let result = unmount_candidates(&allowed, &allowed, |mount| {
+            attempted.push(mount.id);
+            if mount.id == 52 { Err(io::Error::from_raw_os_error(libc::EBUSY)) } else { Ok(()) }
+        });
+        assert!(result.is_err());
+        assert_eq!(attempted, vec![52, 45]);
+        let replaced = vec![UsbMount { id: 99, path: allowed[0].path.clone() }];
+        assert!(unmount_candidates(&replaced, &allowed, |_| panic!("replacement must not be touched")).is_err());
+    }
+
+    #[test]
+    fn usb_unmount_orders_stacked_aliases_and_decodes_spaces() {
+        let table = b"45 1 8:17 / /media/My\\040Disk rw - tntfs /dev/sdb1 rw\n52 1 8:17 / /media/My\\040Disk rw - tntfs /dev/sdb1 rw\n";
+        let mounts = usb_mountpoints(table, &["/dev/sdb1"]).unwrap();
+        assert_eq!(mounts.iter().map(|mount| mount.id).collect::<Vec<_>>(), vec![52, 45]);
+        assert_eq!(mounts[0].path, Path::new("/media/My Disk"));
+        let moved = vec![UsbMount { id: 52, path: PathBuf::from("/media/new") }];
+        assert!(unmount_candidates(&moved, &mounts, |_| panic!("moved mount must not be touched")).is_err());
     }
 
     #[test]
