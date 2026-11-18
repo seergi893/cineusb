@@ -9,14 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub(super) struct Stats {
     pub movies: usize,
     pub series: usize,
     pub documentaries: usize,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Video {
     pub path: PathBuf,
     pub size: u64,
@@ -41,6 +41,7 @@ struct Directory {
     stamp: (u64, i64, i64),
 }
 
+#[derive(Debug)]
 pub(super) struct Drive {
     pub volume: Volume,
     pub facts: VolumeFacts,
@@ -49,7 +50,7 @@ pub(super) struct Drive {
     pub history: Option<BTreeMap<String, u64>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct Item {
     pub volume: Volume,
     pub path: PathBuf,
@@ -59,6 +60,7 @@ pub(super) struct Item {
     pub progress: u64,
 }
 
+#[derive(Debug)]
 pub(super) struct Dashboard {
     pub drives: Vec<Drive>,
     pub items: Vec<Item>,
@@ -220,7 +222,10 @@ pub(super) fn recommendations(drive: &Drive) -> Vec<Item> {
             .min_by(|a, b| episode_order(&a.path, &b.path));
         if let Some(video) = next {
             represented.insert(show.clone());
-            items.push(item(drive, video, Some(&show), true, progress(video, &drive.volume, identity, history)));
+            let candidate = item(drive, video, Some(&show), true, progress(video, &drive.volume, identity, history));
+            if !items.iter().any(|existing: &Item| existing.path == candidate.path) {
+                items.push(candidate);
+            }
         }
     }
     for video in &drive.videos {
