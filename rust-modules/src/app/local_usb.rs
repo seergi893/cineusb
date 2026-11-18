@@ -3,6 +3,7 @@ mod art;
 mod continuity;
 mod disk;
 mod series;
+mod home;
 
 use art::Cover;
 use super::{App, Key, playback};
@@ -395,6 +396,7 @@ struct PreparedVideo {
     key: Option<String>,
     resume: u64,
     saved: u64,
+    direct_resume: bool,
 }
 
 struct PlayingVideo {
@@ -444,6 +446,12 @@ struct SeriesCacheEntry {
     counts: Option<series::Counts>,
 }
 
+struct HomeRequest {
+    reply: Receiver<io::Result<home::Dashboard>>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    volumes: Vec<Volume>,
+}
+
 impl SeriesCacheEntry {
     fn fresh(&self, card: &SeriesCard<'_>, now: Instant) -> bool {
         now.duration_since(self.checked) < SERIES_REFRESH
@@ -477,6 +485,10 @@ pub(super) struct Browser {
     details: BTreeMap<DetailKey, plx_play_feed::LocalVideoDetails>,
     series_job: Option<SeriesRequest>,
     series_cache: BTreeMap<PathBuf, SeriesCacheEntry>,
+    dashboard: home::Dashboard,
+    home_job: Option<HomeRequest>,
+    home_refresh: Instant,
+    home_force_refresh: bool,
     facts: Option<(Volume, VolumeFacts)>,
     facts_job: Option<VolumeFactsJob>,
     prepared: Option<PreparedVideo>,
@@ -528,6 +540,8 @@ impl Browser {
             retired_reads: Vec::new(), retired_scans: Vec::new(),
             details_job: None, details: BTreeMap::new(),
             series_job: None, series_cache: BTreeMap::new(),
+            dashboard: home::Dashboard { drives: vec![], items: vec![] }, home_job: None,
+            home_refresh: Instant::now(), home_force_refresh: false,
             facts: None, facts_job: None, prepared: None, ready: None, playing: None,
             progress_job: None, queued_progress: Default::default(), countdown_display: 0,
             history: BTreeMap::new(), history_job: None, history_loaded: BTreeSet::new(),
@@ -543,6 +557,7 @@ impl Browser {
     }
 
     fn len(&self) -> usize {
+        if self.drive_picker() { return self.scan.volumes.len() + self.dashboard.items.len(); }
         if self.tab_waiting_for_volume() { return 0; }
         if let Some(view) = self.media_cards() {
             return if self.documental_folder_picker(view) { view.paths.len() } else { 0 };
@@ -618,7 +633,7 @@ impl Browser {
                         }
                     }
                     DiskResult::Video(Ok(media)) => {
-                        if media.resume > 0 {
+                        if media.resume > 0 && !media.direct_resume {
                             self.dialog = Some(Dialog::Resume(media.resume));
                             self.option = 0;
                             self.prepared = Some(media);
@@ -628,11 +643,9 @@ impl Browser {
                     DiskResult::Video(Err(error)) => {
                         plx_base::eventlog::log(&format!("cineusb: video probe failed: {error}"));
                         self.status = tr("No se pudo abrir el vídeo.", "No s’ha pogut obrir el vídeo.").into();
+                        self.refresh_home(true);
                     }
                     DiskResult::Delete(path, result) => {
-                        if result.is_ok() {
-                            if let Some(volume) = self.volume().cloned() { self.remove_history_under(&volume, &path); }
-                        }
                         if result.is_ok() {
                             if let Some(folder) = self.folders.last_mut() {
                                 folder.entries.retain(|entry| path.file_name() != Some(entry.name.as_os_str()));
@@ -646,10 +659,7 @@ impl Browser {
                     }
                     DiskResult::DeleteFolders { removed, total, error, entries } => {
                         self.invalidate_series_counts();
-                        if let Some(folder) = self.folders.last() {
-                            let (volume, parent) = (folder.volume.clone(), folder.path.clone());
-                            for name in &removed { self.remove_history_under(&volume, &parent.join(name)); }
-                        }
+                        self.refresh_home(true);
                         self.facts = None;
                         if let Some(folder) = self.folders.last_mut() {
                             match entries {
@@ -751,7 +761,7 @@ impl Browser {
                             self.status.push_str(tr("Se ha retirado el disco USB.", "S’ha retirat el disc USB."));
                             video = None;
                         }
-                        if self.folders.is_empty() && self.favorite_view.is_none() {
+                        if self.drive_picker() {
                             let index = selected.and_then(|volume| self.scan.volumes.iter().position(|item| *item == volume));
                             self.select(index.unwrap_or_default(), true);
                         }
@@ -814,6 +824,7 @@ impl Browser {
         changed |= self.ejecting.as_ref().is_some_and(|(_, start)| start.elapsed() < Duration::from_millis(800));
         changed |= self.update_video_details();
         changed |= self.update_series_counts(now);
+        changed |= self.update_home(now);
         if self.mutating && self.ejecting.is_some() && self.usb_reads_drained() {
             let volume = self.ejecting.as_ref().expect("eject requested").0.clone();
             self.request(move || {
@@ -850,6 +861,11 @@ impl Browser {
     }
 
     fn scroll_target(&self) -> f32 {
+        if self.drive_picker() {
+            let card = self.home_rect(self.selected);
+            return self.scroll.pos.clamp((card.y + card.h - GRID_BOTTOM + 22.0).max(0.0),
+                (card.y - HOME_GRID_TOP).max(0.0));
+        }
         let grid = self.grid();
         let row = self.selected / grid.cols;
         let viewport = GRID_BOTTOM - self.grid_top() - 22.0;
@@ -875,6 +891,7 @@ impl Browser {
         self.pending.is_none() && self.details_job.is_none() && self.series_job.is_none()
             && self.facts_job.is_none() && self.scanning.is_none()
             && self.retired_reads.is_empty() && self.retired_scans.is_empty()
+            && self.home_job.is_none()
     }
 
     fn retire_read(&mut self) -> bool {
@@ -902,7 +919,45 @@ impl Browser {
     }
 
     fn grid(&self) -> Geom {
+        if self.drive_picker() {
+            return Geom { cols: 3, left: plx_ui::consts::MARGIN_X, w: 560.0, h: 210.0, gap: 24.0, value_line: false };
+        }
         grid_geometry(self.len(), self.settings.cards, self.media_library())
+    }
+
+    fn home_continue_top(&self) -> f32 {
+        HOME_GRID_TOP + self.scan.volumes.len().div_ceil(3) as f32 * 218.0 + 60.0
+    }
+
+    fn home_rect(&self, index: usize) -> Rect {
+        let drives = self.scan.volumes.len();
+        let (index, top, pitch, height) = if index < drives {
+            (index, HOME_GRID_TOP, 218.0, 190.0)
+        } else {
+            (index.saturating_sub(drives), self.home_continue_top(), 238.0, 210.0)
+        };
+        Rect::new(plx_ui::consts::MARGIN_X + (index % 3) as f32 * 584.0,
+            top + (index / 3) as f32 * pitch, 560.0, height)
+    }
+
+    fn visible_cards(&self) -> std::ops::Range<usize> {
+        if self.drive_picker() { return 0..self.len(); }
+        poster_grid::visible_in(&self.grid(), self.len(), self.grid_top(), self.scroll.pos)
+    }
+
+    fn home_neighbor(&self, dir: Dir) -> Option<usize> {
+        let drives = self.scan.volumes.len();
+        let (offset, count) = if self.selected < drives { (0, drives) } else { (drives, self.dashboard.items.len()) };
+        let index = self.selected - offset;
+        if let Some(next) = poster_grid::neighbour(index, count, 3, dir) { return Some(offset + next); }
+        match dir {
+            Dir::Down if offset == 0 && !self.dashboard.items.is_empty() => Some(drives + (index % 3).min(self.dashboard.items.len() - 1)),
+            Dir::Up if offset == drives && drives > 0 => {
+                let start = (drives - 1) / 3 * 3;
+                Some((start + index % 3).min(drives - 1))
+            }
+            _ => None,
+        }
     }
 
     fn media_series_name(&self) -> Option<std::borrow::Cow<'_, str>> {
@@ -925,6 +980,11 @@ impl Browser {
     }
 
     fn tile_rect(&self, index: usize) -> Rect {
+        if self.drive_picker() {
+            let mut card = self.home_rect(index);
+            card.y -= self.scroll.pos;
+            return card;
+        }
         let mut grid = self.grid();
         if !self.media_library() {
             let first = index / grid.cols * grid.cols;
@@ -1009,11 +1069,15 @@ impl Browser {
         self.estimate_anchor = None;
         let Some(playing) = self.playing.take() else { return };
         if !completed || !self.settings.auto_next { return; }
-        let Some(folder) = self.folders.last().filter(|folder|
-            folder.volume == playing.volume && playing.path.parent() == Some(folder.path.as_path())) else { return };
-        let Some(next) = playing.path.file_name().and_then(|name| continuity::next_episode(name, &folder.entries)) else { return };
+        let next = self.folders.last().filter(|folder|
+            folder.volume == playing.volume && playing.path.parent() == Some(folder.path.as_path()))
+            .and_then(|folder| playing.path.file_name().and_then(|name| continuity::next_episode(name, &folder.entries))
+                .map(|name| folder.path.join(name)))
+            .or_else(|| self.dashboard.drives.iter().find(|drive| drive.volume == playing.volume)
+                .and_then(|drive| home::next_episode(drive, &playing.path)));
+        let Some(next) = next else { return };
         self.countdown_display = 10;
-        self.dialog = Some(Dialog::Next { volume: playing.volume, path: folder.path.join(next),
+        self.dialog = Some(Dialog::Next { volume: playing.volume, path: next,
             deadline: Instant::now() + Duration::from_secs(10) });
         self.option = 1;
         self.action = None;
@@ -1022,6 +1086,7 @@ impl Browser {
 
     fn identity(&self, volume: &Volume) -> Option<&str> {
         self.facts.as_ref().filter(|(disk, _)| disk == volume).and_then(|(_, (_, identity))| identity.as_deref())
+            .or_else(|| self.dashboard.drives.iter().find(|drive| &drive.volume == volume).and_then(|drive| drive.facts.1.as_deref()))
     }
 
     fn update_history(&mut self) -> bool {
@@ -1074,19 +1139,11 @@ impl Browser {
         records.insert(key.clone(), value);
         self.queued_progress.insert(key, value);
         self.flush_progress(false);
-        plx_machine::idle::invalidate();
-    }
-
-    fn remove_history_under(&mut self, volume: &Volume, path: &std::path::Path) {
-        let Some(identity) = self.identity(volume) else { return };
-        let Some(base) = path_key(identity, volume, path) else { return };
-        let prefix = history_prefix(identity);
-        if let Some(records) = self.history.get_mut(&prefix) {
-            records.retain(|key, _| !history_matches(key, &base));
+        self.home_refresh = Instant::now() + Duration::from_secs(1);
+        if let Some(job) = &self.home_job {
+            job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        self.queued_progress.retain(|key, _| !history_matches(key, &base));
-        self.queued_history_clears.insert(base);
-        self.flush_progress(false);
+        plx_machine::idle::invalidate();
     }
 
     fn favorites(&self, volume: &Volume) -> Vec<PathBuf> {
@@ -1202,6 +1259,7 @@ impl Browser {
                 // Do not reuse a previously cached PELIS/SERIES path.
                 self.discovery_cache.clear();
                 self.invalidate_series_counts();
+                self.refresh_home(false);
                 self.next_scan = Instant::now();
                 self.loading_favorites = false;
                 self.nav_tab = 0;
@@ -1515,6 +1573,80 @@ impl Browser {
         changed
     }
 
+    fn home_item(&self) -> Option<&home::Item> {
+        if !self.drive_picker() { return None; }
+        self.dashboard.items.get(self.selected.checked_sub(self.scan.volumes.len())?)
+    }
+
+    fn refresh_home(&mut self, force: bool) {
+        self.home_force_refresh |= force;
+        if force || self.dashboard.drives.is_empty() {
+            self.home_refresh = Instant::now();
+            if let Some(job) = &self.home_job {
+                job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn update_home(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        let had_missing_drive = self.dashboard.drives.iter().any(|drive| !self.scan.volumes.contains(&drive.volume));
+        self.dashboard.drives.retain(|drive| self.scan.volumes.contains(&drive.volume));
+        self.dashboard.items.retain(|item| self.scan.volumes.contains(&item.volume));
+        if had_missing_drive { self.home_refresh = now; changed = true; }
+        if let Some(job) = &self.home_job {
+            if job.volumes != self.scan.volumes {
+                job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            match job.reply.try_recv() {
+                Err(TryRecvError::Empty) => return changed,
+                result => {
+                    let job = self.home_job.take().expect("home request polled");
+                    if !job.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        if let Ok(Ok(dashboard)) = result {
+                            let selected_path = self.home_item().map(|item| item.path.clone());
+                            for drive in &dashboard.drives {
+                                if let Some((identity, records)) = drive.facts.1.as_ref().zip(drive.history.as_ref()) {
+                                    let prefix = history_prefix(identity);
+                                    let current = self.history.entry(prefix.clone()).or_default();
+                                    for (key, value) in records { current.entry(key.clone()).or_insert(*value); }
+                                    self.history_loaded.insert(prefix);
+                                }
+                            }
+                            self.dashboard = dashboard;
+                            if self.drive_picker() {
+                                if let Some(path) = selected_path {
+                                    self.selected = self.dashboard.items.iter().position(|item| item.path == path)
+                                        .map(|index| index + self.scan.volumes.len()).unwrap_or(0);
+                                }
+                                self.selected = self.selected.min(self.len().saturating_sub(1));
+                            }
+                            changed = true;
+                        }
+                        self.home_refresh = now + Duration::from_secs(60);
+                    }
+                }
+            }
+        }
+        if self.mutating || self.pending.is_some() || self.progress_job.is_some()
+            || now < self.home_refresh || self.scan.volumes.is_empty() { return changed; }
+        let volumes = self.scan.volumes.clone();
+        let worker_volumes = volumes.clone();
+        let refresh = self.home_force_refresh;
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = cancelled.clone();
+        let (send, reply) = mpsc::sync_channel(1);
+        if plx_base::task::spawn_off_frame("cineusb-home-library", move |_| {
+            let _ = send.send(home::load(worker_volumes, refresh, &stop));
+        }) {
+            self.home_job = Some(HomeRequest { reply, cancelled, volumes });
+            self.home_force_refresh = false;
+        } else {
+            self.home_refresh = now + Duration::from_secs(10);
+        }
+        changed
+    }
+
     fn update_settings(&mut self) -> bool {
         if !self.settings_started {
             self.settings_started = true;
@@ -1582,6 +1714,7 @@ impl Browser {
     }
 
     fn volume(&self) -> Option<&Volume> {
+        if let Some(item) = self.home_item() { return Some(&item.volume); }
         self.media_cards().map(|view| &view.volume)
             .or_else(|| self.favorite_cards().map(|view| &view.volume))
             .or_else(|| self.folders.last().map(|folder| &folder.volume))
@@ -1732,6 +1865,9 @@ impl Browser {
                 // Drain in-flight workers before ejecting. Dropping their reply
                 // channels does not close descriptors held by those workers.
                 self.invalidate_series_counts();
+                if let Some(job) = &self.home_job {
+                    job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 self.mutating = true;
             }
             _ => {}
@@ -1766,6 +1902,7 @@ impl Browser {
 
     fn finish_mutation(&mut self, result: Result<(), String>, success: &str, failure: &str) {
         self.invalidate_series_counts();
+        self.refresh_home(true);
         self.retire_scan();
         self.next_scan = Instant::now();
         self.status = match result {
@@ -1790,6 +1927,10 @@ impl Browser {
 
     fn open(&mut self) {
         if self.pending.is_some() { return; }
+        if let Some(item) = self.home_item().cloned() {
+            self.play_video_at(&item.volume, item.path, true);
+            return;
+        }
         if self.tab_waiting_for_volume() {
             self.open_nav_tab(self.nav_tab);
             return;
@@ -1844,6 +1985,7 @@ impl Browser {
     }
 
     fn play_video_at(&mut self, volume: &Volume, path: PathBuf, offer_resume: bool) {
+        let direct_resume = self.home_item().is_some();
         let title = path.file_stem().or_else(|| path.file_name()).unwrap_or_default().to_string_lossy().into_owned();
         let mount_id = system_mount(volume);
         let spanish = self.settings.spanish_audio;
@@ -1879,7 +2021,7 @@ impl Browser {
                 let (position, _) = unpack_progress(saved);
                 let resume = if offer_resume && info.duration_secs.is_none_or(|seconds|
                     position / 1_000_000_000 <= seconds) { position } else { 0 };
-                PreparedVideo { file, info, volume, path, title, key, resume, saved }
+                PreparedVideo { file, info, volume, path, title, key, resume, saved, direct_resume }
             });
             DiskResult::Video(result)
         });
@@ -1990,7 +2132,7 @@ impl Browser {
         let bleed = if self.drive_picker() { 26.0 } else { 14.0 };
         if y < top - bleed || y >= GRID_BOTTOM { return None; }
         // Keep hit targets stable while the existing focus spring scales the artwork.
-        poster_grid::visible_in(&self.grid(), self.len(), top, self.scroll.pos)
+        self.visible_cards()
             .find(|&index| hit(self.tile_rect(index), x, y))
     }
 
@@ -2162,7 +2304,7 @@ impl Browser {
             return;
         }
         let dir = match key {
-            Key::Up if self.selected < self.grid().cols => {
+            Key::Up if self.selected < self.grid().cols && (!self.drive_picker() || self.selected < self.scan.volumes.len()) => {
                 self.nav_focus = Some(self.nav_tab);
                 return;
             }
@@ -2174,7 +2316,9 @@ impl Browser {
             Key::Back if !repeat => return self.back(),
             _ => return,
         };
-        if let Some(index) = poster_grid::neighbour(self.selected, self.len(), self.grid().cols, dir) {
+        let next = if self.drive_picker() { self.home_neighbor(dir) }
+            else { poster_grid::neighbour(self.selected, self.len(), self.grid().cols, dir) };
+        if let Some(index) = next {
             self.select(index, false);
         }
     }
@@ -2205,6 +2349,10 @@ impl Browser {
     }
 
     fn item(&self, index: usize) -> Option<(String, &'static str, Cover)> {
+        if self.drive_picker() && index >= self.scan.volumes.len() {
+            let item = self.dashboard.items.get(index - self.scan.volumes.len())?;
+            return Some((item.title.clone(), "", if item.episode.is_some() { Cover::Series } else { Cover::Movie }));
+        }
         if let Some(view) = self.media_cards() {
             let path = view.paths.get(index)?;
             let name = path.file_name()?.to_string_lossy().into_owned();
@@ -2324,13 +2472,17 @@ impl Browser {
             let top = self.grid_top();
             let bleed = if home { 26.0 } else { 14.0 };
             p.clip(Rect::new(0.0, top - bleed, 1920.0, GRID_BOTTOM - top + bleed));
-            let grid = self.grid();
-            let cells = poster_grid::visible_in(&grid, self.len(), top, self.scroll.pos);
+            if home && !self.dashboard.items.is_empty() {
+                draw_line(p, tr("Seguir viendo", "Continua mirant"),
+                    Rect::new(x, self.home_continue_top() - 46.0 - self.scroll.pos, width, 34.0),
+                    theme::size::HEADLINE, true);
+            }
+            let cells = self.visible_cards();
             for i in cells.filter(|index| *index != self.selected) { self.draw_tile(p, i, false); }
             self.draw_tile(p, self.selected, self.grid_has_focus());
             p.clip_clear();
         }
-        let storage = self.facts.as_ref().filter(|(disk, _)| self.volume() == Some(disk))
+        let storage = self.facts.as_ref().filter(|(disk, _)| !home && self.volume() == Some(disk))
             .and_then(|(disk, (capacity, _))| capacity.map(|facts| (disk, facts)));
         if self.dialog.is_none() {
             if let Some((disk, facts)) = storage {
@@ -2768,6 +2920,68 @@ impl Browser {
         draw_button(p, rect.scaled(scale), label, focused, danger, glyph, self.accent());
     }
 
+    fn draw_home_card(&self, p: Painter, index: usize, card: Rect, radius: f32, lift: f32) {
+        p.shadow_outside(card, radius, 21.0, 9.0, theme::CARD_SHADOW);
+        if lift > 0.0 {
+            p.shadow_outside(card, radius, 21.0, 5.0, theme::with_a(self.accent(), lift * 0.42));
+        }
+        p.rect_sheened(card, radius, theme::USB_DRIVE_TOP, theme::USB_DRIVE_BOTTOM);
+        if lift > 0.0 {
+            p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, theme::with_a(self.accent(), lift));
+        }
+        let x = card.x + 22.0;
+        let width = card.w - 44.0;
+        if let Some(volume) = self.scan.volumes.get(index) {
+            let drive = self.dashboard.drives.iter().find(|drive| &drive.volume == volume);
+            let name = volume.label.as_ref().map(|label| label.to_string_lossy().into_owned())
+                .unwrap_or_else(|| tr("Disco USB", "Disc USB").into());
+            draw_glyph(p, Glyph::Drive, Rect::new(card.x + card.w - 61.0, card.y + 16.0, 37.0, 37.0), theme::TEXT_PRIMARY);
+            draw_line(p, &name, Rect::new(x, card.y + 12.0, width - 50.0, 36.0), theme::size::LABEL, true);
+            let stats = drive.and_then(|drive| drive.stats).map(|stats| format!("{} {} · {} {} · {} {}",
+                stats.movies, tr("películas", "pel·lícules"), stats.series, tr("series", "sèries"),
+                stats.documentaries, tr("documentales", "documentals")));
+            let text = stats.as_deref().unwrap_or(tr("Leyendo la biblioteca…", "Llegint la biblioteca…"));
+            plx_ui::text_view::TextView::new(text, theme::size::MICRO, theme::TEXT_SECONDARY)
+                .with_measure(&TtfMeasure).break_long_words().max_lines(2)
+                .draw(p, Rect::new(x, card.y + 53.0, width, 52.0));
+            let capacity = drive.and_then(|drive| drive.facts.0).or_else(|| self.facts.as_ref()
+                .filter(|(current, _)| current == volume).and_then(|(_, facts)| facts.0));
+            if let Some((total, used, free, _)) = capacity {
+                let used_text = format!("{} {} / {}", tr("Usado", "Utilitzat"), video_size(used), video_size(total));
+                let free_text = format!("{} {}", video_size(free), tr("libres", "lliures"));
+                draw_line(p, &used_text, Rect::new(x, card.y + 108.0, width, 28.0), theme::size::MICRO, false);
+                draw_line(p, &free_text, Rect::new(x, card.y + 137.0, width, 28.0), theme::size::MICRO, false);
+                let fraction = if total == 0 { 0.0 } else { (used as f64 / total as f64).clamp(0.0, 1.0) as f32 };
+                let bar = Rect::new(x, card.y + card.h - 14.0, width, 4.0);
+                p.rrect(bar, 2.0, 2.0, theme::RAIL_TRACK);
+                if fraction > 0.0 { p.rrect(Rect::new(bar.x, bar.y, bar.w * fraction, bar.h), 2.0, 2.0, self.accent()); }
+            }
+            return;
+        }
+        let Some(item) = self.dashboard.items.get(index - self.scan.volumes.len()) else { return };
+        let title = plx_ui::text_view::TextView::new(&item.title, theme::size::LABEL, theme::TEXT_PRIMARY)
+            .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2);
+        title.draw(p, Rect::new(x, card.y + 17.0, width - 38.0, 60.0));
+        if item.favorite {
+            draw_glyph(p, Glyph::Star(false), Rect::new(card.x + card.w - 47.0, card.y + 20.0, 25.0, 25.0), theme::USB_FAVORITES);
+        }
+        let episode = item.episode.map(|(season, ep)| format!("T{season} · E{ep:02}"))
+            .unwrap_or_else(|| item.path.file_stem().unwrap_or_default().to_string_lossy().into_owned());
+        draw_line(p, &episode, Rect::new(x, card.y + 84.0, width, 32.0), theme::size::CAPTION, false);
+        let (position, duration) = unpack_progress(item.progress);
+        if position > 0 {
+            if duration > 0 {
+                let remaining = video_duration(duration.saturating_sub(position / 1_000_000_000));
+                let text = format!("{} {remaining}", tr("Quedan", "Queden"));
+                draw_line(p, &text, Rect::new(x, card.y + 127.0, width, 28.0), theme::size::MICRO, false);
+                let bar = Rect::new(x, card.y + card.h - 22.0, width, 4.0);
+                p.rrect(bar, 2.0, 2.0, theme::RAIL_TRACK);
+                let fraction = (position as f64 / (duration as f64 * 1_000_000_000.0)).clamp(0.0, 1.0) as f32;
+                p.rrect(Rect::new(bar.x, bar.y, bar.w * fraction, bar.h), 2.0, 2.0, self.accent());
+            }
+        }
+    }
+
     fn draw_tile(&self, p: Painter, index: usize, focused: bool) {
         let Some((title, kind, cover)) = self.item(index) else { return };
         let frame = self.tile_rect(index);
@@ -2775,6 +2989,10 @@ impl Browser {
         let card = frame.scaled(scale);
         let radius = USB_STYLE.tile_radius(card, scale);
         let lift = ((scale - 1.0) / (USB_STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
+        if self.drive_picker() {
+            self.draw_home_card(p, index, card, radius, lift);
+            return;
+        }
         if cover == Cover::Drive {
             p.shadow_outside(card, radius, 21.0, 9.0, theme::CARD_SHADOW);
             if lift > 0.0 {
@@ -3499,7 +3717,7 @@ pub(super) fn tick(app: &mut App) {
     if !app.window_activity.allow_present(true) && matches!(app.usb.dialog, Some(Dialog::Next { .. })) {
         app.usb.dialog = None;
     }
-    let Some(PreparedVideo { file, info, title, volume, path, key, resume, saved }) = app.usb.update() else { return };
+    let Some(PreparedVideo { file, info, title, volume, path, key, resume, saved, .. }) = app.usb.update() else { return };
     if !app.usb.scan.volumes.contains(&volume) { return; }
     let ps = &mut app.player.session;
     let dovi = info.dovi.map_or(plx_data::metadata::Dovi::NONE, |record| plx_data::metadata::Dovi {
@@ -3609,6 +3827,53 @@ pub(super) fn flush_playback(app: &mut App) {
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn home_recommendations_share_pointer_and_dpad_geometry() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(volume.clone());
+        browser.dashboard.items = (1..=5).map(|episode| home::Item {
+            volume: volume.clone(), path: volume.path.join(format!("Show S02E{episode:02}.mkv")),
+            title: "Una sèrie".into(), episode: Some((2, episode)), favorite: true, progress: 0,
+        }).collect();
+        assert_eq!(browser.len(), 6);
+        browser.key(Key::Down, false);
+        assert_eq!(browser.selected, 1);
+        assert_eq!(browser.home_item().unwrap().episode, Some((2, 1)));
+        browser.key(Key::Right { alt: false }, false);
+        assert_eq!(browser.selected, 2);
+        let target = browser.tile_rect(3);
+        assert!(browser.pointer(target.x + 30.0, target.y + 30.0));
+        assert_eq!(browser.selected, 3);
+        browser.key(Key::Up, false);
+        assert_eq!(browser.selected, 0);
+        assert!(browser.pending.is_none());
+        assert!(browser.dialog.is_none());
+        assert_eq!(browser.home_rect(1).x, plx_ui::consts::MARGIN_X);
+        assert_eq!(browser.home_rect(4).x, plx_ui::consts::MARGIN_X);
+        assert!(browser.home_rect(1).y > browser.home_rect(0).y + browser.home_rect(0).h);
+    }
+
+    #[test]
+    fn safe_eject_waits_for_the_home_inventory_worker() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(volume.clone());
+        let (send, reply) = mpsc::sync_channel(1);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        browser.home_job = Some(HomeRequest { reply, cancelled: cancelled.clone(), volumes: vec![volume.clone()] });
+        browser.dialog = Some(Dialog::Eject(volume));
+        browser.option = 1;
+        browser.choose_option();
+        assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!browser.usb_reads_drained());
+        send.send(Err(io::ErrorKind::Interrupted.into())).unwrap();
+        browser.update_home(Instant::now());
+        assert!(browser.home_job.is_none());
+        assert!(browser.usb_reads_drained());
+        assert!(browser.pending.is_none());
+    }
 
     #[test]
     fn eject_keeps_inflight_probe_tracked_until_its_file_is_released() {

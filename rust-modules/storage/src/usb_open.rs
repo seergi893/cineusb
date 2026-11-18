@@ -146,6 +146,22 @@ pub fn list_folder(mount_id: &str, path_hex: &str) -> io::Result<()> {
     Ok(())
 }
 
+pub fn folder_stamps(mount_id: &str, paths: &[String]) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if unsafe { libc::geteuid() } != 0 || paths.is_empty() || paths.len() > 64 { return Err(invalid()); }
+    let id = mount_id.parse().map_err(|_| invalid())?;
+    let stamps: Vec<_> = paths.iter().map(|encoded| {
+        let path = decode_path(encoded)?;
+        require_mount(&path, id)?;
+        let folder = open_under(Path::new("/tmp/usb"), &path, true)?;
+        if fd_mount_id(&folder)? != id { return Err(invalid()); }
+        let meta = folder.metadata()?;
+        Ok((meta.ino(), meta.mtime(), meta.mtime_nsec()))
+    }).collect::<io::Result<_>>()?;
+    serde_json::to_writer(io::stdout().lock(), &stamps)?;
+    Ok(())
+}
+
 pub fn volume_details(mount_id: &str, path_hex: &str) -> io::Result<()> {
     if unsafe { libc::geteuid() } != 0 { return Err(invalid()); }
     let id = mount_id.parse().map_err(|_| invalid())?;

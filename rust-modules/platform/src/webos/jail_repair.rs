@@ -196,6 +196,17 @@ pub fn eject_usb_disk(path: &Path, mount_id: u64) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+pub fn usb_folder_stamps(paths: &[std::path::PathBuf], mount_id: u64) -> Result<Vec<(u64, i64, i64)>, Failure> {
+    if paths.is_empty() || paths.len() > 64 { return Err(Failure::CommandFailed); }
+    let args = paths.iter().map(|path| usb_path_hex(path).map(|hex| format!("'{hex}'")))
+        .collect::<Result<Vec<_>, _>>()?.join(" ");
+    let reply = run_usb_helper(&format!("--cineusb-folder-stamps {mount_id} {args}"))?;
+    let values: Vec<_> = serde_json::from_str(&reply).map_err(|_| Failure::CommandFailed)?;
+    if values.len() != paths.len() { return Err(Failure::CommandFailed); }
+    Ok(values)
+}
+
+#[cfg(target_os = "linux")]
 pub fn delete_usb_folder(path: &Path, mount_id: u64) -> Result<(), String> {
     usb_report("--cineusb-delete-folder", path, mount_id)
 }
