@@ -65,6 +65,7 @@ pub(super) struct Item {
 pub(super) struct Dashboard {
     pub drives: Vec<Drive>,
     pub items: Vec<Item>,
+    pub refreshed_folder: Option<(Volume, PathBuf, Vec<disk::Entry>)>,
 }
 
 fn seconds() -> u64 {
@@ -279,7 +280,7 @@ pub(super) fn load(volumes: Vec<Volume>, refresh: bool, stop: &AtomicBool) -> io
                         inventory = Some(value);
                     }
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
-                    Err(_) => inventory = None,
+                    Err(error) => return Err(error),
                 }
         }
         let mut drive = Drive { volume, facts, stats: inventory.as_ref().map(|value| value.stats),
@@ -314,7 +315,7 @@ pub(super) fn load(volumes: Vec<Volume>, refresh: bool, stop: &AtomicBool) -> io
     }
     items.sort_by_key(|item| !item.favorite);
     items.truncate(12);
-    Ok(Dashboard { drives, items })
+    Ok(Dashboard { drives, items, refreshed_folder: None })
 }
 
 #[cfg(test)]
@@ -423,6 +424,31 @@ mod usb_browser_tests {
         assert_eq!(refreshed.videos.len(), inventory.videos.len() + 1);
         std::fs::remove_file(&added).unwrap();
         assert!(inventory_changed(&volume, &refreshed, &AtomicBool::new(false)).unwrap());
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn forced_inventory_refresh_tracks_renames_deletes_and_recursive_counts() {
+        let (root, volume) = fixture("cineusb-home-manual-edits");
+        let show = root.join("Sèries/Una sèrie");
+        let favorite = favorite_key("uuid:test", &volume, &show).unwrap();
+        let mut before = drive(volume.clone(), BTreeMap::from([(favorite, FAVORITE)]));
+        let first = root.join("Sèries/Una sèrie/Season 1/Show S01E01.mkv");
+        let video = before.videos.iter().find(|video| volume.path.join(&video.path) == first).unwrap();
+        let watched = entry_key("uuid:test", &volume, &first, video.size, video.modified).unwrap();
+        before.history.as_mut().unwrap().insert(watched.clone(), WATCHED);
+        std::fs::remove_dir_all(show.join("Season 1")).unwrap();
+        std::fs::rename(root.join("Documentals/Un documental.mp4"), root.join("Documentals/Nou nom.mp4")).unwrap();
+        std::fs::write(show.join("Season 3/Show S03E02.mkv"), []).unwrap();
+        let refreshed = scan(&volume, "uuid:test", &[show.clone()], &AtomicBool::new(false)).unwrap();
+        assert_eq!((refreshed.stats.movies, refreshed.stats.series, refreshed.stats.documentaries), (1, 1, 1));
+        assert!(refreshed.videos.iter().any(|video| video.path.ends_with("Nou nom.mp4")));
+        assert!(!refreshed.videos.iter().any(|video| video.path.ends_with("Un documental.mp4")));
+        let counts = super::super::series::count_cancellable(&show, None, true, &AtomicBool::new(false)).unwrap().unwrap();
+        assert_eq!(counts.episodes, 4);
+        before.videos = refreshed.videos;
+        assert_eq!(recommendations(&before)[0].episode, Some((2, 1)));
+        assert_eq!(before.history.as_ref().unwrap()[&watched], WATCHED);
         plx_base::testscratch::remove_tree(&root);
     }
 
