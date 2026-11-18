@@ -257,7 +257,7 @@ const SETTINGS_TAB: usize = 5;
 const EJECT_TAB: usize = 6;
 
 // Stable PlxNative-style navigation track.
-const NAV_PILL: Rect = Rect::new(247.0, 32.0, 1426.0, 70.0);
+const NAV_PILL: Rect = Rect::new(247.0, 32.0, 1386.0, 70.0);
 const NAV_TABS: [Rect; EJECT_TAB + 1] = [
     Rect::new(260.0, 42.0, 125.0, 48.0),
     Rect::new(395.0, 42.0, 205.0, 48.0),
@@ -265,7 +265,7 @@ const NAV_TABS: [Rect; EJECT_TAB + 1] = [
     Rect::new(775.0, 42.0, 200.0, 48.0),
     Rect::new(985.0, 42.0, 195.0, 48.0),
     Rect::new(1190.0, 42.0, 170.0, 48.0),
-    Rect::new(1370.0, 42.0, 290.0, 48.0),
+    Rect::new(1370.0, 42.0, 250.0, 48.0),
 ];
 
 fn media_tab_title(tab: usize) -> &'static str {
@@ -276,6 +276,12 @@ fn media_tab_title(tab: usize) -> &'static str {
         _ => unreachable!("expected a media tab"),
     }
 }
+const CLOCK_RECT: Rect = Rect::new(1654.0, 42.0, 170.0, 48.0);
+
+fn clock_font_size(size: usize) -> i32 {
+    [theme::size::MICRO, theme::size::LABEL, theme::size::HEADLINE][size]
+}
+
 fn clock_label(time: Option<(i32, i32)>, settings: &Settings, automatic: i18n::Clock) -> Option<String> {
     if !settings.show_clock { return None; }
     let (hour, minute) = time?;
@@ -294,17 +300,17 @@ const ACTIONS: [(Action, Rect); 3] = [
     (Action::DeleteFolders, Rect::new(1625.0, 222.0, 185.0, 45.0)),
 ];
 
-const UNIFIED_SETTINGS_COUNT: usize = 11;
-const SETTINGS_ORDER: [usize; UNIFIED_SETTINGS_COUNT] = [0, 1, 8, 2, 3, 4, 5, 6, 7, 9, 10];
+const UNIFIED_SETTINGS_COUNT: usize = 12;
+const SETTINGS_ORDER: [usize; UNIFIED_SETTINGS_COUNT] = [0, 1, 8, 2, 3, 4, 5, 6, 7, 9, 10, 11];
 const SETTINGS_GROUPS: [(&[usize], f32); 4] = [
-    (&[0, 1, 8], 118.0), (&[2, 3, 4], 350.0), (&[5], 582.0), (&[6, 7, 9, 10], 698.0),
+    (&[0, 1, 8], 118.0), (&[2, 3, 4], 344.0), (&[5], 566.0), (&[6, 7, 9, 10, 11], 676.0),
 ];
-const SETTING_ROW_PITCH: f32 = 58.0;
+const SETTING_ROW_PITCH: f32 = 54.0;
 fn unified_setting_rect(index: usize) -> Rect {
     let (indices, top) = SETTINGS_GROUPS.iter().copied()
         .find(|&(indices, _)| indices.contains(&index)).expect("valid setting");
     let row = indices.iter().position(|&item| item == index).expect("setting belongs to group");
-    Rect::new(700.0, top + 38.0 + row as f32 * SETTING_ROW_PITCH, 1108.0, 54.0)
+    Rect::new(700.0, top + 38.0 + row as f32 * SETTING_ROW_PITCH, 1108.0, 50.0)
 }
 
 fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'static str, String) {
@@ -343,6 +349,10 @@ fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'s
         10 => (tr("Formato del reloj", "Format del rellotge"),
             tr("Automático sigue el formato del televisor.", "Automàtic segueix el format del televisor."),
             [tr("Automático", "Automàtic"), tr("12 horas", "12 hores"), tr("24 horas", "24 hores")][settings.clock_format].into()),
+        11 => (tr("Tamaño del reloj", "Mida del rellotge"),
+            tr("Ajusta la hora a tres tamaños. Pequeño conserva el tamaño original.",
+                "Ajusta l’hora a tres mides. Petit conserva la mida original."),
+            [tr("Pequeño", "Petit"), tr("Mediano", "Mitjà"), tr("Grande", "Gran")][settings.clock_size].into()),
         _ => unreachable!("valid setting"),
     }
 }
@@ -373,6 +383,7 @@ struct Settings {
     extensions: bool,
     show_clock: bool,
     clock_format: usize,
+    clock_size: usize,
 }
 
 enum SettingsJob {
@@ -574,7 +585,7 @@ impl Browser {
             next_clock_format: now, scan_phase: 0,
             action: None, dialog: None, option: 0, mutating: false,
             selection: None, progress: None,
-            settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0, extensions: false, show_clock: true, clock_format: 0 },
+            settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0, extensions: false, show_clock: true, clock_format: 0, clock_size: 1 },
             settings_job: None, settings_started: false,
             pending: None, scanning: None, next_scan: now, last_tick: now,
             retired_reads: Vec::new(), retired_scans: Vec::new(),
@@ -733,7 +744,8 @@ impl Browser {
                         }
                     }
                     DiskResult::Favorites(volume, paths) => {
-                        if self.volume() == Some(&volume) {
+                        self.loading_favorites = false;
+                        if self.nav_tab == FAVORITES_TAB && self.volume() == Some(&volume) {
                             self.enter_favorites(volume, paths);
                             self.status.clear();
                         } else if self.favorite_view.is_none() {
@@ -763,6 +775,7 @@ impl Browser {
             }
             Some(Err(TryRecvError::Disconnected)) => {
                 self.pending = None;
+                self.loading_favorites = false;
                 self.mutating = false;
                 self.progress = None;
                 if let Some((volume, _)) = self.ejecting.take() {
@@ -835,7 +848,7 @@ impl Browser {
         }
         changed |= self.update_volume_facts();
         changed |= self.update_history();
-        if self.loading_favorites && self.facts.as_ref().is_some_and(|(disk, (_, identity))|
+        if self.loading_favorites && self.pending.is_none() && self.facts.as_ref().is_some_and(|(disk, (_, identity))|
             self.volume() == Some(disk) && identity.as_ref().is_none_or(|identity| self.history_loaded.contains(&history_prefix(identity)))) {
             self.loading_favorites = false;
             self.show_favorites();
@@ -1232,6 +1245,7 @@ impl Browser {
             return;
         }
         let favorites = self.favorites(&volume);
+        self.status = tr("Cargando favoritos…", "Carregant els favorits…").into();
         self.request(move || {
             let mut paths = Vec::new();
             let mut listings = BTreeMap::new();
@@ -1257,6 +1271,7 @@ impl Browser {
             }
             DiskResult::Favorites(volume, paths)
         });
+        self.loading_favorites = self.pending.is_some();
     }
 
     fn media_cards(&self) -> Option<&FavoriteView> {
@@ -1345,15 +1360,15 @@ impl Browser {
                 self.request(move || DiskResult::Discovered(volume.clone(), tab, discover_media_folders(&volume, tab)));
             }
             FAVORITES_TAB => {
-                if self.volume().is_none() {
+                let volume = self.volume().cloned();
+                if volume.is_none() {
                     self.leave_media();
                     self.nav_tab = FAVORITES_TAB;
                     self.status = tr("Selecciona primero un disco USB.", "Tria primer un disc USB.").into();
                     return;
                 }
                 self.leave_media();
-                self.nav_tab = FAVORITES_TAB;
-                self.set_favorite_section(true);
+                self.enter_favorites(volume.expect("connected favorites volume"), Vec::new());
                 self.show_favorites();
             }
             SETTINGS_TAB => {
@@ -1893,6 +1908,7 @@ impl Browser {
             7 => next.cards = step(next.cards, 3),
             9 => next.show_clock = !next.show_clock,
             10 => next.clock_format = step(next.clock_format, 3),
+            11 => next.clock_size = step(next.clock_size, 3),
             _ => return,
         }
         self.change_settings(next);
@@ -2181,7 +2197,6 @@ impl Browser {
 
     fn back(&mut self) {
         if self.mutating || matches!(self.settings_job, Some(SettingsJob::Save(_))) { return; }
-        if std::mem::take(&mut self.loading_favorites) && self.favorite_view.is_none() { self.set_favorite_section(false); }
         if let Some(dialog) = self.dialog.take() {
             if matches!(dialog, Dialog::Settings) {
                 self.settings_exit = Some(Instant::now());
@@ -2198,6 +2213,7 @@ impl Browser {
             self.status.clear();
             return;
         }
+        if std::mem::take(&mut self.loading_favorites) && self.favorite_view.is_none() { self.set_favorite_section(false); }
         if self.action.take().is_some() { return; }
         if self.selection.take().is_some() { self.status.clear(); return; }
         if self.retire_read() {
@@ -2593,7 +2609,9 @@ impl Browser {
                     tr("No hay contenido en esta sección.", "No hi ha contingut en aquest apartat.")
                 }
             } else if self.favorite_cards().is_some() {
-                tr("No hay favoritos en este USB.", "No hi ha cap favorit en aquest USB.")
+                if self.loading_favorites { tr("Cargando favoritos…", "Carregant els favorits…") }
+                else if !self.status.is_empty() { self.status.as_str() }
+                else { tr("No hay favoritos en este USB.", "No hi ha cap favorit en aquest USB.") }
             } else if self.folders.last().is_some() {
                 tr("No hay contenido disponible.", "No hi ha contingut disponible.")
             } else {
@@ -2757,9 +2775,10 @@ impl Browser {
 
     fn draw_nav_pill(&self, p: Painter) {
         if let Some(clock) = clock_label(self.clock_time, &self.settings, self.tv_clock) {
-            let run = TtfMeasure.fit_line(&clock, 134.0, theme::size::MICRO, false);
-            Label::new(run.as_ptr(), theme::size::MICRO, theme::TEXT_SECONDARY)
-                .h(HAlign::Right).draw(p, Rect::new(1690.0, 42.0, 134.0, 48.0));
+            let size = clock_font_size(self.settings.clock_size);
+            let run = TtfMeasure.fit_line(&clock, CLOCK_RECT.w, size, false);
+            Label::new(run.as_ptr(), size, theme::TEXT_SECONDARY)
+                .h(HAlign::Right).draw(p, CLOCK_RECT);
         }
         p.rect(NAV_PILL, 35.0, theme::USB_CHROME_TOP, theme::USB_CHROME_BOTTOM, 0.0);
         // Same spring capsules as PlxNative; labels and track stay in place.
@@ -3530,14 +3549,15 @@ fn parse_settings(record: &str) -> Result<Option<Settings>, String> {
     let extensions = flag(fields.next().or(Some("0")))?;
     let show_clock = flag(fields.next().or(Some("1")))?;
     let clock_format = choice(fields.next())?;
+    let clock_size = choice(fields.next().or(Some("1")))?;
     if fields.next().is_some() { return Err("invalid settings record".into()); }
-    Ok(Some(Settings { language, forced_subtitles, spanish_audio, auto_next, accent, cards, sort, extensions, show_clock, clock_format }))
+    Ok(Some(Settings { language, forced_subtitles, spanish_audio, auto_next, accent, cards, sort, extensions, show_clock, clock_format, clock_size }))
 }
 
 fn save_settings(settings: Settings) -> Result<(), String> {
-    let record = format!("{} {} {} {} {} {} {} {} {} {}", if settings.language == Preference::Ca { "ca" } else { "es" },
+    let record = format!("{} {} {} {} {} {} {} {} {} {} {}", if settings.language == Preference::Ca { "ca" } else { "es" },
         u8::from(settings.forced_subtitles), u8::from(settings.spanish_audio), u8::from(settings.auto_next),
-        settings.accent, settings.cards, settings.sort, u8::from(settings.extensions), u8::from(settings.show_clock), settings.clock_format);
+        settings.accent, settings.cards, settings.sort, u8::from(settings.extensions), u8::from(settings.show_clock), settings.clock_format, settings.clock_size);
     #[cfg(not(feature = "hostsim"))]
     return crate::port::save_usb_preferences(&record).map_err(|error| format!("{error:?}"));
     #[cfg(feature = "hostsim")]
@@ -4043,6 +4063,64 @@ mod usb_browser_tests {
         assert!(!settings.show_clock);
         assert_eq!(settings.clock_format, 2);
         assert!(parse_settings("ca 0 1 1 2 1 0 1 1 3").is_err());
+    }
+
+    #[test]
+    fn closing_settings_does_not_cancel_favorites_waiting_for_history() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/favorites-settings".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(volume.clone());
+        browser.open_nav_tab(FAVORITES_TAB);
+        assert!(browser.loading_favorites);
+        browser.open_nav_tab(SETTINGS_TAB);
+        browser.back();
+        assert!(browser.loading_favorites);
+        assert_eq!(browser.volume(), Some(&volume));
+        assert!(browser.favorite_cards().is_some());
+        assert_eq!(browser.len(), 0);
+    }
+
+    #[test]
+    fn three_clock_sizes_preserve_original_small_and_fit_outside_navigation() {
+        assert_eq!(clock_font_size(0), theme::size::MICRO);
+        assert!(clock_font_size(0) < clock_font_size(1));
+        assert!(clock_font_size(1) < clock_font_size(2));
+        assert!(clock_font_size(2) as f32 <= CLOCK_RECT.h);
+        assert!(CLOCK_RECT.x > NAV_PILL.x + NAV_PILL.w);
+        assert!(CLOCK_RECT.x + CLOCK_RECT.w <= 1920.0 - plx_ui::consts::MARGIN_X);
+        for size in 0..=2 {
+            let record = format!("ca 0 1 1 2 1 0 1 1 2 {size}");
+            assert_eq!(parse_settings(&record).unwrap().unwrap().clock_size, size);
+        }
+        assert_eq!(parse_settings("ca 0").unwrap().unwrap().clock_size, 1);
+        assert_eq!(parse_settings("ca 0 1 1 2 1 0 1 0 2").unwrap().unwrap().clock_size, 1);
+        assert!(parse_settings("ca 0 1 1 2 1 0 1 1 2 3").is_err());
+        assert!(unified_setting_rect(11).y + unified_setting_rect(11).h <= 980.0);
+    }
+
+    #[test]
+    fn favorites_listing_is_not_restarted_while_its_reply_is_pending() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/favorites-pending".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(volume.clone());
+        browser.enter_favorites(volume.clone(), vec![]);
+        browser.loading_favorites = true;
+        browser.facts = Some((volume, (None, None)));
+        let (send, reply) = mpsc::sync_channel(1);
+        browser.pending = Some(reply);
+        browser.settings_started = true;
+        browser.next_scan = Instant::now() + Duration::from_secs(60);
+        browser.home_refresh = browser.next_scan;
+        browser.update();
+        assert!(browser.loading_favorites);
+        assert_eq!(browser.len(), 0);
+        assert!(browser.retired_reads.is_empty());
+        assert!(send.send(DiskResult::Favorites(browser.volume().unwrap().clone(), vec![])).is_ok(),
+            "the original listing must retain its receiver");
+        browser.update();
+        assert!(!browser.loading_favorites);
+        assert!(browser.pending.is_none());
+        assert!(browser.favorite_cards().is_some());
     }
 
     #[test]
