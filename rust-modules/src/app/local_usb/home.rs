@@ -167,19 +167,21 @@ fn inventory_changed(volume: &Volume, inventory: &Inventory, stop: &AtomicBool) 
     Ok(inventory.directories.is_empty())
 }
 
+fn episode_numbers(path: &Path) -> Option<(u32, u32)> {
+    if let Some((_, season, episode)) = path.file_name().and_then(continuity::episode) {
+        return Some((season, episode));
+    }
+    let number = |text: &str| text.split(|ch: char| !ch.is_ascii_digit())
+        .find(|part| !part.is_empty()).and_then(|part| part.parse::<u32>().ok());
+    let season = path.parent()?.components().rev().find_map(|part| {
+        let name = part.as_os_str().to_string_lossy().to_lowercase();
+        super::art::is_season(&name).then(|| number(&name)).flatten()
+    })?;
+    Some((season, number(&path.file_stem()?.to_string_lossy())?))
+}
+
 fn episode_order(a: &Path, b: &Path) -> std::cmp::Ordering {
-    let episode = |path: &Path| {
-        if let Some((_, season, episode)) = path.file_name().and_then(continuity::episode) { return (season, episode); }
-        let number = |text: &str| text.split(|ch: char| !ch.is_ascii_digit())
-            .find(|part| !part.is_empty()).and_then(|part| part.parse::<u32>().ok()).unwrap_or(0);
-        let season = path.parent().and_then(|parent| parent.components().rev().find_map(|part| {
-            let name = part.as_os_str().to_string_lossy().to_lowercase();
-            super::art::is_season(&name).then(|| number(&name))
-        })).unwrap_or(0);
-        if season == 0 { (0, 0) }
-        else { (season, number(&path.file_stem().unwrap_or_default().to_string_lossy())) }
-    };
-    episode(a).cmp(&episode(b))
+    episode_numbers(a).unwrap_or((0, 0)).cmp(&episode_numbers(b).unwrap_or((0, 0)))
         .then_with(|| disk::natural(a.as_os_str().as_encoded_bytes(), b.as_os_str().as_encoded_bytes()))
 }
 
@@ -245,7 +247,7 @@ pub(super) fn next_episode(drive: &Drive, current: &Path) -> Option<PathBuf> {
 fn item(drive: &Drive, video: &Video, show: Option<&Path>, favorite: bool, progress: u64) -> Item {
     let title = show.and_then(Path::file_name).or_else(|| video.path.file_stem()).unwrap_or_default().to_string_lossy().into_owned();
     Item { volume: drive.volume.clone(), path: drive.volume.path.join(&video.path), title, favorite, progress,
-        episode: video.path.file_name().and_then(continuity::episode).map(|(_, s, e)| (s, e)) }
+        episode: episode_numbers(&video.path) }
 }
 
 pub(super) fn load(volumes: Vec<Volume>, refresh: bool, stop: &AtomicBool) -> io::Result<Dashboard> {
@@ -421,6 +423,7 @@ mod usb_browser_tests {
 
     #[test]
     fn loose_episodes_are_not_counted_as_movies_and_natural_order_crosses_seasons() {
+        assert_eq!(episode_numbers(Path::new("Temporada 2/Capítol 01.mkv")), Some((2, 1)));
         assert!(episode_order(Path::new("Primera entrega/Capítol 2.mkv"),
             Path::new("Segona entrega/Capítol 1.mkv")).is_lt());
         let root = plx_base::testscratch::process_dir("cineusb-home-loose-episodes");
