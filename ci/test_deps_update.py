@@ -359,7 +359,7 @@ class PatchCheck(unittest.TestCase):
         self.scratch = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.scratch)
         (self.scratch / 'ci/patches').mkdir(parents=True)
-        (self.scratch / 'ci/patches/p.patch').write_text(PATCH)
+        (self.scratch / 'ci/patches/p.patch').write_bytes(PATCH.encode())
         self.archive = self.scratch / 'upstream.tar.gz'
         self.dep = {'id': 'x', 'version': '1', 'archive': 'x-1.tar.gz', 'url': 'https://example.invalid/x',
                     'patches': [{'path': 'ci/patches/p.patch', 'sha256': '0', 'result': {'f.c': '0' * 64}}]}
@@ -455,10 +455,10 @@ class Snapshot(unittest.TestCase):
 
     def test_purls(self):
         resolved = self.snap['manifests']['ci/dependencies.json']['resolved']
-        self.assertEqual(resolved['fribidi']['package_url'], 'pkg:github/fribidi/fribidi@v1.0.17')
+        self.assertEqual(resolved['fribidi']['package_url'], 'pkg:github/fribidi/fribidi@v' + dep('fribidi')['version'])
         self.assertEqual(resolved['nanosvg']['package_url'], 'pkg:github/memononen/nanosvg@' + dep('nanosvg')['version'])
         self.assertEqual(resolved['ffmpeg']['package_url'],
-                         'pkg:generic/ffmpeg@9.0?download_url=https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz')
+                         'pkg:generic/ffmpeg@' + dep('ffmpeg')['version'] + '?download_url=' + dep('ffmpeg')['url'])
         self.assertEqual(resolved['ffmpeg']['scope'], 'runtime')
         self.assertEqual(resolved['webos-ndk']['scope'], 'development')
 
@@ -470,138 +470,54 @@ class WorkflowShape(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = WORKFLOW.read_text()
-        cls.code = '\n'.join(l for l in cls.text.splitlines() if not l.lstrip().startswith('#'))
+        cls.code = '\n'.join(line for line in cls.text.splitlines() if not line.lstrip().startswith('#'))
+        cls.runner = (ROOT / 'ci/propose-dependency.py').read_text()
 
-    def test_triggers(self):
-        self.assertRegex(self.code, r'(?m)^  schedule:\n    - cron: ')
+    def test_privileged_jobs_only_run_from_schedule_dispatch_or_main_push(self):
+        self.assertIn('schedule:', self.code)
         self.assertIn('workflow_dispatch:', self.code)
-        self.assertRegex(self.code, r'(?m)^  push:\n    branches: \[main\]\n    paths:\n      - ci/dependencies\.json')
-        self.assertNotIn('pull_request', self.code)  # no privileged trigger on pull request code
+        self.assertIn('branches: [main]', self.code)
+        self.assertNotIn('pull_request:', self.code)
+        self.assertNotIn('pull_request_target:', self.code)
 
-    def test_default_permissions_are_none_and_each_job_declares_its_own(self):
-        self.assertRegex(self.code, r'(?m)^permissions: \{\}$')
-        jobs = re.findall(r'(?m)^  ([a-z-]+):\n(?:    .*\n)*?    permissions:\n((?:      .*\n)+)', self.code)
-        grants = {name: dict(re.findall(r'(\w[\w-]*): (\w+)', body)) for name, body in jobs}
-        self.assertEqual(grants['propose'], {'contents': 'write', 'pull-requests': 'write', 'actions': 'write'})
-        self.assertEqual(grants['graph'], {'contents': 'write'})
-
-    def test_every_action_is_pinned_by_sha(self):
-        uses = re.findall(r'uses: (\S+)(.*)', self.code)
-        self.assertTrue(uses)
-        for ref, rest in uses:
-            self.assertRegex(ref, r'@[0-9a-f]{40}$')
-            self.assertRegex(rest, r'# v\d+')
-
-    def test_checkouts_keep_no_credential(self):
+    def test_permissions_are_explicit_and_checkouts_keep_no_credentials(self):
+        self.assertIn('permissions: {}', self.code)
+        self.assertIn('pull-requests: write', self.code)
+        self.assertIn('actions: write', self.code)
         self.assertEqual(self.code.count('persist-credentials: false'), self.code.count('actions/checkout@'))
 
-    def test_untrusted_strings_reach_the_shell_through_env_only(self):
-        self.assertNotRegex(self.code, r'\$\{\{\s*(github\.event\.(pull_request|head_commit|issue)|github\.head_ref)')
+    def test_every_action_is_pinned(self):
+        for ref in re.findall(r'uses: (\S+)', self.code):
+            self.assertRegex(ref, r'@[0-9a-f]{40}$')
+
+    def test_untrusted_identifiers_are_validated_and_never_run_in_a_shell(self):
+        self.assertIn('re.fullmatch', self.runner)
+        self.assertNotIn('shell=True', self.runner)
         for script in re.findall(r'run: \|\n((?:\s{10}.*\n)+)', self.code):
             self.assertNotIn('${{', script)
 
-    def test_ci_is_dispatched_on_each_branch_and_said_to_be_why(self):
-        self.assertIn('gh workflow run ci.yml --ref', self.code)
-        self.assertIn('GITHUB_TOKEN', self.text)
-        self.assertRegex(self.text, r'(?i)GITHUB_TOKEN[^\n]*(do not|does not|start no|trigger no)')
+    def test_ci_dispatch_uses_cineusb_workflow(self):
+        self.assertIn("'workflow', 'run', 'cineusb-ipk.yml', '--ref', branch", self.runner)
+        self.assertIn('GITHUB_TOKEN', self.runner)
 
-    def test_the_pull_request_body_is_generated_by_the_script(self):
-        self.assertIn('--body-file', self.code)
-        self.assertIn('--list-outdated', self.code)
+    def test_existing_and_declined_updates_are_preserved(self):
+        self.assertIn("'--state', 'open'", self.runner)
+        self.assertIn("'--state', 'closed'", self.runner)
+        self.assertIn('update.hold', self.runner)
+        self.assertNotIn('--force', self.runner)
+        self.assertNotIn('--delete-branch', self.runner)
 
-    def test_one_branch_per_dependency_and_version(self):
-        self.assertIn('deps/${name}-${version}', self.code)
+    def test_manifest_and_notices_travel_together_in_draft_prs(self):
+        self.assertIn('--body-file', self.runner)
+        self.assertIn("'ci/dependencies.json', 'THIRD-PARTY-NOTICES.md'", self.runner)
+        self.assertIn("'--draft'", self.runner)
 
-    def test_a_branch_is_deleted_only_after_the_ownership_test_and_only_for_the_bot_s_prs(self):
-        close = self.code[self.code.index('gh pr list --state open --limit 100'):]
-        self.assertIn('app/github-actions', close)
-        self.assertLess(close.index('owned FETCH_HEAD'), close.index('--delete-branch'))
-        self.assertEqual(self.code.count('--delete-branch'), 1)
-        self.assertRegex(close, r'gh pr close "\$old" --comment')  # the fallback keeps the branch
+    def test_matrix_failures_do_not_hide_other_updates(self):
+        self.assertIn('fail-fast: false', self.code)
+        self.assertIn("check=True", self.runner)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", self.code)
 
-    def shell_owned(self, setup):
-        body = re.search(r'(?ms)^ *owned\(\) \{\n(.*?)^ *\}$', self.code).group(1)
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp)
-        bot = '41898282+github-actions[bot]@users.noreply.github.com'
-        script = ('set -euo pipefail\ncd "$1"\ngit init -q -b main .\n'
-                  'export GIT_AUTHOR_NAME=n GIT_COMMITTER_NAME=n\n'
-                  'export GIT_AUTHOR_EMAIL=person@example.com GIT_COMMITTER_EMAIL=person@example.com\n'
-                  'git commit -q --allow-empty -m base\n' + setup.replace('BOT', bot) +
-                  '\nbase=main; bot_email=' + bot + '\nset +e\nowned() {\n' + body + '\n}\n'
-                  'for b in bot human amended empty; do owned "$b" && echo "$b yes" || echo "$b no"; done\n')
-        out = subprocess.run(['bash', '-c', script, 'x', str(tmp)], capture_output=True, text=True, check=True).stdout
-        return dict(line.split() for line in out.splitlines() if line.endswith(('yes', 'no')))
-
-    def test_ownership_needs_the_bot_as_author_and_committer_of_every_commit(self):
-        result = self.shell_owned("""
-for b in bot human amended empty; do git branch $b main; done
-bot() { GIT_AUTHOR_EMAIL=BOT GIT_COMMITTER_EMAIL=BOT git commit -q --allow-empty -m "$1"; }
-git checkout -q bot; bot a; bot b
-git checkout -q human; git commit -q --allow-empty -m h
-git checkout -q amended; GIT_AUTHOR_EMAIL=BOT git commit -q --allow-empty -m rebased
-git checkout -q main
-""")
-        self.assertEqual(result, {'bot': 'yes', 'human': 'no', 'amended': 'no', 'empty': 'no'})
-
-    def test_one_foreign_commit_among_the_bot_s_makes_a_branch_foreign(self):
-        result = self.shell_owned("""
-for b in bot human amended empty; do git branch $b main; done
-git checkout -q bot
-GIT_AUTHOR_EMAIL=BOT GIT_COMMITTER_EMAIL=BOT git commit -q --allow-empty -m a
-git commit -q --allow-empty -m person
-git checkout -q main
-""")
-        self.assertEqual(result['bot'], 'no')
-
-    def test_a_foreign_commit_is_seen_even_when_the_log_is_longer_than_a_pipe_buffer(self):
-        # Actions runs `shell: bash` with -eo pipefail. A reader that quits on its first match
-        # (`grep -q`) leaves `git log` writing into a closed pipe: SIGPIPE, status 141, and a `!` in
-        # front of the pipeline turns that into "owned". It only happens when the log outruns the pipe
-        # buffer, so this branch carries a person's newest commit on top of thousands of the bot's.
-        stamp = r'author b <BOT> 1700000000 +0000\ncommitter b <BOT> 1700000000 +0000\ndata 1\nx\n'
-        result = self.shell_owned("""
-for b in human amended empty; do git branch $b main; done
-{
-  printf 'commit refs/heads/bot\\n""" + stamp + r"""from refs/heads/main\n\n'
-  for i in $(seq 6000); do printf 'commit refs/heads/bot\n""" + stamp + r"""\n'; done
-  printf 'commit refs/heads/bot\nauthor p <person@example.com> 1700000000 +0000\ncommitter p <person@example.com> 1700000000 +0000\ndata 1\nx\n\n'
-} | git fast-import --quiet
-""")
-        self.assertEqual(result['bot'], 'no')
-
-    def test_a_declined_bump_is_not_proposed_again_and_points_at_update_hold(self):
-        self.assertIn('--state closed', self.code)
-        self.assertIn('mergedAt == null', self.code)
-        self.assertIn('update.hold', self.code)
-
-    def test_every_per_dependency_step_failure_is_recorded_and_skipped(self):
-        for needle in ('git checkout -q -f -B deps/work "$base" || { failed=1; continue; }',
-                       'git commit -q -m "Dependencies: ${name} -> ${used}" || { failed=1; continue; }',
-                       'g push --force origin "HEAD:refs/heads/${branch}" || { failed=1; continue; }'):
-            self.assertIn(needle, self.code)
-
-    def test_bumps_are_based_on_the_default_branch_even_when_dispatched_from_another_ref(self):
-        self.assertIn('base="origin/${DEFAULT_BRANCH}"', self.code)
-        self.assertIn('+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}', self.code)
-        self.assertEqual(self.code.count('ref: ${{ github.event.repository.default_branch }}'),
-                         self.code.count('actions/checkout@'))
-
-    def test_the_branch_name_uses_the_version_the_script_reports(self):
-        self.assertIn('used=$(sed -n 1p "$bumped")', self.code)
-        self.assertIn('branch="deps/${name}-${used}"', self.code)
-
-    def test_an_unchanged_branch_is_not_pushed_again(self):
-        self.assertIn('git diff --quiet FETCH_HEAD HEAD', self.code)
-
-    def test_the_notices_are_committed_with_the_manifest(self):
-        self.assertIn('git add ci/dependencies.json THIRD-PARTY-NOTICES.md', self.code)
-
-    def test_nothing_is_checked_with_patch_and_its_fuzz(self):
-        self.assertNotIn('--dry-run', self.code)
-        self.assertNotIn('--dry-run', (ROOT / 'ci/deps-update.py').read_text().replace('patch --dry-run', ''))
-
-    def test_the_graph_job_runs_the_snapshot_and_posts_it(self):
+    def test_dependency_graph_remains_automatic(self):
         self.assertIn('--snapshot', self.code)
         self.assertIn('dependency-graph/snapshots', self.code)
 

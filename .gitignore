@@ -225,3 +225,6 @@ tools/node_modules/
 rust-modules/target*-uri/
 rust-modules/target*-feed/
 rust-modules/target*-none/
+
+# Byte manifest for verified native-only CI caches.
+.cineusb-native-cache.json

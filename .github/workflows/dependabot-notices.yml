@@ -1,0 +1,28 @@
+name: Update notices on trusted Dependabot PRs
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  notices:
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: write
+    concurrency:
+      group: cineusb-notices-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      # Only the trusted base is executable. PR files are read as data in a worktree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Regenerate notices with trusted base scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: python3 ci/dependabot-notices.py

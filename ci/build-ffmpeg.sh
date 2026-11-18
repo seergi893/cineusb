@@ -60,6 +60,9 @@
 # `lib*-plx.so.*` glob cannot pick it up.
 set -eu
 
+# Sub-builds use the explicit JOBS budget, not unavailable parent jobserver FDs.
+unset MAKEFLAGS MFLAGS
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # The pin (version, upstream URL, sha256) is declared once, in ci/dependencies.json; nothing here
 # carries a literal copy of it. ci/deps.py is also what downloads and verifies the tarball.

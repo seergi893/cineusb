@@ -24,6 +24,33 @@ jobs:
       - name: Validate automatic release metadata on every PR
         run: python3 ci/prepare-automatic-release.py --check-metadata
       - uses: ./.github/actions/rust-toolchain
+      - name: Check architecture, notices and pipeline regressions
+        run: |
+          python3 ci/test_cineusb_pipeline.py
+          python3 ci/test_native_cache.py
+          python3 ci/test_deps_update.py
+          python3 ci/test_libass_fetch.py
+          python3 ci/test_cargo_seed.py
+          python3 ci/test_link_evidence.py
+          python3 ci/check-module-layers.py
+          python3 ci/gen-third-party-notices.py --check
+      - name: Cache host Cargo dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust-modules/target
+          key: cineusb-cargo-host-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cineusb-cargo-host-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml') }}-
+      - name: Discard cached workspace outputs
+        run: python3 ci/cargo-cache.py rust-modules/target
+      - name: Cache host FFmpeg
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vendor/ffmpeg-prefix-host
+          key: cineusb-ffmpeg-host-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-ffmpeg.sh', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py') }}
       - name: Install USB test dependencies
         id: usb-deps
         run: |
@@ -49,11 +76,10 @@ jobs:
             # Fail promptly on runner-wide DNS outages rather than retrying APT
             # for the entire job timeout. A new runner may resolve transient DNS.
             if ! timeout 12s getent ahostsv4 archive.ubuntu.com >/dev/null; then
-              echo "::warning::Runner DNS unavailable; USB smoke tests cannot run. The package build remains independent."
-              echo "available=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::Runner DNS unavailable; USB smoke tests cannot run. The build must stop until tests can run."
               echo "### USB smoke tests NOT RUN" >> "$GITHUB_STEP_SUMMARY"
               echo "Runner DNS could not resolve archive.ubuntu.com; required host dependencies were unavailable. This is not a passing test result." >> "$GITHUB_STEP_SUMMARY"
-              exit 0
+              exit 1
             fi
             for attempt in 1 2; do
               echo "APT dependency setup attempt $attempt/2 (90s maximum per command)"
@@ -63,17 +89,17 @@ jobs:
               fi
               if [ "$attempt" -eq 2 ]; then
                 echo "::warning::Ubuntu dependencies unavailable; USB smoke tests cannot run. Check runner network/APT logs."
-                echo "available=false" >> "$GITHUB_OUTPUT"
                 echo "### USB smoke tests NOT RUN" >> "$GITHUB_STEP_SUMMARY"
                 echo "Host dependencies could not be installed; no USB smoke tests were executed. This is not a passing test result." >> "$GITHUB_STEP_SUMMARY"
-                exit 0
+                exit 1
               fi
               sleep 5
             done
           fi
-          echo "available=true" >> "$GITHUB_OUTPUT"
+          pkg-config --exists sdl2 SDL2_ttf gl
+          command -v ffmpeg
+          command -v nasm
       - name: Test local MKV and MP4 with the bundled FFmpeg configuration
-        if: steps.usb-deps.outputs.available == 'true'
         run: |
           HOST=1 RELEASE=1 ci/build-ffmpeg.sh
           export PLXNATIVE_APP_DIR="$PWD/vendor/ffmpeg-prefix-host/lib"
@@ -102,22 +128,24 @@ jobs:
             cineusb_ -- --nocapture
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-storage --bin plxnative-storage usb_
       - name: Test USB video menu and startup subtitles
-        if: steps.usb-deps.outputs.available == 'true'
         run: |
           cd rust-modules
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-modules --lib \
-            --features hostsim,local-usb usb_browser_tests::
+            --no-default-features --features hostsim,local-usb usb_browser_tests::
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plxnative-modules -p plx_appkit --lib \
-            --features hostsim,local-usb cineusb_finish_label
+            --no-default-features --features hostsim,local-usb cineusb_finish_label
+      - name: Test the platform USB interface
+        run: |
+          cd rust-modules
+          cargo +"$RUST_TOOLCHAIN" test --locked -p plx_platform --lib --features hostsim tv::usb::tests
       - name: Lint the USB storage helper
-        if: steps.usb-deps.outputs.available == 'true'
         working-directory: rust-modules
         run: |
           cargo +"$RUST_TOOLCHAIN" clippy --locked -p plxnative-storage --tests -- \
             -A clippy::all \
             -D clippy::ifs_same_cond -D clippy::same_functions_in_if_condition -D clippy::if_same_then_else
   package:
-    if: ${{ !cancelled() && github.repository == 'seergi893/cineusb' && (github.event_name == 'pull_request' || needs.usb-smoke.result == 'success') }}
+    if: ${{ !cancelled() && github.repository == 'seergi893/cineusb' && needs.usb-smoke.result == 'success' }}
     needs: usb-smoke
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 55
@@ -126,6 +154,8 @@ jobs:
     env:
       FLAVOR: stable
       RELEASE: "1"
+      PLAYBACK_BACKENDS: feed
+      WEBOS_SDK: ${{ github.workspace }}/.webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot
       PLX_SENTRY_DSN: ""
       PLX_POSTHOG_KEY: ""
       PLX_SENTRY_DSN_DEV: ""
@@ -153,14 +183,48 @@ jobs:
       - uses: ./.github/actions/rust-toolchain
       - uses: ./.github/actions/webos-ndk
         id: ndk
+      - name: Initialize the stable build configuration
+        run: make ci-config
+      - name: Cache ARM Cargo dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust-modules/target-release-feed
+            rust-modules/target-release-feed-storage
+          key: cineusb-cargo-arm-feed-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml', 'Makefile', 'ci/dependencies.json') }}-${{ github.sha }}
+          restore-keys: |
+            cineusb-cargo-arm-feed-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml', 'Makefile', 'ci/dependencies.json') }}-
+      - name: Discard cached workspace outputs
+        run: python3 ci/cargo-cache.py rust-modules/target-release-feed rust-modules/target-release-feed-storage
+      - name: Cache verified native dependencies
+        id: native-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            vendor/ffmpeg-prefix
+            vendor/libass-prefix
+            vendor/sentry-native-prefix
+            pkg/lib*-plx.so.*
+            .cineusb-native-cache.json
+          key: cineusb-native-stable-feed-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-*', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'ci/native-cache.py', 'ci/patches/**', 'Makefile', 'rust-modules/.cargo/config.toml') }}
+      - name: Verify restored native cache
+        if: steps.native-cache.outputs.cache-hit == 'true'
+        env:
+          CACHE_KEY: cineusb-native-stable-feed-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-*', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'ci/native-cache.py', 'ci/patches/**', 'Makefile', 'rust-modules/.cargo/config.toml') }}
+        run: python3 ci/native-cache.py verify "$CACHE_KEY"
       - name: Compile and verify the webOS package
         env:
+          CACHE_KEY: cineusb-native-stable-feed-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-*', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'ci/native-cache.py', 'ci/patches/**', 'Makefile', 'rust-modules/.cargo/config.toml') }}
           WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
         run: |
-          make -j"$(nproc)" all
+          export JOBS="$(python3 -c 'import os; print(max(1, (os.cpu_count() or 2) // 2))')"
+          make -j2 all
           make ipk
+          python3 ci/native-cache.py seal "$CACHE_KEY"
       - name: Upload the test IPK
-        if: github.event_name == 'pull_request'
+        if: github.ref != 'refs/heads/main'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cineusb-webos-arm
