@@ -2503,7 +2503,7 @@ impl HomeScreen {
     }
 
     /// How many cards shelf `row` holds, once the catalog has projected it.
-    #[cfg(feature = "devtriggers")]
+    #[cfg(any(test, feature = "test-support", feature = "devtriggers"))]
     pub fn shelf_len(&self, row: usize) -> Option<usize> {
         self.rows.get(row).map(|projection| projection.elems.len())
     }

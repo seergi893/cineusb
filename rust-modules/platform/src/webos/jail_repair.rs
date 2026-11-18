@@ -445,3 +445,27 @@ mod tests {
         assert!(c.contains("/var/palm/jail/com.beb.plxnative.debug-1/dev/rtkmem"));
     }
 }
+
+/// USB implementation installed by the webOS port; shared callers only see `tv::usb::Usb`.
+#[cfg(target_os = "linux")]
+struct NativeUsb;
+#[cfg(target_os = "linux")]
+pub const USB: &dyn crate::tv::usb::Usb = &NativeUsb;
+#[cfg(not(target_os = "linux"))]
+pub const USB: &dyn crate::tv::usb::Usb = &crate::tv::usb::NoUsb;
+#[cfg(target_os = "linux")]
+impl crate::tv::usb::Usb for NativeUsb {
+    fn open_file(&self, path: &std::path::Path, mount: Option<u64>) -> Result<std::fs::File, Failure> { open_usb_file(path, mount) }
+    fn volumes(&self) -> Result<Vec<crate::tv::usb::Volume>, Failure> { list_usb_volumes() }
+    fn list_folder(&self, path: &std::path::Path, mount: u64) -> Result<Vec<crate::tv::usb::Entry>, Failure> { list_usb_folder(path, mount) }
+    fn volume_details(&self, path: &std::path::Path, mount: u64) -> Result<crate::tv::usb::Details, Failure> { usb_volume_details(path, mount) }
+    fn delete_video(&self, path: &std::path::Path, mount: u64) -> Result<(), Failure> { delete_usb_video(path, mount) }
+    fn eject_disk(&self, path: &std::path::Path, mount: u64) -> Result<(), String> { eject_usb_disk(path, mount) }
+    fn folder_stamps(&self, paths: &[std::path::PathBuf], mount: u64) -> Result<Vec<(u64, i64, i64)>, Failure> { usb_folder_stamps(paths, mount) }
+    fn delete_folder(&self, path: &std::path::Path, mount: u64) -> Result<(), String> { delete_usb_folder(path, mount) }
+    fn clear_history(&self, base: &str) -> Result<(), Failure> { clear_usb_history(base) }
+    fn history(&self, prefix: &str) -> Result<std::collections::BTreeMap<String, u64>, Failure> { usb_history(prefix) }
+    fn resume(&self, key: &str, position: Option<u64>) -> Result<Option<u64>, Failure> { usb_resume(key, position) }
+    fn preferences(&self) -> Result<String, Failure> { usb_preferences() }
+    fn save_preferences(&self, value: &str) -> Result<(), Failure> { save_usb_preferences(value) }
+}

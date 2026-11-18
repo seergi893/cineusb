@@ -6,6 +6,9 @@
 # Rust sender posts it on the next healthy boot. That keeps one TLS/libcurl implementation and one
 # retry queue in the application.
 set -euo pipefail
+# This CMake subprocess has its own explicit budget, not inherited Make descriptors.
+unset MAKEFLAGS MFLAGS
+JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN)}
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # The pin (version, upstream URL, sha256, patch digest) is declared once, in ci/dependencies.json.
@@ -99,7 +102,7 @@ python3 "$DEPS" apply-patch "$SOURCE" "$PATCH"
     -DSENTRY_BUILD_TESTS=OFF \
     -DSENTRY_BUILD_EXAMPLES=OFF \
     -DSENTRY_SDK_NAME=plxnative
-"$CMAKE" --build "$BUILD" --parallel "${JOBS:-8}"
+"$CMAKE" --build "$BUILD" --parallel "$JOBS"
 
 cp "$SOURCE/include/sentry.h" "$PREFIX/include/sentry.h"
 cp "$BUILD/libsentry.a" "$PREFIX/lib/libsentry.a"

@@ -60,6 +60,9 @@
 # `lib*-plx.so.*` glob cannot pick it up.
 set -eu
 
+# Sub-builds use the explicit JOBS budget, not unavailable parent jobserver FDs.
+unset MAKEFLAGS MFLAGS
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # The pin (version, upstream URL, sha256) is declared once, in ci/dependencies.json; nothing here
 # carries a literal copy of it. ci/deps.py is also what downloads and verifies the tarball.
@@ -484,7 +487,7 @@ if [ ! -f "$FLAGS_FILE" ] || [ "$(cat "$FLAGS_FILE")" != "$NEW_FLAGS" ]; then
 fi
 
 echo "ffmpeg: building"
-make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" > "$WORK/build.log" 2>&1 || {
+make -j"${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}" > "$WORK/build.log" 2>&1 || {
   echo "ffmpeg: BUILD FAILED — $WORK/build.log" >&2; tail -20 "$WORK/build.log" >&2; exit 1; }
 # DESTDIR redirects the /plx prefix onto the real tree: the libraries believe they were
 # configured for /plx (so they record no build path) and land in $PREFIX regardless.
