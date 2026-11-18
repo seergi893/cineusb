@@ -997,8 +997,8 @@ impl Browser {
         } else {
             (index.saturating_sub(drives), self.home_continue_top(), 238.0, 210.0)
         };
-        Rect::new(plx_ui::consts::MARGIN_X + (index % 3) as f32 * 580.0,
-            top + (index / 3) as f32 * pitch, 568.0, height)
+        Rect::new(plx_ui::consts::MARGIN_X + (index % 3) as f32 * 582.0,
+            top + (index / 3) as f32 * pitch, 564.0, height)
     }
 
     fn visible_cards(&self) -> std::ops::Range<usize> {
@@ -1714,6 +1714,8 @@ impl Browser {
                                 self.dashboard.items.retain(|item| !refreshed.contains(&item.volume));
                                 self.dashboard.drives.append(&mut dashboard.drives);
                                 self.dashboard.items.append(&mut dashboard.items);
+                                self.dashboard.items.sort_by_key(|item| !item.favorite);
+                                self.dashboard.items.truncate(12);
                                 self.discovery_cache.clear();
                             } else { self.dashboard = dashboard; }
                             if job.manual {
@@ -2876,7 +2878,7 @@ impl Browser {
                     widgets::Spinner::new(rect.x + rect.w - 42.0, rect.y + rect.h * 0.5, 10.0)
                         .phase(self.scan_phase).tint(self.accent()).draw(&Env::inert(), p);
                 } else {
-                    draw_line(p, "↻", Rect::new(rect.x + rect.w - 62.0, rect.y, 40.0, rect.h), theme::size::HEADLINE, false);
+                    draw_glyph(p, Glyph::Refresh, Rect::new(rect.x + rect.w - 55.0, rect.y + 14.0, 26.0, 26.0), theme::TEXT_SECONDARY);
                 }
             }
             if i == 6 {
@@ -3123,7 +3125,7 @@ impl Browser {
         }
         let Some(item) = self.dashboard.items.get(index - self.scan.volumes.len()) else { return };
         let title = plx_ui::text_view::TextView::new(&item.title, theme::size::HEADLINE, theme::TEXT_PRIMARY)
-            .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2);
+            .with_measure(&TtfMeasure).bold().break_long_words().leading(36.0).max_lines(2);
         title.draw(p, Rect::new(x, card.y + 17.0, width - 38.0, 76.0));
         if item.favorite {
             draw_glyph(p, Glyph::Star(false), Rect::new(card.x + card.w - 47.0, card.y + 20.0, 25.0, 25.0), theme::USB_FAVORITES);
@@ -3137,7 +3139,7 @@ impl Browser {
             if duration > 0 {
                 let remaining = video_duration(duration.saturating_sub(position) / 1_000_000_000);
                 let text = format!("{} {remaining}", tr("Quedan", "Queden"));
-                draw_line(p, &text, Rect::new(x, card.y + 127.0, width, 28.0), theme::size::MICRO, false);
+                draw_line(p, &text, Rect::new(x, card.y + 143.0, width, 28.0), theme::size::MICRO, false);
                 let bar = Rect::new(x, card.y + card.h - 22.0, width, 4.0);
                 p.rrect(bar, 2.0, 2.0, theme::RAIL_TRACK);
                 let fraction = (position as f64 / duration as f64).clamp(0.0, 1.0) as f32;
@@ -3452,11 +3454,12 @@ fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, sta
 }
 
 #[derive(Clone, Copy)]
-enum Glyph { Play, Trash, Eject, Drive, Settings, Sun, Sunset, Moon, Star(bool), Shared(Icon) }
+enum Glyph { Play, Refresh, Trash, Eject, Drive, Settings, Sun, Sunset, Moon, Star(bool), Shared(Icon) }
 
 fn draw_glyph(p: Painter, glyph: Glyph, rect: Rect, ink: [f32; 4]) {
     let asset = match glyph {
         Glyph::Play => return icons::draw(p, Icon::Play, rect, ink),
+        Glyph::Refresh => include_str!("../../../assets/icons/cineusb-refresh.svg"),
         Glyph::Shared(icon) => return icons::draw(p, icon, rect, ink),
         Glyph::Star(false) => include_str!("../../../assets/icons/cineusb-star.svg"),
         Glyph::Star(true) => include_str!("../../../assets/icons/cineusb-star-fill.svg"),
