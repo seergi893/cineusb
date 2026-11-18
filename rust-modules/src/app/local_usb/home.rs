@@ -138,6 +138,10 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
                 let relative_show = detected_show.and_then(|show| show.strip_prefix(&volume.path).ok().map(Path::to_path_buf))
                     .filter(|show| !show.as_os_str().is_empty());
                 if let Some(show) = &relative_show { shows.insert(show.clone()); }
+                else if category != super::DOCUMENTALS_TAB && continuity::episode(&entry.name).is_some() {
+                    let (prefix, _, _) = continuity::episode(&entry.name).expect("episode already detected");
+                    shows.insert(PathBuf::from(String::from_utf8_lossy(prefix).as_ref()));
+                }
                 else if category == super::DOCUMENTALS_TAB { stats.documentaries += 1; }
                 else { stats.movies += 1; }
                 videos.push(Video { path: relative, size: entry.size.unwrap_or(0), modified: entry.modified.unwrap_or(0),
@@ -395,7 +399,9 @@ mod usb_browser_tests {
         assert!(recommendations(&drive)[0].path.starts_with("/tmp/usb/sdb/sdb1"));
         let inventory = Inventory { identity: "uuid:test".into(), checked: seconds(), stats: drive.stats.unwrap(),
             videos: drive.videos.clone(), used_bytes: Some(200), directories: vec![] };
-        let restored: Inventory = serde_json::from_slice(&serde_json::to_vec(&inventory).unwrap()).unwrap();
+        let cache = root.join("offline-inventory.json");
+        plx_plex::plex::session::write_atomic(&cache, &serde_json::to_vec(&inventory).unwrap()).unwrap();
+        let restored: Inventory = serde_json::from_slice(&std::fs::read(cache).unwrap()).unwrap();
         assert_eq!(restored.videos.len(), drive.videos.len());
         assert_eq!(restored.stats.series, 1);
         plx_base::testscratch::remove_tree(&root);
@@ -420,6 +426,21 @@ mod usb_browser_tests {
         assert_eq!(refreshed.videos.len(), inventory.videos.len() + 1);
         std::fs::remove_file(&added).unwrap();
         assert!(inventory_changed(&volume, &refreshed, &AtomicBool::new(false)).unwrap());
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn loose_episodes_are_not_counted_as_movies_and_natural_order_crosses_seasons() {
+        let root = plx_base::testscratch::process_dir("cineusb-home-loose-episodes");
+        for name in ["Show S02E10.mkv", "Show S02E02.mkv", "Show S03E01.mkv"] {
+            std::fs::write(root.join(name), []).unwrap();
+        }
+        let volume = Volume { path: root.clone(), label: None, mount_id: None, system: false };
+        let inventory = scan(&volume, "uuid:loose", &[], &AtomicBool::new(false)).unwrap();
+        assert_eq!(inventory.stats.movies, 0);
+        assert_eq!(inventory.stats.series, 1);
+        assert_eq!(inventory.videos[0].path, PathBuf::from("Show S02E02.mkv"));
+        assert_eq!(inventory.videos[2].path, PathBuf::from("Show S03E01.mkv"));
         plx_base::testscratch::remove_tree(&root);
     }
 }
