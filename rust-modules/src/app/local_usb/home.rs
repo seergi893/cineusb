@@ -176,7 +176,8 @@ fn episode_order(a: &Path, b: &Path) -> std::cmp::Ordering {
             let name = part.as_os_str().to_string_lossy().to_lowercase();
             super::art::is_season(&name).then(|| number(&name))
         })).unwrap_or(0);
-        (season, number(&path.file_stem().unwrap_or_default().to_string_lossy()))
+        if season == 0 { (0, 0) }
+        else { (season, number(&path.file_stem().unwrap_or_default().to_string_lossy())) }
     };
     episode(a).cmp(&episode(b))
         .then_with(|| disk::natural(a.as_os_str().as_encoded_bytes(), b.as_os_str().as_encoded_bytes()))
@@ -420,6 +421,8 @@ mod usb_browser_tests {
 
     #[test]
     fn loose_episodes_are_not_counted_as_movies_and_natural_order_crosses_seasons() {
+        assert!(episode_order(Path::new("Primera entrega/Capítol 2.mkv"),
+            Path::new("Segona entrega/Capítol 1.mkv")).is_lt());
         let root = plx_base::testscratch::process_dir("cineusb-home-loose-episodes");
         for name in ["Show S02E10.mkv", "Show S02E02.mkv", "Show S03E01.mkv"] {
             std::fs::write(root.join(name), []).unwrap();
