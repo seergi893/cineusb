@@ -16,9 +16,10 @@ class Pipeline(unittest.TestCase):
         for script in ['check-module-layers.py', 'gen-third-party-notices.py --check', 'test_cineusb_pipeline.py']:
             self.assertIn(script, workflow)
 
-    def test_cineusb_build_excludes_unused_uri_and_diagnostics(self):
+    def test_release_contract_is_preserved_and_tests_exclude_diagnostics(self):
         workflow = (ROOT / '.github/workflows/cineusb-ipk.yml').read_text()
-        self.assertIn('PLAYBACK_BACKENDS: feed', workflow)
+        self.assertIn('PLAYBACK_BACKENDS: both', workflow)
+        self.assertIn('make ci-config release-guard', workflow)
         self.assertIn('--no-default-features --features hostsim,local-usb', workflow)
         self.assertNotIn('-p plxnative-modules -p plx_appkit', workflow)
 

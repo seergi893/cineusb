@@ -12,7 +12,7 @@ architecture, toolchain, Cargo manifests and lockfile. The existing cargo-seed s
 removes every cached path-package output before building. Application code is always
 rebuilt; cached application binaries can never satisfy Make by timestamp.
 
-Native caches are exact matches only, keyed by stable/feed configuration, NDK manifest,
+Native caches are exact matches only, keyed by stable/both configuration, NDK manifest,
 all recipes, patches, Makefile and compiler configuration. A complete byte manifest and
 existing ELF link receipts are checked before Make sentinels are refreshed. The cache
 contains library prefixes/staged libraries, never application objects or binaries.
@@ -25,14 +25,15 @@ the cache instead of silently reusing different flags. Corruption fails closed.
 The two outer Make jobs and each native sub-build share an explicit runner-sized budget.
 Cargo recipes are marked recursive so GNU Make passes valid jobserver descriptors.
 Python/CMake native subprocesses clear inherited Make flags and use the explicit budget.
-CineUSB packages select the existing feed-only configuration. Host USB tests disable
-unrelated diagnostic defaults. Both changes use supported feature combinations.
+CineUSB packages retain both playback backends as required by the stable release guard.
+That guard runs before compilation. Host USB tests disable unrelated diagnostic defaults
+and Appkit tests run separately to avoid Cargo feature unification between test harnesses.
 
 Plex, session, media, appkit and screens are still shared dependencies: the local player
 uses their playback session, metadata/track contracts, dialogs, and application routing.
 Removing those crates requires extracting those shared contracts and a separate app shell;
 merely hiding dependencies in Cargo would break the player. No claim is made that these
-shared crates have been removed. The unused URI backend is excluded from the shipped build.
+shared crates have been removed. Both production backends remain included, preserving the existing publication contract.
 
 ## Updates
 

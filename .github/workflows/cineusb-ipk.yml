@@ -156,7 +156,7 @@ jobs:
     env:
       FLAVOR: stable
       RELEASE: "1"
-      PLAYBACK_BACKENDS: feed
+      PLAYBACK_BACKENDS: both
       WEBOS_SDK: ${{ github.workspace }}/.webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot
       PLX_SENTRY_DSN: ""
       PLX_POSTHOG_KEY: ""
@@ -186,20 +186,20 @@ jobs:
       - uses: ./.github/actions/webos-ndk
         id: ndk
       - name: Initialize the stable build configuration
-        run: make ci-config
+        run: make ci-config release-guard
       - name: Cache ARM Cargo dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            rust-modules/target-release-feed
-            rust-modules/target-release-feed-storage
-          key: cineusb-cargo-arm-feed-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml', 'Makefile', 'ci/dependencies.json') }}-${{ github.sha }}
+            rust-modules/target-release
+            rust-modules/target-release-storage
+          key: cineusb-cargo-arm-both-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml', 'Makefile', 'ci/dependencies.json') }}-${{ github.sha }}
           restore-keys: |
-            cineusb-cargo-arm-feed-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml', 'Makefile', 'ci/dependencies.json') }}-
+            cineusb-cargo-arm-both-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml', 'Makefile', 'ci/dependencies.json') }}-
       - name: Discard cached workspace outputs
-        run: python3 ci/cargo-cache.py rust-modules/target-release-feed rust-modules/target-release-feed-storage
+        run: python3 ci/cargo-cache.py rust-modules/target-release rust-modules/target-release-storage
       - name: Cache verified native dependencies
         id: native-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -210,15 +210,15 @@ jobs:
             vendor/sentry-native-prefix
             pkg/lib*-plx.so.*
             .cineusb-native-cache.json
-          key: cineusb-native-stable-feed-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-*', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'ci/native-cache.py', 'ci/patches/**', 'Makefile', 'rust-modules/.cargo/config.toml') }}
+          key: cineusb-native-stable-both-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-*', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'ci/native-cache.py', 'ci/patches/**', 'Makefile', 'rust-modules/.cargo/config.toml') }}
       - name: Verify restored native cache
         if: steps.native-cache.outputs.cache-hit == 'true'
         env:
-          CACHE_KEY: cineusb-native-stable-feed-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-*', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'ci/native-cache.py', 'ci/patches/**', 'Makefile', 'rust-modules/.cargo/config.toml') }}
+          CACHE_KEY: cineusb-native-stable-both-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-*', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'ci/native-cache.py', 'ci/patches/**', 'Makefile', 'rust-modules/.cargo/config.toml') }}
         run: python3 ci/native-cache.py verify "$CACHE_KEY"
       - name: Compile and verify the webOS package
         env:
-          CACHE_KEY: cineusb-native-stable-feed-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-*', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'ci/native-cache.py', 'ci/patches/**', 'Makefile', 'rust-modules/.cargo/config.toml') }}
+          CACHE_KEY: cineusb-native-stable-both-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-*', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'ci/native-cache.py', 'ci/patches/**', 'Makefile', 'rust-modules/.cargo/config.toml') }}
           WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
         run: |
           export JOBS="$(python3 -c 'import os; print(max(1, (os.cpu_count() or 2) // 2))')"
