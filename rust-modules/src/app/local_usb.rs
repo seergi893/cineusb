@@ -4782,6 +4782,35 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn first_favorites_entry_pins_the_drive_and_never_exposes_usb_root_cards() {
+        let mut browser = Browser::new();
+        let first = Volume { path: "/tmp/usb/first".into(), label: None, mount_id: None, system: false };
+        let selected = Volume { path: "/tmp/usb/selected".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes = vec![first, selected.clone()];
+        browser.selected = 1;
+        browser.open_nav_tab(FAVORITES_TAB);
+        assert!(browser.loading_favorites);
+        assert_eq!(browser.len(), 0, "USB root cards must not appear while favorites load");
+        assert!(browser.item(0).is_none(), "the loading view must not expose a clickable USB card");
+        assert_eq!(browser.favorite_cards().map(|view| &view.volume), Some(&selected));
+        assert_eq!(browser.volume(), Some(&selected), "resetting card focus must not select another drive");
+        let show = selected.path.join("Series/La sèrie");
+        let (send, reply) = mpsc::sync_channel(1);
+        browser.pending = Some(reply);
+        send.send(DiskResult::Favorites(selected.clone(), vec![show.clone()])).unwrap();
+        // Suppress unrelated workers while consuming the actual result event.
+        browser.next_scan = Instant::now() + Duration::from_secs(60);
+        browser.home_refresh = browser.next_scan;
+        browser.settings_started = true;
+        browser.facts = Some((selected.clone(), (None, None)));
+        browser.update();
+        assert_eq!(browser.len(), 1);
+        assert_eq!(browser.item(0).unwrap().0, "La sèrie");
+        assert!(!browser.loading_favorites);
+        assert_eq!(browser.favorite_cards().unwrap().paths, vec![show]);
+    }
+
+    #[test]
     fn favorites_keeps_its_section_through_folders_and_returns_to_its_cards() {
         let mut browser = Browser::new();
         let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: Some(42), system: true };
