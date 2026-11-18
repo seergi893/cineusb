@@ -10,6 +10,10 @@ The helper also abandoned the first failed clean unmount and removed the operati
 
 These findings identify defects in the implementation. The cause of a particular physical television's persistent failure still requires its returned error and mount evidence.
 
+## LG C1 status-query evidence
+
+On a user-reported C1 running firmware 03.53.45, the same read-only `getAttachedDeviceStatus` request returned the attached-drive list with `returnValue:false` for `subscribe:false`, and `returnValue:true` for `subscribe:true`; both luna-send processes exited successfully. The helper now requests `subscribe:true` while retaining `-n 1` and the four-second wait limit, and still requires an explicit successful reply. This confirms the status-query incompatibility, not successful physical ejection on that television.
+
 ## Automated regression coverage
 
 - Four unconventional season directories, direct episodes, mixed structures, recursive video discovery and ignored non-video files.
