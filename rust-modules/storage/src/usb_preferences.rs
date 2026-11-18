@@ -54,7 +54,7 @@ fn load(path: &Path) -> io::Result<Option<String>> {
     if !file.metadata()?.is_file() { return Err(invalid()); }
     let mut text = String::new();
     file.take(64).read_to_string(&mut text)?;
-    if matches!(text.split(' ').count(), 7 | 8) { return validate_extended(&text).map(|()| Some(text)); }
+    if matches!(text.split(' ').count(), 7 | 8 | 10) { return validate_extended(&text).map(|()| Some(text)); }
     let (lang, options) = text.split_once(' ').ok_or_else(invalid)?;
     let (forced, audio) = options.split_once(' ').unwrap_or((options, "0"));
     record(lang, forced, audio).map(Some)
@@ -79,7 +79,7 @@ fn validate_extended(text: &str) -> io::Result<()> {
     let fields: Vec<_> = text.split(' ').collect();
     let [language, forced, audio, next, accent, cards, sort, tail @ ..] = fields.as_slice() else { return Err(invalid()) };
     record(language, forced, audio)?;
-    if !matches!(tail, [] | ["0" | "1"]) { return Err(invalid()); }
+    if !matches!(tail, [] | ["0" | "1"] | ["0" | "1", "0" | "1", "0" | "1" | "2"]) { return Err(invalid()); }
     if !matches!(*next, "0" | "1") || ![accent, cards, sort].into_iter().all(|value| matches!(*value, "0" | "1" | "2")) {
         return Err(invalid());
     }
@@ -250,6 +250,15 @@ mod tests {
         assert!(validate_extended(extended).is_ok());
         save(&path, extended).unwrap();
         assert_eq!(load(&path).unwrap().as_deref(), Some(extended));
+        for visible in [0, 1] {
+            for clock in 0..=2 {
+                let extended = format!("ca 1 0 1 2 1 2 0 {visible} {clock}");
+                assert!(validate_extended(&extended).is_ok());
+                save(&path, &extended).unwrap();
+                assert_eq!(load(&path).unwrap(), Some(extended));
+            }
+        }
+        assert!(validate_extended("ca 1 0 1 2 1 2 0 1 3").is_err());
         assert!(validate_extended("ca 1 0 1 3 0 0").is_err());
         assert!(record("ca", "yes", "0").is_err());
         assert!(record("../es", "0", "0").is_err());

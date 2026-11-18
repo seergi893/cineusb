@@ -758,6 +758,21 @@ pub fn local_hour() -> Option<i32> {
     Some(civil_time(libc::time_t::try_from(now_unix_seconds()?).ok()?)?.tm_hour)
 }
 
+/// Current hour and minute in the operating system's timezone.
+pub fn local_clock_time() -> Option<(i32, i32)> {
+    let time = civil_time(libc::time_t::try_from(now_unix_seconds()?).ok()?)?;
+    Some((time.tm_hour, time.tm_min))
+}
+
+/// Refresh the TV's clock preference off-frame, reusing the locale settings door.
+pub fn system_clock_preference() -> Clock {
+    match platform_locale().and_then(|info| info.clock).as_deref() {
+        Some("12") => Clock::H12,
+        Some("24") => Clock::H24,
+        _ => current().clock(),
+    }
+}
+
 /// Wall-clock estimate in the TV timezone, rounded up to the displayed minute.
 pub fn local_finish_time(seconds_remaining: u64) -> Option<(i64, i32, i32)> {
     let end = now_unix_seconds()?.checked_add(i64::try_from(seconds_remaining).ok()?)?;
