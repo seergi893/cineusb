@@ -1,5 +1,5 @@
 //! Offline library inventory and recommendations. All filesystem work runs off-frame.
-use super::{continuity, disk, entry_key, history_prefix, list_folder, matching_size_resume,
+use super::{continuity, directory_stamps, disk, entry_key, history_prefix, list_folder, matching_size_resume,
     media_folder_score, read_history, system_mount, unpack_progress, volume_facts, Kind, Volume, VolumeFacts,
     FAVORITE, WATCHED};
 use serde::{Deserialize, Serialize};
@@ -155,20 +155,6 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
     videos.sort_by(|a, b| episode_order(&a.path, &b.path));
     let favorite_series = favorites.iter().filter_map(|path| path.strip_prefix(&volume.path).ok().map(Path::to_path_buf)).collect();
     Ok(Inventory { identity: identity.into(), checked: seconds(), videos, stats, used_bytes: None, directories, favorite_series })
-}
-
-fn directory_stamps(volume: &Volume, paths: &[PathBuf]) -> io::Result<Vec<(u64, i64, i64)>> {
-    #[cfg(not(feature = "hostsim"))]
-    if let Some(mount) = system_mount(volume) {
-        return crate::port::usb_folder_stamps(paths, mount).map_err(|error| io::Error::other(format!("{error:?}")));
-    }
-    use std::os::unix::fs::MetadataExt;
-    let _ = volume;
-    paths.iter().map(|path| {
-        let meta = std::fs::symlink_metadata(path)?;
-        if !meta.is_dir() || meta.file_type().is_symlink() { return Err(io::ErrorKind::InvalidData.into()); }
-        Ok((meta.ino(), meta.mtime(), meta.mtime_nsec()))
-    }).collect()
 }
 
 fn inventory_changed(volume: &Volume, inventory: &Inventory, stop: &AtomicBool) -> io::Result<bool> {

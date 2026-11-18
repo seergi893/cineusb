@@ -3418,6 +3418,20 @@ fn scan_volumes() -> Scan {
     disk::volumes()
 }
 
+fn directory_stamps(volume: &Volume, paths: &[PathBuf]) -> io::Result<Vec<(u64, i64, i64)>> {
+    #[cfg(not(feature = "hostsim"))]
+    if let Some(mount) = system_mount(volume) {
+        return crate::port::usb_folder_stamps(paths, mount).map_err(|error| io::Error::other(format!("{error:?}")));
+    }
+    use std::os::unix::fs::MetadataExt;
+    let _ = volume;
+    paths.iter().map(|path| {
+        let meta = std::fs::symlink_metadata(path)?;
+        if !meta.is_dir() || meta.file_type().is_symlink() { return Err(io::ErrorKind::InvalidData.into()); }
+        Ok((meta.ino(), meta.mtime(), meta.mtime_nsec()))
+    }).collect()
+}
+
 fn volume_facts(volume: &Volume) -> VolumeFacts {
     #[cfg(not(feature = "hostsim"))]
     if let Some(mount) = system_mount(volume) {
