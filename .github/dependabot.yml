@@ -70,8 +70,6 @@ updates:
   - package-ecosystem: github-actions
     directories:
       - /
-      - /.github/actions/apt-install
-      - /.github/actions/host-rust
       - /.github/actions/rust-toolchain
       - /.github/actions/webos-ndk
     schedule:

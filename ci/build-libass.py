@@ -179,6 +179,8 @@ def build_locked(host, darwin, target, prefix, work, sources):
     pins = stack(manifest)
     archives = {d['id']: archive(d, sources) for d in pins}
     env = os.environ.copy()
+    env.pop('MAKEFLAGS', None)
+    env.pop('MFLAGS', None)
     # Avoid package auto-detection and caller-supplied flags changing the stack.
     # Our key records the compiler/toolchain; all build flags are owned here.
     for key in ['CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'LIBS',

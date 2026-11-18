@@ -57,7 +57,7 @@ Dependabot cannot read that file, so `ci/deps-update.py` does its job: `--report
 latest per entry, `--bump NAME` downloads the new asset, recomputes the sha256 and rewrites
 the entry's version, URLs and digest (never a patch; a patch that no longer applies exits 3 and
 the PR says so). `.github/workflows/deps-update.yml` runs weekly, opens one PR per outdated
-dependency on `deps/<name>-<version>` and dispatches `ci.yml` on it (a `GITHUB_TOKEN` push starts no
+dependency on `deps/<name>-<version>` and dispatches `cineusb-ipk.yml` on it (a `GITHUB_TOKEN` push starts no
 CI by itself). Reviewing such a PR: FFmpeg, Sentry Native, curl-adjacent and NDK bumps need the
 `fw-compat-reviewer` agent, and every bump needs a `THIRD-PARTY-NOTICES.md` check. The same workflow
 submits the manifest to GitHub's dependency graph on every push that changes it

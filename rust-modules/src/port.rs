@@ -23,6 +23,7 @@ const DISPLAY: &dyn plx_platform::tv::sink::DisplaySink = &plx_platform::webos::
 const DISPLAY: &dyn plx_platform::tv::sink::DisplaySink = SINK;
 
 static PORT: plx_platform::tv::Port = plx_platform::tv::Port {
+    usb: plx_platform::webos::jail_repair::USB,
     probe_device: plx_platform::webos::probe,
     start_capability_probe: plx_platform::webos::caps::start_probe,
     repair_sandbox: plx_platform::webos::jail_repair::execute,
@@ -92,22 +93,3 @@ mod tests {
         assert_eq!(std::ptr::from_ref(PORT.sink).cast::<()>(), host, "so is the video sink");
     }
 }
-#[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
-pub(crate) fn open_usb_file(path: &std::path::Path, mount_id: Option<u64>) -> Result<std::fs::File, plx_platform::tv::sandbox::Failure> {
-    plx_platform::webos::jail_repair::open_usb_file(path, mount_id)
-}
-
-#[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
-pub(crate) fn list_usb_volumes() -> Result<Vec<plx_platform::webos::jail_repair::UsbVolume>, plx_platform::tv::sandbox::Failure> {
-    plx_platform::webos::jail_repair::list_usb_volumes()
-}
-
-#[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
-pub(crate) fn list_usb_folder(path: &std::path::Path, mount_id: u64) -> Result<Vec<plx_platform::webos::jail_repair::UsbEntry>, plx_platform::tv::sandbox::Failure> {
-    plx_platform::webos::jail_repair::list_usb_folder(path, mount_id)
-}
-
-#[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
-pub(crate) use plx_platform::webos::jail_repair::{clear_usb_history, delete_usb_folder, delete_usb_video, eject_usb_disk, save_usb_preferences, usb_preferences, usb_history, usb_resume, usb_volume_details};
-#[cfg(all(feature = "local-usb", not(feature = "hostsim")))]
-pub(crate) use plx_platform::webos::jail_repair::usb_folder_stamps;

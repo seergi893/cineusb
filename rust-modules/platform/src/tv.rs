@@ -9,6 +9,7 @@ pub mod sink;
 pub mod sound;
 pub mod toast;
 pub mod uri;
+pub mod usb;
 pub mod window;
 
 use std::os::raw::c_void;
@@ -19,6 +20,7 @@ use std::sync::OnceLock;
 pub enum LocaleReply { NoPlatform, Unavailable, Reply(String) }
 
 pub struct Port {
+    pub usb: &'static dyn usb::Usb,
     pub probe_device: fn(),
     pub start_capability_probe: fn(),
     pub repair_sandbox: fn() -> Result<(), sandbox::Failure>,
@@ -60,6 +62,7 @@ fn nothing() {}
 /// `cfg(any(hostsim, test))` arm answered, minus the off-device log lines the other entries would
 /// write (`deliver_toast` keeps its one).
 static ABSENT: Port = Port {
+    usb: &usb::NoUsb,
     probe_device: nothing,
     start_capability_probe: nothing,
     repair_sandbox: || Err(sandbox::Failure::Unsupported),

@@ -3515,7 +3515,7 @@ fn draw_button_content(p: Painter, rect: Rect, label: &str, glyph: Option<Glyph>
 
 fn load_settings() -> Result<Option<Settings>, String> {
     #[cfg(not(feature = "hostsim"))]
-    let record = crate::port::usb_preferences().map_err(|error| format!("{error:?}"))?;
+    let record = plx_platform::tv::usb::preferences().map_err(|error| format!("{error:?}"))?;
     #[cfg(feature = "hostsim")]
     let record = match std::fs::read_to_string(plx_base::paths::in_runtime_dir("cineusb-settings")) {
         Ok(record) => record,
@@ -3559,7 +3559,7 @@ fn save_settings(settings: Settings) -> Result<(), String> {
         u8::from(settings.forced_subtitles), u8::from(settings.spanish_audio), u8::from(settings.auto_next),
         settings.accent, settings.cards, settings.sort, u8::from(settings.extensions), u8::from(settings.show_clock), settings.clock_format, settings.clock_size);
     #[cfg(not(feature = "hostsim"))]
-    return crate::port::save_usb_preferences(&record).map_err(|error| format!("{error:?}"));
+    return plx_platform::tv::usb::save_preferences(&record).map_err(|error| format!("{error:?}"));
     #[cfg(feature = "hostsim")]
     plx_plex::plex::session::write_atomic(&plx_base::paths::in_runtime_dir("cineusb-settings"), record.as_bytes())
         .map_err(|error| format!("{error:?}"))
@@ -3570,8 +3570,8 @@ fn mutate_usb(action: Mutation, volume: &Volume, path: &std::path::Path) -> Resu
     {
         let id = system_mount(volume).ok_or("missing live USB mount")?;
         match action {
-            Mutation::Delete => crate::port::delete_usb_video(path, id).map_err(|error| format!("{error:?}")),
-            Mutation::Eject => crate::port::eject_usb_disk(path, id),
+            Mutation::Delete => plx_platform::tv::usb::delete_video(path, id).map_err(|error| format!("{error:?}")),
+            Mutation::Eject => plx_platform::tv::usb::eject_disk(path, id),
         }
     }
     #[cfg(feature = "hostsim")]
@@ -3583,7 +3583,7 @@ fn mutate_usb(action: Mutation, volume: &Volume, path: &std::path::Path) -> Resu
 
 fn delete_folder(path: &std::path::Path, mount: u64) -> Result<(), String> {
     #[cfg(not(feature = "hostsim"))]
-    return crate::port::delete_usb_folder(path, mount);
+    return plx_platform::tv::usb::delete_folder(path, mount);
     #[cfg(feature = "hostsim")]
     {
         let _ = (path, mount);
@@ -3597,7 +3597,7 @@ fn system_mount(volume: &Volume) -> Option<u64> {
 
 fn scan_volumes() -> Scan {
     #[cfg(not(feature = "hostsim"))]
-    match crate::port::list_usb_volumes() {
+    match plx_platform::tv::usb::volumes() {
         Ok(mounts) => return Scan {
             volumes: mounts.into_iter().map(|(id, path, label)| Volume {
                 path, label, mount_id: Some(id), system: true,
@@ -3613,7 +3613,7 @@ fn scan_volumes() -> Scan {
 fn directory_stamps(volume: &Volume, paths: &[PathBuf]) -> io::Result<Vec<(u64, i64, i64)>> {
     #[cfg(not(feature = "hostsim"))]
     if let Some(mount) = system_mount(volume) {
-        return crate::port::usb_folder_stamps(paths, mount).map_err(|error| io::Error::other(format!("{error:?}")));
+        return plx_platform::tv::usb::folder_stamps(paths, mount).map_err(|error| io::Error::other(format!("{error:?}")));
     }
     use std::os::unix::fs::MetadataExt;
     let _ = volume;
@@ -3627,7 +3627,7 @@ fn directory_stamps(volume: &Volume, paths: &[PathBuf]) -> io::Result<Vec<(u64, 
 fn volume_facts(volume: &Volume) -> VolumeFacts {
     #[cfg(not(feature = "hostsim"))]
     if let Some(mount) = system_mount(volume) {
-        return crate::port::usb_volume_details(&volume.path, mount).unwrap_or_default();
+        return plx_platform::tv::usb::volume_details(&volume.path, mount).unwrap_or_default();
     }
     #[cfg(feature = "hostsim")]
     return (None, Some(volume.path.to_string_lossy().into_owned()));
@@ -3693,7 +3693,7 @@ fn history_matches(key: &str, base: &str) -> bool {
 
 fn clear_history(base: &str) -> Result<(), String> {
     #[cfg(not(feature = "hostsim"))]
-    return crate::port::clear_usb_history(base).map_err(|error| format!("{error:?}"));
+    return plx_platform::tv::usb::clear_history(base).map_err(|error| format!("{error:?}"));
     #[cfg(feature = "hostsim")]
     {
         let Some(end) = base.as_bytes().chunks_exact(2).position(|pair| pair == b"00") else { return Ok(()) };
@@ -3706,7 +3706,7 @@ fn clear_history(base: &str) -> Result<(), String> {
 
 fn read_history(prefix: &str) -> Option<BTreeMap<String, u64>> {
     #[cfg(not(feature = "hostsim"))]
-    return crate::port::usb_history(prefix).ok();
+    return plx_platform::tv::usb::history(prefix).ok();
     #[cfg(feature = "hostsim")]
     {
         let mut records = BTreeMap::new();
@@ -3726,7 +3726,7 @@ fn read_history(prefix: &str) -> Option<BTreeMap<String, u64>> {
 
 fn resume_record(key: &str, position: Option<u64>) -> Result<Option<u64>, String> {
     #[cfg(not(feature = "hostsim"))]
-    return crate::port::usb_resume(key, position).map_err(|error| format!("{error:?}"));
+    return plx_platform::tv::usb::resume(key, position).map_err(|error| format!("{error:?}"));
     #[cfg(feature = "hostsim")]
     {
         use std::hash::{Hash, Hasher};
@@ -3753,7 +3753,7 @@ fn resume_record(key: &str, position: Option<u64>) -> Result<Option<u64>, String
 fn list_folder(path: &std::path::Path, _mount_id: Option<u64>) -> io::Result<Vec<Entry>> {
     #[cfg(not(feature = "hostsim"))]
     if let Some(id) = _mount_id {
-        let entries = crate::port::list_usb_folder(path, id)
+        let entries = plx_platform::tv::usb::list_folder(path, id)
             .map_err(|error| io::Error::other(format!("Homebrew USB ({error:?})")))?;
         let mut entries: Vec<_> = entries.into_iter().filter_map(|(name, dir, modified, size)| {
             let mut entry = disk::media_entry(name, dir)?;
@@ -3771,7 +3771,7 @@ fn inspect_video(path: &std::path::Path, _mount_id: Option<u64>, spanish: bool) 
     let inspect = |file: File| plx_play_feed::probe_local_with_audio(&file, spanish).map(|info| (file, info));
     #[cfg(not(feature = "hostsim"))]
     if _mount_id.is_some() {
-        let file = crate::port::open_usb_file(path, _mount_id)
+        let file = plx_platform::tv::usb::open_file(path, _mount_id)
             .map_err(|error| format!("No se pudo abrir el vídeo desde Homebrew USB ({error:?})."))?;
         return inspect(file);
     }
@@ -3779,7 +3779,7 @@ fn inspect_video(path: &std::path::Path, _mount_id: Option<u64>, spanish: bool) 
         .and_then(inspect);
     #[cfg(not(feature = "hostsim"))]
     if direct.is_err() {
-        match crate::port::open_usb_file(path, None) {
+        match plx_platform::tv::usb::open_file(path, None) {
             Ok(file) => return inspect(file),
             Err(error) => plx_base::eventlog::log(&format!("cineusb: Homebrew USB descriptor failed: {error:?}")),
         }
@@ -3790,12 +3790,12 @@ fn inspect_video(path: &std::path::Path, _mount_id: Option<u64>, spanish: bool) 
 fn open_for_details(path: &std::path::Path, _mount_id: Option<u64>) -> Result<File, String> {
     #[cfg(not(feature = "hostsim"))]
     if _mount_id.is_some() {
-        return crate::port::open_usb_file(path, _mount_id).map_err(|error| format!("{error:?}"));
+        return plx_platform::tv::usb::open_file(path, _mount_id).map_err(|error| format!("{error:?}"));
     }
     let direct = disk::open_video(path).map_err(|error| error.to_string());
     #[cfg(not(feature = "hostsim"))]
     if direct.is_err() {
-        return crate::port::open_usb_file(path, None).map_err(|error| format!("{error:?}"));
+        return plx_platform::tv::usb::open_file(path, None).map_err(|error| format!("{error:?}"));
     }
     direct
 }

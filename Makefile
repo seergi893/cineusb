@@ -1014,7 +1014,7 @@ $(RUST_LIB): LICENSE $(RUST_INPUTS) rust-modules/Cargo.toml rust-modules/Cargo.l
 	@# BEFORE the mkdir: the seed is only ever cloned into a target dir that does not exist yet.
 	$(CARGO_SEED) restore $(RUST_TDIR) rust-modules/$(RUST_TDIR)
 	mkdir -p rust-modules/$(RUST_TDIR)
-	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" $(RUST_ENV) \
+	+cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" $(RUST_ENV) \
 	  $(TELEMETRY_ENV) \
 	  cargo +$(RUST_TOOLCHAIN) rustc $(ARM_PROFILE_FLAG) --target $(RUST_TARGET) \
 	    --lib --crate-type staticlib --target-dir $(RUST_TDIR) $(RUST_FEATFLAGS) \
@@ -1051,7 +1051,7 @@ STORAGE_TDIR = $(RUST_TDIR)-storage
 STORAGE_INPUTS := $(shell find rust-modules/storage rust-modules/build_support rust-modules/platform/src/storage_service -type f 2>/dev/null) rust-modules/platform/src/storage/state.rs rust-modules/platform/src/webos/usb_fd.rs rust-modules/.cargo/config.toml
 STORAGE_BIN = rust-modules/$(STORAGE_TDIR)/$(RUST_TARGET)/$(ARM_PROFILE)/plxnative-storage
 pkg/plxnative-storage: LICENSE $(STORAGE_INPUTS) rust-modules/Cargo.toml rust-modules/Cargo.lock ci/install-identities.json Makefile ci/arm-cc.py ci/check-link-evidence.py
-	cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" $(RUST_ENV) \
+	+cd rust-modules && PATH="$$HOME/.cargo/bin:$$PATH" $(RUST_ENV) \
 	  CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_LINKER='$(CC)' \
 	  cargo +$(RUST_TOOLCHAIN) rustc $(ARM_PROFILE_FLAG) --target $(RUST_TARGET) \
 	    -p plxnative-storage --bin plxnative-storage --target-dir $(STORAGE_TDIR) --no-default-features -- \
@@ -2687,3 +2687,8 @@ fetch-profile:
 
 .PHONY: setup-rust libass libass-host screenshots screenshots-sim demo-library disk symbols symbols-libs sentry-symbols sentry-native all setup-env telemetry-local deploy verify-deploy run run-stream kill check check-unlocked check-ffmpeg lint test ipk clean tv-lock-require threadprobe sockprobe logmprobe mali-hwcnt-probe tv-capture-bench mali-irq-sample plxnative-stackwalk sim sim-macos sim-linux site-video-sim sim-wsl sim-run sim-macos-run sim-shot sim-macos-shot sim-token sim-macos-token sim-play sim-macos-play sim-clean sim-macos-clean macapp macapp-zip fixtures fixtures-quick fixtures-pipeline fetch-profile \
         release-guard lab-guard install uninstall $(QUERY_GOALS)
+
+# Initialize the existing configuration stamp before restoring native-only CI outputs.
+.PHONY: ci-config
+ci-config:
+	@true
