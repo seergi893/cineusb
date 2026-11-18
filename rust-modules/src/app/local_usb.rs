@@ -3494,6 +3494,7 @@ fn decode_relative(encoded: &str) -> Option<PathBuf> {
     path.components().all(|component| matches!(component, std::path::Component::Normal(_))).then_some(path)
 }
 
+#[cfg(any(test, feature = "hostsim"))]
 fn history_matches(key: &str, base: &str) -> bool {
     key.strip_prefix(base).is_some_and(|suffix| suffix.starts_with("00") || suffix.starts_with("2f"))
 }
