@@ -273,6 +273,9 @@ jobs:
           ipk="${ipks[0]}"
           version="${ipk#pkg/com.seergi893.cineusb_}"
           version="${version%_arm.ipk}"
+          # A native cache hit skips builds that normally populate these archives.
+          # Fetch and verify pinned inputs before the offline source collector.
+          python3 ci/deps.py fetch-all --exclude webos-ndk
           cargo +"$RUST_TOOLCHAIN" fetch --locked --manifest-path rust-modules/Cargo.toml
           rustup component add rust-src --toolchain "$RUST_TOOLCHAIN"
           printf '[]\n' > "$RUNNER_TEMP/cineusb-private-values.json"
