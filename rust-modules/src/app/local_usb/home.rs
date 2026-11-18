@@ -232,10 +232,12 @@ pub(super) fn recommendations(drive: &Drive) -> Vec<Item> {
         let saved = progress(video, &drive.volume, identity, history);
         let (position, duration) = unpack_progress(saved);
         if saved == WATCHED || saved == FAVORITE || position == 0 || (duration > 0 && position >= duration) { continue; }
-        if let Some(show) = &video.show {
+        let group = video.show.clone().or_else(|| video.path.file_name().and_then(continuity::episode)
+            .filter(|(prefix, _, _)| !prefix.is_empty()).map(|(prefix, _, _)| PathBuf::from(String::from_utf8_lossy(prefix).as_ref())));
+        if let Some(show) = &group {
             if !represented.insert(show.clone()) { continue; }
         }
-        items.push(item(drive, video, video.show.as_deref(), false, saved));
+        items.push(item(drive, video, group.as_deref(), false, saved));
     }
     items
 }
@@ -439,6 +441,12 @@ mod usb_browser_tests {
         assert_eq!(inventory.stats.series, 1);
         assert_eq!(inventory.videos[0].path, PathBuf::from("Show S02E02.mkv"));
         assert_eq!(inventory.videos[2].path, PathBuf::from("Show S03E01.mkv"));
+        let mut drive = drive(volume, BTreeMap::new());
+        for video in drive.videos.iter().take(2) {
+            let key = entry_key("uuid:test", &drive.volume, &root.join(&video.path), video.size, video.modified).unwrap();
+            drive.history.as_mut().unwrap().insert(key, pack_progress(60_000_000_000, Some(600_000_000_000)));
+        }
+        assert_eq!(recommendations(&drive).len(), 1);
         plx_base::testscratch::remove_tree(&root);
     }
 }
