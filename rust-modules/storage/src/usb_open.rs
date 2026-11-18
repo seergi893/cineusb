@@ -697,6 +697,17 @@ mod tests {
     }
 
     #[test]
+    fn usb_eject_accepts_idle_partition_aliases_outside_the_browser_root() {
+        // A mounted alias does not imply an open movie. webOS/jails can bind
+        // the same partition before the user has opened any file at all.
+        let table = b"45 1 8:17 / /tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\n52 1 8:17 / /var/luna/jail/example/tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\n";
+        let mounts = ntfs_mountpoints(table, &["sdb1"]).unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert!(mounts.contains(&PathBuf::from("/tmp/usb/sdb/sdb1")));
+        assert!(mounts.contains(&PathBuf::from("/var/luna/jail/example/tmp/usb/sdb/sdb1")));
+    }
+
+    #[test]
     fn ntfs_unmount_candidates_reject_other_devices_and_unsupported_mounts() {
         // Pure parsing of a mount table; no unmount calls are performed here.
         let table = b"45 1 8:17 / /tmp/usb/sdb/sdb1 rw - tntfs /dev/sdb1 rw\n46 1 8:18 / /tmp/usb/sdb/sdb2 rw - exfat /dev/sdb2 rw\n";
