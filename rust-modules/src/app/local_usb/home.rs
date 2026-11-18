@@ -123,7 +123,10 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
                 let name = entry.name.to_string_lossy();
                 let next_category = [1, 2, super::DOCUMENTALS_TAB].into_iter()
                     .find(|&kind| media_folder_score(&name, kind) > 0).unwrap_or(category);
-                let next_show = if next_category == 2 && next_category == category && show.is_none() {
+                let next_show = if show.is_none() && category != super::DOCUMENTALS_TAB
+                    && super::art::is_season(&name.to_lowercase()) {
+                    Some(path.clone())
+                } else if next_category == 2 && next_category == category && show.is_none() {
                     Some(child.clone())
                 } else {
                     show.clone().or_else(|| favorites.iter().find(|root| **root == child).cloned())
