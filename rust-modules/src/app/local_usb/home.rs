@@ -524,7 +524,7 @@ mod usb_browser_tests {
         assert!(refreshed.videos.iter().any(|video| video.path.ends_with("Nou nom.mp4")));
         assert!(!refreshed.videos.iter().any(|video| video.path.ends_with("Un documental.mp4")));
         let counts = super::super::series::count_cancellable(&show, None, true, &AtomicBool::new(false)).unwrap().unwrap();
-        assert_eq!(counts.episodes, 4);
+        assert_eq!(counts.counts.episodes, 4);
         before.videos = refreshed.videos;
         assert_eq!(recommendations(&before)[0].episode, Some((2, 1)));
         assert_eq!(before.history.as_ref().unwrap()[&watched], WATCHED);
