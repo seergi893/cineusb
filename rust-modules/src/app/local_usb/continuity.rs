@@ -22,10 +22,7 @@ pub(super) fn episode_parts(stem: &OsStr) -> Option<(&[u8], u32, u32, &[u8])> {
         let m = tail.iter().take_while(|byte| byte.is_ascii_digit()).count();
         if m == 0 || tail.get(m).is_some_and(u8::is_ascii_alphanumeric) { continue; }
         let (Some(season), Some(episode)) = (number(&season[..n]), number(&tail[..m])) else { continue };
-        let prefix = &bytes[..start];
-        let end = prefix.iter().rposition(|&byte| !matches!(byte, b' ' | b'.' | b'_' | b'-'))
-            .map_or(0, |index| index + 1);
-        return Some((&prefix[..end], season, episode, &tail[m..]));
+        return Some((bytes[..start].trim_ascii_end(), season, episode, &tail[m..]));
     }
     None
 }
@@ -55,15 +52,6 @@ mod usb_browser_tests {
         assert_eq!(next_episode(OsStr::new("Sèrie S01E01.mkv"), &entries), Some(OsStr::new("Sèrie S01E02.mkv")));
         assert_eq!(next_episode(OsStr::new("Película.mkv"), &entries), None);
         assert_eq!(next_episode(OsStr::new("Sèrie S01E02.mkv"), &entries), None);
-    }
-
-    #[test]
-    fn mixed_filename_styles_keep_episode_order_and_advance() {
-        let mut entries: Vec<_> = ["Narcos 3x07 - El camino.mkv", "Narcos.S03E06.Una.noche.mkv"]
-            .into_iter().filter_map(|name| disk::media_entry(name.into(), false)).collect();
-        disk::sort_entries(&mut entries);
-        assert_eq!(entries[0].name, "Narcos.S03E06.Una.noche.mkv");
-        assert_eq!(next_episode(&entries[0].name, &entries), Some(entries[1].name.as_os_str()));
     }
 
     #[test]

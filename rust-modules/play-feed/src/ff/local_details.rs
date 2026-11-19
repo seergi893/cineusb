@@ -50,10 +50,14 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
                 let dovi = dovi_conf(params).filter(|record| record.dv_profile != 0);
                 let hdr = container_hdr(params);
                 let pq = hdr.trc == 16 && hdr.pri == 9;
-                let plus = has_dynamic_side_data((*params).coded_side_data, (*params).nb_coded_side_data)
-                    || (pq && sample_hdr10plus(fmt, index, params));
+                let stream_plus = has_dynamic_side_data((*params).coded_side_data, (*params).nb_coded_side_data);
+                let stream_static = meaningful_mastering(hdr.mastering) || meaningful_cll(hdr.cll);
+                let (packet_plus, packet_static) = if dovi.is_none() && !stream_plus {
+                    sample_hdr_metadata(fmt, index, params)
+                } else { (false, false) };
+                let plus = stream_plus || packet_plus;
                 details.hdr10_plus = plus;
-                details.range = video_range(dovi, hdr.trc, hdr.pri, plus);
+                details.range = video_range(dovi, hdr.trc, hdr.pri, plus, stream_static || packet_static);
                 details.hdr10_base = match details.range {
                     Some(VideoRange::DolbyVisionHdr10 | VideoRange::Hdr10) => true,
                     Some(VideoRange::Hdr10Plus) => pq,
@@ -130,7 +134,7 @@ fn cineusb_detects_hdr10plus_in_hevc_packets() {
     assert!(!hevc_hdr10plus(&length_prefixed, Some(2)));
 }
 
-fn video_range(dovi: Option<AVDOVIDecoderConfigurationRecord>, transfer: c_int, primaries: c_int, plus: bool) -> Option<VideoRange> {
+fn video_range(dovi: Option<AVDOVIDecoderConfigurationRecord>, transfer: c_int, primaries: c_int, plus: bool, static_metadata: bool) -> Option<VideoRange> {
     if let Some(record) = dovi {
         let hdr10_base = record.dv_bl_signal_compatibility_id == 1
             || (record.dv_profile == 7 && record.bl_present_flag != 0
@@ -140,9 +144,11 @@ fn video_range(dovi: Option<AVDOVIDecoderConfigurationRecord>, transfer: c_int, 
     if plus { return Some(VideoRange::Hdr10Plus); }
     match (transfer, primaries) {
         (16, 9) => Some(VideoRange::Hdr10),
+        (16, 2) if static_metadata => Some(VideoRange::Hdr10),
         (16 | 18, _) => Some(VideoRange::Hdr),
         // Explicit SDR transfer characteristics from H.273. Unspecified values stay hidden.
         (1 | 4..=7 | 11..=15, _) => Some(VideoRange::Sdr),
+        (0 | 2, _) if static_metadata => Some(VideoRange::Hdr),
         _ => None,
     }
 }
@@ -153,11 +159,29 @@ unsafe fn has_dynamic_side_data(list: *const AVPacketSideData, count: c_int) -> 
     })
 }
 
+fn meaningful_mastering(mastering: Option<crate::vp9_hdr::Mastering>) -> bool {
+    mastering.is_some_and(|data| {
+        let (value, scale) = data.max_luminance;
+        data.has_luminance && value > 0 && scale > 0
+    })
+}
+
+fn meaningful_cll(cll: Option<(u32, u32)>) -> bool {
+    cll.is_some_and(|(peak, average)| peak > 0 || average > 0)
+}
+
+#[test]
+fn cineusb_empty_static_hdr_side_data_is_not_evidence() {
+    assert!(!meaningful_mastering(crate::vp9_hdr::parse_mastering(&[0; 88])));
+    assert!(!meaningful_cll(crate::vp9_hdr::parse_cll(&[0; 8])));
+    assert!(meaningful_cll(Some((1000, 400))));
+}
+
 /// Dynamic metadata often lives in video packets only. Sample a small prefix so opening options
 /// stays cheap even on large files. Playback will open a different descriptor.
-unsafe fn sample_hdr10plus(fmt: *mut AVFormatContext, index: c_int, params: *const AVCodecParameters) -> bool {
+unsafe fn sample_hdr_metadata(fmt: *mut AVFormatContext, index: c_int, params: *const AVCodecParameters) -> (bool, bool) {
     let hevc = (*params).codec_id == AV_CODEC_ID_HEVC;
-    if !hevc && (*params).codec_id != AV_CODEC_ID_AV1 { return false; }
+    if !hevc && (*params).codec_id != AV_CODEC_ID_AV1 { return (false, false); }
     let length_size = if hevc && (*params).extradata_size >= 23 && !(*params).extradata.is_null()
         && *(*params).extradata == 1 {
         Some((usize::from(*(*params).extradata.add(21)) & 3) + 1)
@@ -165,16 +189,29 @@ unsafe fn sample_hdr10plus(fmt: *mut AVFormatContext, index: c_int, params: *con
         None
     };
     let mut packet = av_packet_alloc();
-    if packet.is_null() { return false; }
+    if packet.is_null() { return (false, false); }
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
     let mut remaining = 4 * 1024 * 1024;
     let mut found = false;
+    let mut static_metadata = false;
     for _ in 0..48 {
         if remaining == 0 || std::time::Instant::now() >= deadline || av_read_frame(fmt, packet) < 0 { break; }
         let size = ((*packet).size.max(0) as usize).min(remaining);
         remaining -= size;
         if (*packet).stream_index == index {
             found = has_dynamic_side_data((*packet).side_data, (*packet).side_data_elems);
+            let (list, count) = ((*packet).side_data, (*packet).side_data_elems);
+            if !static_metadata && !list.is_null() && count > 0 {
+                static_metadata = std::slice::from_raw_parts(list, count as usize).iter().any(|data| {
+                    if data.data.is_null() { return false; }
+                    let bytes = std::slice::from_raw_parts(data.data, data.size);
+                    match data.type_ {
+                        AV_PKT_DATA_MASTERING_DISPLAY_METADATA => meaningful_mastering(crate::vp9_hdr::parse_mastering(bytes)),
+                        AV_PKT_DATA_CONTENT_LIGHT_LEVEL => meaningful_cll(crate::vp9_hdr::parse_cll(bytes)),
+                        _ => false,
+                    }
+                });
+            }
             if !found && hevc && size > 0 && !(*packet).data.is_null() {
                 found = hevc_hdr10plus(std::slice::from_raw_parts((*packet).data, size), length_size);
             }
@@ -183,7 +220,7 @@ unsafe fn sample_hdr10plus(fmt: *mut AVFormatContext, index: c_int, params: *con
         if found { break; }
     }
     av_packet_free(&mut packet);
-    found
+    (found, static_metadata)
 }
 
 fn hevc_hdr10plus(data: &[u8], length_size: Option<usize>) -> bool {
@@ -210,15 +247,17 @@ fn hevc_hdr10plus(data: &[u8], length_size: Option<usize>) -> bool {
 
 #[test]
 fn cineusb_video_range_requires_a_signal_and_preserves_the_dolby_base_layer() {
-    assert_eq!(video_range(None, 2, 2, false), None);
-    assert_eq!(video_range(None, 18, 9, false), Some(VideoRange::Hdr));
-    assert_eq!(video_range(None, 1, 1, false), Some(VideoRange::Sdr));
-    assert_eq!(video_range(None, 16, 9, false), Some(VideoRange::Hdr10));
-    assert_eq!(video_range(None, 16, 9, true), Some(VideoRange::Hdr10Plus));
+    assert_eq!(video_range(None, 2, 2, false, false), None);
+    assert_eq!(video_range(None, 2, 2, false, true), Some(VideoRange::Hdr));
+    assert_eq!(video_range(None, 18, 9, false, false), Some(VideoRange::Hdr));
+    assert_eq!(video_range(None, 1, 1, false, true), Some(VideoRange::Sdr));
+    assert_eq!(video_range(None, 16, 9, false, false), Some(VideoRange::Hdr10));
+    assert_eq!(video_range(None, 16, 2, false, true), Some(VideoRange::Hdr10));
+    assert_eq!(video_range(None, 2, 2, true, false), Some(VideoRange::Hdr10Plus));
     let mut record = parse_dovi_conf(&[1, 0, 8, 6, 1, 0, 1, 0, 0]).unwrap();
     record.dv_bl_signal_compatibility_id = 1;
-    assert_eq!(video_range(Some(record), 16, 9, false), Some(VideoRange::DolbyVisionHdr10));
+    assert_eq!(video_range(Some(record), 16, 9, false, false), Some(VideoRange::DolbyVisionHdr10));
     record.dv_profile = 5;
     record.dv_bl_signal_compatibility_id = 0;
-    assert_eq!(video_range(Some(record), 2, 2, false), Some(VideoRange::DolbyVision));
+    assert_eq!(video_range(Some(record), 2, 2, false, false), Some(VideoRange::DolbyVision));
 }

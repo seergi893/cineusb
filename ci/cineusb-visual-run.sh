@@ -61,10 +61,17 @@ for size in 0 1 2; do
         command_keys ck:1080,64
         shot 06-favoritos
     else
+        command_keys down
+        shot "continuar-preset-$size"
         command_keys ck:494,64
         shot "0$((6 + size))-peliculas-preset-$size"
         command_keys ck:870,64
         shot "1$size-documentales-preset-$size"
+        command_keys ck:680,64
+        shot "series-preset-$size"
+        command_keys ck:176,300
+        command_keys ck:176,300
+        shot "episodios-preset-$size"
     fi
     exec 3>&-
     kill "$simulator"

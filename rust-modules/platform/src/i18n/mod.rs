@@ -510,6 +510,7 @@ pub fn webos_release_line(info: &crate::tv::device::Info) -> String {
 static CURRENT: OnceLock<LocaleContext> = OnceLock::new();
 static USB_ES: OnceLock<LocaleContext> = OnceLock::new();
 static USB_CA: OnceLock<LocaleContext> = OnceLock::new();
+static USB_EN: OnceLock<LocaleContext> = OnceLock::new();
 static USB_LANGUAGE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 static SAVED_PREFERENCE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -598,6 +599,7 @@ pub fn current() -> &'static LocaleContext {
     let usb = match Preference::from_slot(USB_LANGUAGE.load(std::sync::atomic::Ordering::Acquire)) {
         Preference::Es => USB_ES.get(),
         Preference::Ca => USB_CA.get(),
+        Preference::En => USB_EN.get(),
         _ => None,
     };
     if let Some(cx) = usb { return cx; }
@@ -613,10 +615,11 @@ pub fn current() -> &'static LocaleContext {
     }
 }
 
-/// Apply CineUSB's two-language preference to its library and the shared playback menus.
+/// Apply CineUSB's language preference to its library and the shared playback menus.
 pub fn apply_usb_language(preference: Preference) {
     let (preference, slot) = match preference {
         Preference::Ca => (Preference::Ca, &USB_CA),
+        Preference::En => (Preference::En, &USB_EN),
         _ => (Preference::Es, &USB_ES),
     };
     let previous = current();

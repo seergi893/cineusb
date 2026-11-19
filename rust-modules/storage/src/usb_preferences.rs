@@ -11,7 +11,7 @@ fn invalid() -> io::Error {
 }
 
 fn record(language: &str, forced: &str, audio: &str) -> io::Result<String> {
-    if !matches!(language, "es" | "ca") || !matches!(forced, "0" | "1") || !matches!(audio, "0" | "1") {
+    if !matches!(language, "es" | "ca" | "en") || !matches!(forced, "0" | "1") || !matches!(audio, "0" | "1") {
         return Err(invalid());
     }
     Ok(format!("{language} {forced} {audio}"))
@@ -291,6 +291,7 @@ mod tests {
         assert!(validate_extended("ca 1 0 1 2 1 2 0 1 3").is_err());
         assert!(validate_extended("ca 1 0 1 3 0 0").is_err());
         assert!(record("ca", "yes", "0").is_err());
+        assert_eq!(record("en", "0", "1").unwrap(), "en 0 1");
         assert!(record("../es", "0", "0").is_err());
         fs::remove_dir_all(root).unwrap();
     }

@@ -24,7 +24,6 @@ pub(super) struct Summary {
     resolution: Agreement<&'static str>,
     video: Agreement<&'static str>,
     audio: [Agreement<&'static str>; 2],
-    channels: [Agreement<u8>; 2],
 }
 
 struct Agreement<T> {
@@ -54,8 +53,7 @@ impl<T: Copy + Eq> Agreement<T> {
 impl Summary {
     pub(super) fn new(listing: Listing) -> Self {
         Self { listing, watched: 0, next: 0, resolution: Agreement::new(), video: Agreement::new(),
-            audio: std::array::from_fn(|_| Agreement::new()),
-            channels: std::array::from_fn(|_| Agreement::new()) }
+            audio: std::array::from_fn(|_| Agreement::new()) }
     }
 
     /// Each file contributes once. Returning to a tab consumes the shared details cache.
@@ -67,7 +65,6 @@ impl Summary {
             self.video.add(normal.video);
             for (index, format) in [normal, Formats::file(details, true)].into_iter().enumerate() {
                 self.audio[index].add(format.audio);
-                self.channels[index].add(format.channels);
             }
             self.next += 1;
         }
@@ -81,7 +78,6 @@ impl Summary {
             resolution: if self.resolution.mixed { Some("4K UHD / 1080p") } else { self.resolution.common(complete) },
             video: self.video.common(complete),
             audio: audio.common(complete),
-            channels: audio.common(complete).and_then(|_| self.channels[usize::from(spanish)].common(complete)),
             mixed: self.video.mixed || audio.mixed,
         }
     }
@@ -194,7 +190,6 @@ mod usb_browser_tests {
         assert!(automatic.mixed && automatic.video.is_none() && automatic.audio.is_none());
         let spanish = summary.formats(true);
         assert_eq!(spanish.audio, Some("Dolby Digital"));
-        assert_eq!(spanish.channels, Some(2));
     }
 
     #[test]

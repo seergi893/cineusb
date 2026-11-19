@@ -178,19 +178,8 @@ pub(super) fn sort_entries_by(entries: &mut [Entry], order: usize) {
         1 => b.modified.cmp(&a.modified),
         2 => b.size.cmp(&a.size),
         _ => std::cmp::Ordering::Equal,
-    }).then_with(|| {
-        if order == 0 && a.kind == Kind::Video && b.kind == Kind::Video {
-            let (left, left_episode) = episode_order_key(&a.name);
-            let (right, right_episode) = episode_order_key(&b.name);
-            natural(left, right).then_with(|| left_episode.cmp(&right_episode))
-        } else { std::cmp::Ordering::Equal }
     }).then_with(|| natural(a.name.as_encoded_bytes(), b.name.as_encoded_bytes()))
       .then_with(|| a.name.cmp(&b.name)));
-}
-
-fn episode_order_key(name: &OsStr) -> (&[u8], Option<(u32, u32)>) {
-    super::continuity::episode(name).map_or((name.as_encoded_bytes(), None),
-        |(title, season, episode)| (title, Some((season, episode))))
 }
 
 pub(super) fn resort(entries: &mut [Entry], selected: usize, order: usize) -> usize {

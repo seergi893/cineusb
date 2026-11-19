@@ -17,14 +17,16 @@ cp "$temp/hdr.mkv" "$CINEUSB_SIM_ROOT/Movies/La Odisea - 2026 - BDremux 4K UHD -
 cp "$temp/hd.mkv" "$CINEUSB_SIM_ROOT/Movies/Blade.Runner.2049.1080p.WEB-DL.mkv"
 cp "$temp/hd.mkv" "$CINEUSB_SIM_ROOT/Movies/El señor de los anillos El retorno del rey - 2003 - 1080p.mkv"
 cp "$temp/hd.mkv" "$CINEUSB_SIM_ROOT/Series/Narcos.Mexico.2018.1080p.WEB-DL/Season 3/Narcos S03E06 - Una noche.mkv"
-cp "$temp/hd.mkv" "$CINEUSB_SIM_ROOT/Series/Narcos.Mexico.2018.1080p.WEB-DL/Season 3/Narcos 3x07 - El camino.mkv"
+cp "$temp/hd.mkv" "$CINEUSB_SIM_ROOT/Series/Narcos.Mexico.2018.1080p.WEB-DL/Season 3/Narcos S03E07 - El camino.mkv"
+cp "$temp/hd.mkv" "$CINEUSB_SIM_ROOT/Series/Narcos.Mexico.2018.1080p.WEB-DL/Season 3/Narcos S03E08 - Una historia con un título muy largo.mkv"
 cp "$temp/uhd.mkv" "$CINEUSB_SIM_ROOT/Documentals/Planeta Tierra II - 4K UHD.mkv"
 cp "$temp/uhd.mkv" "$CINEUSB_SIM_ROOT/Documentals/Nuestro.Planeta.2019.1080p/Season 2/Nuestro Planeta 2x01 - Océanos.mkv"
 cp "$temp/hd.mkv" "$CINEUSB_SIM_ROOT/Documentals/Nuestro.Planeta.2019.1080p/Season 2/Nuestro Planeta 2x02 - Bosques.mkv"
+languages=(es ca en)
 for size in 0 1 2; do
     export runtime="$temp/card-runtime-$size"
     mkdir -p "$runtime"
-    printf 'es 0 0 1 0 %s 0 0 0 0 1 0' "$size" > "$runtime/cineusb-settings"
+    printf '%s 0 0 1 0 %s 0 0 0 0 1 0' "${languages[size]}" "$size" > "$runtime/cineusb-settings"
     python3 - <<'PY'
 import os
 from pathlib import Path
