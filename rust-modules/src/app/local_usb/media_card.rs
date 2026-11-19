@@ -314,7 +314,7 @@ impl Art {
     }
 
     fn draw_formats(&self, p: Painter, rect: Rect, formats: Formats, compact: bool, color: [f32; 4]) -> f32 {
-        let mixed = formats.mixed.then(|| local(i18n::current().language(), "Mixtos", "Mixtos", "Mixed"));
+        let mixed = formats.mixed.then(|| local(i18n::current().language(), "Mixtos", "Mixts", "Mixed"));
         let labels = [formats.resolution, formats.video, formats.audio, mixed];
         let mut logos = self.logos.borrow_mut();
         if !p.is_recording() {
@@ -325,13 +325,16 @@ impl Art {
         let size = if compact { theme::size::USB_CARD_META } else { theme::size::DIAGNOSTIC };
         let height = if compact { 13.0 } else { 17.0 };
         let width = |index: usize, size, height| labels[index].map_or(0.0, |label| mark_width(label, logos[index], size, height) + 10.0);
-        let total = |size, height| {
-            let widths: [f32; 4] = std::array::from_fn(|index| width(index, size, height));
-            format_row_width(&widths, gap)
+        let rows = |size, height| {
+            let widths = (0..labels.len()).map(|index| width(index, size, height));
+            format_rows(widths, gap, rect.w)
         };
-        let (size, height) = if total(size, height) > rect.w {
-            (theme::size::USB_CARD_META, 11.0)
-        } else { (size, height) };
+        let (size, height) = match rows(size, height) {
+            0 | 1 => (size, height),
+            _ if compact && rows(theme::size::USB_CARD_META, 11.0) > 2 =>
+                (theme::size::USB_CARD_META_TIGHT, 9.0),
+            _ => (theme::size::USB_CARD_META, 11.0),
+        };
         let mut row = Flow::new(rect.x, gap);
         let mut y = rect.y;
         for (index, (label, logo)) in labels.iter().zip(&logos).enumerate() {
@@ -414,9 +417,18 @@ fn footer_text<'a>(measure: &dyn Measure, full: &'a str, short: &'a str, width: 
         .unwrap_or((short, smallest))
 }
 
-fn format_row_width(widths: &[f32], gap: f32) -> f32 {
-    let present = widths.iter().filter(|&&width| width > 0.0);
-    present.clone().sum::<f32>() + present.count().saturating_sub(1) as f32 * gap
+fn format_rows(widths: impl Iterator<Item = f32>, gap: f32, available: f32) -> usize {
+    let mut rows = 0;
+    let mut x = 0.0;
+    for width in widths.filter(|&width| width > 0.0) {
+        if rows == 0 || x + gap + width > available {
+            rows += 1;
+            x = width.min(available);
+        } else {
+            x += gap + width;
+        }
+    }
+    rows
 }
 
 fn mark_width(label: &str, logo: Option<&FormatLogo>, size: i32, logo_height: f32) -> f32 {
@@ -464,6 +476,12 @@ mod usb_browser_tests {
             let text = series_footer_copy(&full, &measure, layout.footer.w);
             assert!(series_footer(&text, &measure).measure_h(layout.footer.w) <= layout.footer.h);
         }
+    }
+
+    #[test]
+    fn compact_format_capsules_pack_without_overlapping_the_art() {
+        assert_eq!(format_rows([65.0, 84.0, 108.0].into_iter(), 5.0, 139.0), 3);
+        assert_eq!(format_rows([56.0, 71.0, 96.0].into_iter(), 5.0, 139.0), 2);
     }
 
     #[test]
