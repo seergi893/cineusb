@@ -197,6 +197,16 @@ fn episode_header(mut title: Rect, title_w: f32, title_h: f32, badge_w: f32, bad
 }
 
 impl Layout {
+    fn art_below_formats(&self, formats_bottom: f32) -> Rect {
+        if formats_bottom + 5.0 <= self.art.y { return self.art; }
+        let top = formats_bottom + 5.0;
+        let available_h = (self.progress.y - 6.0 - top).max(0.0);
+        let height = self.art.h.min(available_h);
+        let width = height * 200.0 / 172.0;
+        Rect::new(self.art.x + (self.art.w - width) / 2.0,
+            top + (available_h - height) / 2.0, width, height)
+    }
+
     fn new(rect: Rect, wide: bool, episode: bool, favorite: bool, series: bool) -> Self {
         let compact = !wide && rect.w < 195.0;
         let inset = if wide { 22.0 } else { (rect.w * 0.057).round() };
@@ -246,7 +256,6 @@ impl Art {
         p.rect_sheened(rect, radius, top, bottom);
         p.rring(rect, radius, 1.0, theme::with_a(color, 0.30));
 
-        self.draw_illustration(p, card.category, layout.art);
         let title = TextView::new(card.title, layout.title_size, theme::TEXT_PRIMARY).with_measure(&TtfMeasure)
             .bold().break_long_words().max_lines(2).leading(layout.leading);
         let mut title_rect = layout.title;
@@ -269,11 +278,14 @@ impl Art {
             super::draw_glyph(p, super::Glyph::Star(true),
                 Rect::new(layout.title.x + layout.title.w + 4.0, layout.title.y + 1.0, 18.0, 18.0), theme::USB_FAVORITES);
         }
+        let mut art = layout.art;
         if !episode {
             let y = layout.title.y + header_h + 5.0;
-            self.draw_formats(p, Rect::new(layout.title.x, y, layout.formats_w, if wide { 24.0 } else { 23.0 }),
+            let format_bottom = self.draw_formats(p, Rect::new(layout.title.x, y, layout.formats_w, if wide { 24.0 } else { 23.0 }),
                 card.formats, layout.compact, color);
+            if !wide { art = layout.art_below_formats(format_bottom); }
         }
+        if art.h > 0.0 { self.draw_illustration(p, card.category, art); }
 
         let bar = layout.progress;
         p.rrect(bar, bar.h * 0.5, bar.h * 0.5, theme::with_a(theme::TEXT_PRIMARY, 0.19));
@@ -301,7 +313,7 @@ impl Art {
         p.rring(rect, 7.0, 1.0, theme::with_a(color, 0.40));
     }
 
-    fn draw_formats(&self, p: Painter, rect: Rect, formats: Formats, compact: bool, color: [f32; 4]) {
+    fn draw_formats(&self, p: Painter, rect: Rect, formats: Formats, compact: bool, color: [f32; 4]) -> f32 {
         let mixed = formats.mixed.then(|| local(i18n::current().language(), "Mixtos", "Mixtos", "Mixed"));
         let labels = [formats.resolution, formats.video, formats.audio, mixed];
         let mut logos = self.logos.borrow_mut();
@@ -313,30 +325,29 @@ impl Art {
         let size = if compact { theme::size::USB_CARD_META } else { theme::size::DIAGNOSTIC };
         let height = if compact { 13.0 } else { 17.0 };
         let width = |index: usize, size, height| labels[index].map_or(0.0, |label| mark_width(label, logos[index], size, height) + 10.0);
-        let total = |count: usize, size, height| {
+        let total = |size, height| {
             let widths: [f32; 4] = std::array::from_fn(|index| width(index, size, height));
-            format_row_width(&widths[..count], gap)
+            format_row_width(&widths, gap)
         };
-        let mandatory = labels.len();
-        let (size, height) = if total(mandatory, size, height) > rect.w {
+        let (size, height) = if total(size, height) > rect.w {
             (theme::size::USB_CARD_META, 11.0)
         } else { (size, height) };
         let mut row = Flow::new(rect.x, gap);
         let mut y = rect.y;
         for (index, (label, logo)) in labels.iter().zip(&logos).enumerate() {
             let Some(label) = *label else { continue };
-            let available = rect.x + rect.w - row.next_x();
             let mut font = size;
             let mut mark = width(index, size, height);
-            if mark > available {
-                row = Flow::new(rect.x, gap);
-                y += rect.h + 2.0;
-            }
             if mark > rect.w && logo.is_none() {
                 font = theme::size::USB_CARD_META_TIGHT;
                 mark = width(index, font, height);
             }
-            let Some(span) = row.push(Item::new(mark.min(rect.w))) else { continue; };
+            let mark = mark.min(rect.w);
+            if row.next_x() > rect.x && row.next_x() + mark > rect.x + rect.w {
+                row = Flow::new(rect.x, gap);
+                y += rect.h + 2.0;
+            }
+            let Some(span) = row.push(Item::new(mark)) else { continue; };
             let slot = Rect::new(span.x, y, span.w, rect.h);
             Self::capsule(p, slot, color);
             let slot = Rect::new(slot.x + 5.0, slot.y, slot.w - 10.0, slot.h);
@@ -347,6 +358,7 @@ impl Art {
                 Label::new(run.as_ptr(), font, theme::TEXT_SECONDARY).bold().draw(p, slot);
             }
         }
+        if row.next_x() > rect.x { y + rect.h } else { rect.y }
     }
 
     fn draw_footer(p: Painter, footer: Rect, card: &Card<'_>, color: [f32; 4], wide: bool) {
@@ -426,6 +438,9 @@ mod usb_browser_tests {
                 assert!(layout.art.y + layout.art.h < layout.progress.y);
                 assert!(layout.progress.y + layout.progress.h < layout.footer.y);
                 assert!(layout.footer.y + layout.footer.h < rect.y + rect.h);
+                let three_rows = layout.title.y + layout.title.h + 5.0 + 3.0 * 23.0 + 4.0;
+                let art = layout.art_below_formats(three_rows);
+                assert!(art.y >= three_rows + 5.0 && art.y + art.h < layout.progress.y);
             }
         }
         let wide = Layout::new(Rect::new(80.0, 600.0, 564.0, 210.0), true, false, true, false);
