@@ -861,7 +861,12 @@ impl HudDriver {
         let language = env.cx.language().tag();
         if self.language != Some(language) {
             if self.language.is_some() {
-                self.classic = Some(plx_appkit::player_hud::loaded::load_classic(env.app_version, env.cx, env.measure));
+                let load = if cfg!(feature = "local-usb") {
+                    plx_appkit::player_hud::loaded::load_cineusb
+                } else {
+                    plx_appkit::player_hud::loaded::load_classic
+                };
+                self.classic = Some(load(env.app_version, env.cx, env.measure));
             }
             self.language = Some(language);
             // A pack staged in the last language was fitted and priced in it: it starts again at the fit in this one, and is

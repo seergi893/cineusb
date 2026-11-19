@@ -101,6 +101,46 @@ pub fn source_aspect(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((u32::try_from(num / a).ok()?, u32::try_from(den / a).ok()?))
 }
 
+fn video_format(b: &[u8]) -> Option<u8> {
+    use plx_playback_contract::feed::VideoFormat;
+    let root: serde_json::Value = serde_json::from_slice(b).ok()?;
+    let video = root.get("video")?;
+    let hdr = video.get("hdrType")?.as_str()?;
+    let format = match hdr {
+        "DolbyVision" | "Dolby Vision" => VideoFormat::DolbyVision,
+        "HDR10+" | "HDR10Plus" => VideoFormat::Hdr10Plus,
+        "HDR10" => VideoFormat::Hdr10,
+        "HDR" | "HLG" => VideoFormat::Hdr,
+        "SDR" => VideoFormat::Sdr,
+        "none" => {
+            let transfer = video.get("mediaVui")?.get("transferCharacteristics")?.as_u64()?;
+            match transfer {
+                1 | 4..=7 | 11..=15 => VideoFormat::Sdr,
+                16 | 18 => VideoFormat::Hdr,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some(format as u8)
+}
+
+#[test]
+fn cineusb_hud_range_comes_from_the_pipeline_video_object() {
+    use plx_playback_contract::feed::VideoFormat;
+    for (value, expected) in [
+        (br#"{"video":{"hdrType":"DolbyVision"}}"#.as_slice(), VideoFormat::DolbyVision),
+        (br#"{"video":{"hdrType":"HDR10+"}}"#.as_slice(), VideoFormat::Hdr10Plus),
+        (br#"{"video":{"hdrType":"HDR10"}}"#.as_slice(), VideoFormat::Hdr10),
+        (br#"{"video":{"hdrType":"none","mediaVui":{"transferCharacteristics":1}}}"#.as_slice(), VideoFormat::Sdr),
+        (br#"{"video":{"hdrType":"none","mediaVui":{"transferCharacteristics":18}}}"#.as_slice(), VideoFormat::Hdr),
+    ] {
+        assert_eq!(video_format(value), Some(expected as u8));
+    }
+    assert_eq!(video_format(br#"{"hdrType":"DolbyVision"}"#), None);
+    assert_eq!(video_format(br#"{"video":{"hdrType":"none"}}"#), None);
+}
+
 /// What the pipeline said it set up for a speed session's audio, from its audio-info callback
 /// (`audio/x-raw … <kHz> <channels> …`). 48 kHz stereo is what the payload declared; anything
 /// else means the declaration was not understood — measured: `"sampleRate":48000` came back as
@@ -360,7 +400,14 @@ pub fn sf_on_event_inner(ty: c_int, num: i64, s: *const c_char, scope: shared::E
         FEED_SHARED.video_fps_milli.store(fps_milli, Relaxed);
     }
     note_speed_audio_report(b);
+    if let Some(report) = b.strip_prefix(b"audio/x-raw ") {
+        let channels = std::str::from_utf8(report).ok()
+            .and_then(|report| report.split_whitespace().nth(3))
+            .and_then(|channels| channels.parse::<u8>().ok()).filter(|&n| (1..=32).contains(&n));
+        FEED_SHARED.dg_decoded_audio_channels.store(channels.unwrap_or(0), Relaxed);
+    }
     if find(b, b"\"video\"") {
+        if let Some(format) = video_format(b) { FEED_SHARED.dg_video_format.store(format, Relaxed); }
         if let Some((num, den)) = source_aspect(b) {
             FEED_SHARED.publish_video_aspect(num, den);
         }

@@ -98,6 +98,8 @@ SAME32(offsetof(AVFormatContext, nb_streams), 24, "AVFormatContext.nb_streams mo
 SAME64(offsetof(AVFormatContext, nb_streams), 44, "AVFormatContext.nb_streams moved [host]");
 SAME32(offsetof(AVFormatContext, streams), 28, "AVFormatContext.streams moved");
 SAME64(offsetof(AVFormatContext, streams), 48, "AVFormatContext.streams moved [host]");
+SAME32(offsetof(AVFormatContext, metadata), 144, "local container metadata offset [ARM]");
+SAME64(offsetof(AVFormatContext, metadata), 192, "local container metadata offset [host]");
 SAME32(offsetof(AVFormatContext, duration), 64, "OFF_FMT_DURATION != 64");
 SAME64(offsetof(AVFormatContext, duration), 104, "OFF_FMT_DURATION != 64 [host]");
 /* start_time is the int64 right before duration: how a transport stream's clock is rebased to 0. */

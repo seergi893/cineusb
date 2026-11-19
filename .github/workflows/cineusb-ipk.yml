@@ -133,7 +133,7 @@ jobs:
           # Appkit's own test harness enables its diagnostic probes. Run it alone
           # so Cargo cannot unify those features into the release-shaped app test.
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" test --locked -p plx_appkit --lib \
-            --features plx_media/hostsim,plx_gfx/hostsim cineusb_finish_label
+            --features plx_media/hostsim,plx_gfx/hostsim cineusb_
       - name: Test the platform USB interface
         run: |
           cd rust-modules

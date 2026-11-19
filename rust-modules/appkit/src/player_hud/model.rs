@@ -30,6 +30,14 @@ pub struct FinishClock {
     pub remaining: &'static str,
 }
 
+/// Formats known at the app-to-pipeline boundary, independent of HDMI output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LocalFormats {
+    pub video: Option<&'static str>,
+    pub audio: Option<&'static str>,
+    pub channels: Option<&'static str>,
+}
+
 /// The HUD's presentation and automatic-skip inputs, sampled once for the frame from the owned
 /// attempt readout and viewer controls. The doc comment of each field names its source in
 /// `src/app/run.rs`.
@@ -39,6 +47,7 @@ pub struct HudModel {
     /// title's reveal and the playbar's state mark.
     pub paused: bool,
     pub finish_clock: Option<FinishClock>,
+    pub local_formats: Option<LocalFormats>,
     pub marker_prefs: crate::skip_policy::MarkerPrefsView,
     pub playback_id: u32,
     pub advancing: bool,
@@ -102,6 +111,7 @@ impl Default for HudModel {
         Self {
             paused: false,
             finish_clock: None,
+            local_formats: None,
             marker_prefs: Default::default(), playback_id: 0, advancing: false, seeking: false, covered: false, skip_progress: None,
             is_episode: false,
             scrub_ns: -1,

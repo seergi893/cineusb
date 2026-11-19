@@ -83,6 +83,60 @@ pub fn load_classic(app_version: &str, cx: &LocaleContext, measure: &dyn Measure
     load(crate::hud_format::CLASSIC_PACKAGE, app_version, cx, measure).expect("the embedded builtin:classic parses")
 }
 
+/// Compile the classic transport without an Info opener or panel for CineUSB.
+pub fn load_cineusb(app_version: &str, cx: &LocaleContext, measure: &dyn Measure) -> LoadedHud {
+    use crate::hud_format::parse::{Cond, CondTerm, Object, Val};
+
+    fn strip_info(object: &mut Object) {
+        if object.get("id").and_then(Val::as_str) == Some("tabs") && object.get("cells").is_some() {
+            object.fields.push(("when".into(), Val::Cond(Cond {
+                terms: vec![CondTerm { negated: false, name: "chapters.present".into() }],
+            })));
+        }
+        for (_, value) in &mut object.fields {
+            match value {
+                Val::List(items) => {
+                    items.retain(|value| value.as_object().is_none_or(|item| {
+                        let is_panel = item.get("id").and_then(Val::as_str) == Some("info");
+                        let is_opener = item.get("command").and_then(Val::as_str) == Some("toggle_section")
+                            && item.get("section").and_then(Val::as_str) == Some("info");
+                        !is_panel && !is_opener
+                    }));
+                    for item in items {
+                        if let Val::Object(item) = item { strip_info(item); }
+                    }
+                }
+                Val::Object(child) => strip_info(child),
+                _ => {}
+            }
+        }
+    }
+    let decoded = bundle::read(crate::hud_format::CLASSIC_PACKAGE, None);
+    let package = decoded.package.expect("the embedded builtin:classic parses");
+    let mut classic = package.hud().clone();
+    strip_info(&mut classic.layout);
+    let language = cx.language();
+    LoadedHud {
+        key: CompileKey { sha256: package.sha256(), app_version: app_version.to_owned(), lang: language.tag().to_owned() },
+        language,
+        compiled: Arc::new(compile(&classic, measure, CompileCtx { labels: AppLabels::in_language(cx) })),
+    }
+}
+
+#[test]
+fn cineusb_hud_has_no_info_tab_stop_or_reserved_band() {
+    use crate::hud_format::{compile::OPEN_INFO, reach::Slot};
+    let loaded = load_cineusb("test", plx_platform::i18n::english(), &plx_base::fontcov::advances::ShippedMeasure);
+    assert!(answers_every_frame(&loaded.compiled));
+    for chapters in [false, true] {
+        let state = loaded.compiled.lookup(0, Slot::Discs, chapters, false, false).unwrap();
+        assert!(state.controls.iter().all(|control| control.id != "tab_info"));
+        assert!(state.controls.iter().any(|control| control.id == "more"));
+        assert_eq!(state.bands.iter().any(|(id, _)| id == "tabs"), chapters);
+        assert!(loaded.compiled.lookup(OPEN_INFO, Slot::Discs, chapters, false, false).is_none());
+    }
+}
+
 /// **`builtin:classic` for a test that builds a player page**: English on the fixture advances
 /// (`FixtureMeasure`, the measurer every host rig lays out with), compiled once per call, outside any frame.
 /// The ONE helper a test builder takes its `PlayerScreen::new` argument from.

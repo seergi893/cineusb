@@ -599,6 +599,8 @@ pub struct Shared {
     /// "there is no sound": the pipeline was never asked for any.
     pub dg_load_v: AtomicU8,
     pub dg_load_a: AtomicU8,
+    pub dg_video_format: AtomicU8,
+    pub dg_decoded_audio_channels: AtomicU8,
     pub dg_dts_pcm: Mutex<Option<plx_playback_contract::feed::DtsPcmDiag>>,
     pub dg_dts_ac3: AtomicBool,
     /// Auto-quality facts written by the demux worker and read through `FeedRaw::abr`.
@@ -685,6 +687,8 @@ impl Shared {
             dg_fed_a_pts: AtomicI64::new(0),
             dg_load_v: AtomicU8::new(0),
             dg_load_a: AtomicU8::new(0),
+            dg_video_format: AtomicU8::new(0),
+            dg_decoded_audio_channels: AtomicU8::new(0),
             dg_dts_pcm: Mutex::new(None),
             dg_dts_ac3: AtomicBool::new(false),
             dg_abr_mode: AtomicU8::new(0),
@@ -1039,6 +1043,8 @@ impl Shared {
         self.dg_fed_a_pts.store(0, Ordering::Relaxed);
         self.dg_load_v.store(0, Ordering::Relaxed);
         self.dg_load_a.store(0, Ordering::Relaxed);
+        self.dg_video_format.store(0, Ordering::Relaxed);
+        self.dg_decoded_audio_channels.store(0, Ordering::Relaxed);
         *self.dg_dts_pcm.lock().unwrap() = None;
         self.dg_dts_ac3.store(false, Ordering::Relaxed);
         self.dg_abr_mode.store(0, Ordering::Relaxed);

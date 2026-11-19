@@ -727,10 +727,148 @@ impl TitleLine {
     }
 }
 
+type FittedRun = (std::rc::Rc<std::ffi::CStr>, f32);
+
+pub(super) const FORMAT_LOGOS: [(&str, &[u8]); 5] = [
+    ("Dolby Vision", include_bytes!("art/dolby-vision.png")),
+    ("HDR10+", include_bytes!("art/hdr10-plus.png")),
+    ("Dolby Digital", include_bytes!("art/dolby-digital.png")),
+    ("Dolby Digital Plus", include_bytes!("art/dolby-digital-plus.png")),
+    ("DTS", include_bytes!("art/dts.png")),
+];
+
+pub(super) struct FormatLogo {
+    texture: u32,
+    aspect: f32,
+}
+
+impl FormatLogo {
+    fn load(data: &[u8]) -> Option<Self> {
+        let (width, height, pixels) = plx_gfx::img::img_decode_owned(data)?;
+        let texture = plx_gfx::gfx::upload_rgba(0, width as i32, height as i32, pixels.as_ptr());
+        (texture != 0).then_some(Self { texture, aspect: width as f32 / height as f32 })
+    }
+}
+
+impl Drop for FormatLogo {
+    fn drop(&mut self) {
+        plx_gfx::gfx::delete_tex(self.texture);
+    }
+}
+
+/// Measure a single title row within the HUD compiler's title cell.
+fn fit_local_title(line: TitleLine, title: &str, formats: super::model::LocalFormats,
+    logo_widths: [Option<f32>; 2], measure: &dyn plx_machine::machine::Measure)
+    -> (i32, FittedRun, [Option<FittedRun>; 3]) {
+    let gap = plx_ui::theme::space::SM;
+    let badge_size = plx_ui::theme::size::CAPTION;
+    let mut badges = [formats.video, formats.audio, formats.channels].map(|value|
+        value.map(|text| measure.fit_line_measured(text, line.rect.w, badge_size, false)));
+    for (badge, logo_width) in badges.iter_mut().zip(logo_widths) {
+        if let (Some((_, width)), Some(logo_width)) = (badge, logo_width) {
+            *width = logo_width;
+        }
+    }
+    let reserved = |items: &[Option<FittedRun>]| items.iter().flatten().map(|(_, w)| w + gap).sum::<f32>();
+    let min_size = line.size.min(plx_ui::theme::size::HEADLINE);
+    let title_floor = min_size as f32 * 3.0;
+    if line.rect.w - reserved(&badges) < title_floor { badges[2] = None; }
+    // Extremely narrow custom HUD cells still draw a title safely.
+    if line.rect.w - reserved(&badges) < title_floor { badges[1] = None; }
+    if line.rect.w - reserved(&badges) < title_floor { badges[0] = None; }
+    let budget = (line.rect.w - reserved(&badges)).max(0.0);
+    let mut size = line.size;
+    let mut fitted = measure.fit_line_measured(title, budget, size, line.bold);
+    for smaller in [plx_ui::theme::size::TITLE, min_size] {
+        if fitted.0.to_bytes() == title.as_bytes() || smaller >= size { continue; }
+        size = smaller;
+        fitted = measure.fit_line_measured(title, budget, size, line.bold);
+    }
+    (size, fitted, badges)
+}
+
+fn local_title_line(q: Painter, line: TitleLine, title: &str, formats: super::model::LocalFormats,
+    logos: [Option<&FormatLogo>; 2], measure: &dyn plx_machine::machine::Measure) {
+    let logo_height = (plx_ui::theme::size::CAPTION as f32 * 0.76).min(line.rect.h);
+    let logo_widths = logos.map(|logo| logo.map(|logo| logo_height * logo.aspect));
+    let (size, fitted, badges) = fit_local_title(line, title, formats, logo_widths, measure);
+    let gap = plx_ui::theme::space::SM;
+    let badge_size = plx_ui::theme::size::CAPTION;
+    let mut x = line.rect.x;
+    let frame = |x, width| Rect::new(x, line.rect.y, width, line.rect.h);
+    let label = plx_ui::label::Label::new(fitted.0.as_ptr(), size, line.ink);
+    let label = if line.bold { label.bold() } else { label };
+    label.draw(q, frame(x, fitted.1));
+    x += fitted.1;
+    for (index, badge) in badges.iter().enumerate() {
+        let Some((run, width)) = badge else { continue };
+        x += gap;
+        if let Some(logo) = logos.get(index).copied().flatten() {
+            let y = line.rect.y + (line.rect.h - logo_height) * 0.5;
+            q.tex(logo.texture, Rect::new(x, y, *width, logo_height), 0.0,
+                [1.0, 1.0, 1.0, line.ink[3]]);
+            x += *width;
+            continue;
+        }
+        let mut ink = plx_ui::theme::TEXT_SECONDARY;
+        ink[3] *= line.ink[3];
+        plx_ui::label::Label::new(run.as_ptr(), badge_size, ink).draw(q, frame(x, *width));
+        x += *width;
+    }
+}
+
+#[test]
+fn cineusb_format_art_decodes_with_transparency() {
+    for (name, data) in FORMAT_LOGOS {
+        let (width, height, pixels) = plx_gfx::img::img_decode_owned(data).expect(name);
+        assert!(width > height && height >= 64, "{name}");
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 0), "{name}");
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 255), "{name}");
+    }
+}
+
+#[test]
+fn cineusb_title_fits_beside_format_labels_on_one_line() {
+    use super::model::LocalFormats;
+    let measure = plx_base::fontcov::advances::ShippedMeasure;
+    let title = "El señor de los anillos: El retorno del rey";
+    let formats = LocalFormats { video: Some("Dolby Vision"), audio: Some("Dolby Digital Plus"), channels: Some("5.1") };
+    let mut line = TitleLine { rect: Rect::new(96.0, 770.0, 1200.0, 54.0),
+        size: 48, bold: true, ink: plx_ui::theme::TEXT_PRIMARY, max_lines: 1, leading: 54.0 };
+    let (size, short, labels) = fit_local_title(line, "Avatar", formats, [Some(125.0), Some(88.0)], &measure);
+    assert_eq!(size, line.size);
+    assert_eq!(short.0.to_bytes(), b"Avatar");
+    assert!(labels.iter().all(Option::is_some));
+    assert_eq!(labels[0].as_ref().unwrap().1, 125.0);
+
+    line.rect.w = 540.0;
+    let (size, long, labels) = fit_local_title(line, title, formats, [Some(125.0), Some(88.0)], &measure);
+    let width = long.1 + labels.iter().flatten().map(|(_, w)| w + plx_ui::theme::space::SM).sum::<f32>();
+    assert!(width <= line.rect.w + 0.1);
+    assert!(size >= plx_ui::theme::size::HEADLINE && size < line.size);
+    assert!(long.0.to_string_lossy().ends_with('…'));
+    assert!(labels[0].is_some() && labels[1].is_some());
+}
+
 /// The title pair, in the cell the compile placed it: the kicker's rect and size, and the main line's. The
 /// main line's right edge is the bound both lines fit before (the `w: fill` cell's, golden-pinned for classic in
 /// `classic-title-right.golden.tsv`).
 fn draw_title(f: &Frame<'_>, row: &mut HudMotion, q: Painter, kicker: Option<TitleLine>, main: Option<TitleLine>) {
+    if let Some(formats) = f.model.local_formats {
+        if let Some(line) = kicker { line.draw(q, "USB", f.measure); }
+        if let Some(line) = main {
+            let title = unsafe { std::ffi::CStr::from_ptr(plx_media::route::title_cptr(f.ps)) };
+            let indices = [formats.video, formats.audio].map(|label|
+                FORMAT_LOGOS.iter().position(|(name, _)| Some(*name) == label));
+            for index in indices.into_iter().flatten() {
+                row.format_logos[index].get_or_insert_with(|| FormatLogo::load(FORMAT_LOGOS[index].1));
+            }
+            let logos = indices.map(|index| index.and_then(|i| row.format_logos[i].as_ref()?.as_ref()));
+            local_title_line(q, line, &title.to_string_lossy(), formats, logos, f.measure);
+        }
+        row.reset_title();
+        return;
+    }
     let separate = main.is_none_or(|main| main.max_lines > 1 || kicker.is_some_and(|k| k.max_lines > 1 || k.rect.x != main.rect.x || k.rect.w != main.rect.w));
     if separate {
         let words = |ptr: *const std::os::raw::c_char| if ptr.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().into_owned() };

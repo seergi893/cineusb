@@ -186,6 +186,10 @@ unsafe fn stream_language(s: *mut AVStream) -> Option<String> {
 /// points into the stream's dictionary, which `avformat_close_input` frees.
 unsafe fn stream_tag(s: *mut AVStream, key: &std::ffi::CStr) -> Option<String> {
     let dict = *((s as *const u8).add(OFF_STREAM_METADATA) as *const *const AVDictionary);
+    dictionary_tag(dict, key)
+}
+
+unsafe fn dictionary_tag(dict: *const AVDictionary, key: &std::ffi::CStr) -> Option<String> {
     if dict.is_null() {
         return None;
     }
@@ -436,6 +440,7 @@ pub const SEEK_END: c_int = 2;
 pub const AVSEEK_SIZE: c_int = 0x10000;
 
 pub struct LocalMedia {
+    pub title: Option<String>,
     pub duration_secs: Option<u64>,
     pub video: String,
     pub audio: String,
@@ -634,7 +639,14 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext, spanish: bool) -> Result
             (track.index, track.codec.clone(), track.channels, track.rate, track.depth, track.language.clone(), track.title.clone())
         });
     let rate = (*video).framerate;
+    // Offsets are pinned against the bundled AVFormatContext in ci/ffabi-assert.c.
+    #[cfg(target_pointer_width = "32")]
+    const METADATA_OFFSET: usize = 144;
+    #[cfg(target_pointer_width = "64")]
+    const METADATA_OFFSET: usize = 192;
+    let dict = *fmt.cast::<u8>().add(METADATA_OFFSET).cast::<*const AVDictionary>();
     Ok(LocalMedia {
+        title: dictionary_tag(dict, c"title"),
         duration_secs: u64::try_from(fmt_duration(fmt)).ok().filter(|value| *value > 0).map(|value| value / 1_000_000),
         video: codec(video), audio, audio_channels, audio_rate, audio_depth,
         audio_stream_index: ai, audio_language, audio_title, audio_tracks,

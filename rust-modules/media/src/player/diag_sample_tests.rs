@@ -20,7 +20,7 @@ pub(super) fn scripted() -> FeedDiag {
     FeedDiag {
         place_rv: -3, placed_w: 3840, placed_h: 2160, load_completed: true, cb_count: 41,
         aq_video: 9_000_001, aq_audio: 9_000_002, fed_v_pts: 10_400_000_000,
-        fed_a_pts: 10_300_000_000, load_v: 2, load_a: 5, feed_state: 4, cb_err: 18, cb_err_at: 7,
+        fed_a_pts: 10_300_000_000, load_v: 2, load_a: 5, video_format: 3, decoded_audio_channels: 2, feed_state: 4, cb_err: 18, cb_err_at: 7,
         dts_ac3: false,
         dts_pcm: Some(DtsPcmDiag {
             source_channels: 6, source_rate: 44_100, source_bits: 24,
@@ -45,6 +45,8 @@ pub(super) fn store_mailboxes(diag: &FeedDiag) {
     FEED_SHARED.dg_fed_a_pts.store(diag.fed_a_pts, Relaxed);
     FEED_SHARED.dg_load_v.store(diag.load_v, Relaxed);
     FEED_SHARED.dg_load_a.store(diag.load_a, Relaxed);
+    FEED_SHARED.dg_video_format.store(diag.video_format, Relaxed);
+    FEED_SHARED.dg_decoded_audio_channels.store(diag.decoded_audio_channels, Relaxed);
     *FEED_SHARED.dg_dts_pcm.lock().unwrap() = diag.dts_pcm;
     FEED_SHARED.dg_dts_ac3.store(diag.dts_ac3, Relaxed);
     FEED_SHARED.dg_feed_state.store(diag.feed_state, Relaxed);
@@ -63,7 +65,7 @@ pub(super) fn rows(d: &Diag) -> FeedDiag {
         place_rv: d.place_rv, placed_w: d.placed_w, placed_h: d.placed_h,
         load_completed: d.load_completed, cb_count: d.cb_count, aq_video: d.aq_video,
         aq_audio: d.aq_audio, fed_v_pts: d.fed_v_pts, fed_a_pts: d.fed_a_pts, load_v: d.load_v,
-        load_a: d.load_a, dts_pcm: d.dts_pcm, dts_ac3: d.dts_ac3, feed_state: d.feed_state, cb_err: d.cb_err, cb_err_at: d.cb_err_at,
+        load_a: d.load_a, video_format: d.video_format, decoded_audio_channels: d.decoded_audio_channels, dts_pcm: d.dts_pcm, dts_ac3: d.dts_ac3, feed_state: d.feed_state, cb_err: d.cb_err, cb_err_at: d.cb_err_at,
         net_rx: d.net_rx, load_at: d.load_at, frame_at: d.frame_at,
         video_fps_milli: d.video_fps_milli, fed_v: d.fed_v, fed_a: d.fed_a, pushed_any: d.pushed_any,
     }
