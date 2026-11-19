@@ -2929,7 +2929,10 @@ impl Browser {
     }
 
     fn draw_browser_hints(&self, p: Painter, x: f32) {
-        let primary = if self.selection.is_some() && self.action.is_none() {
+        let quality_focused = self.movie_grid() && self.quality_focus.or(self.quality_hover).is_some();
+        let primary = if quality_focused {
+            tr("Elegir", "Tria")
+        } else if self.selection.is_some() && self.action.is_none() {
             tr("Marcar", "Marca")
         } else if self.action.is_some() {
             tr("Elegir", "Tria")
@@ -2942,11 +2945,17 @@ impl Browser {
             tr("Volver", "Torna")
         };
         let mut cursor = x;
-        if self.action.is_none() {
-            cursor = draw_hint(p, cursor, HintKey::Icon(Icon::ChevronUp), tr("Barra superior", "Barra superior"));
+        let (direction, target) = if quality_focused {
+            (Icon::ChevronDown, tr("Tarjetas", "Targetes"))
+        } else if self.movie_grid() && self.nav_focus.is_none() {
+            let direction = if self.action.is_some() { Icon::ChevronDown } else { Icon::ChevronUp };
+            (direction, tr("Calidad", "Qualitat"))
+        } else if self.action.is_none() {
+            (Icon::ChevronUp, tr("Barra superior", "Barra superior"))
         } else {
-            cursor = draw_hint(p, cursor, HintKey::Icon(Icon::ChevronDown), tr("Tarjetas", "Targetes"));
-        }
+            (Icon::ChevronDown, tr("Tarjetas", "Targetes"))
+        };
+        cursor = draw_hint(p, cursor, HintKey::Icon(direction), target);
         cursor = draw_hint(p, cursor, HintKey::Ok, primary);
         draw_hint(p, cursor, HintKey::Icon(Icon::ChevronLeft), back);
     }
