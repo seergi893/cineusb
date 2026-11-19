@@ -601,6 +601,28 @@ impl LoadRaw {
     pub fn loading(&self) -> bool { self.stage == Some(Stage::Loading) }
 }
 
+#[repr(u8)]
+pub enum VideoFormat {
+    Sdr = 1,
+    Hdr,
+    Hdr10,
+    Hdr10Plus,
+    DolbyVision,
+}
+
+impl VideoFormat {
+    pub fn label(observed: u8, dolby_vision_declared: bool) -> Option<&'static str> {
+        match observed {
+            n if n == Self::Sdr as u8 => Some("SDR"),
+            n if n == Self::Hdr as u8 => Some("HDR"),
+            n if n == Self::Hdr10 as u8 => Some("HDR10"),
+            n if n == Self::Hdr10Plus as u8 => Some("HDR10+"),
+            n if n == Self::DolbyVision as u8 && dolby_vision_declared => Some("Dolby Vision"),
+            _ => None,
+        }
+    }
+}
+
 /// The feed-written values the Stats-for-nerds read-out and the lab snapshot show, taken in the
 /// same sample as every other raw fact (`FeedRaw::diag`). They are diagnostics only: nothing in the
 /// player decides on one. Each is the value of the feed mailbox of the same name, so while the
@@ -631,6 +653,10 @@ pub struct FeedDiag {
     /// The codec the Load payload declared, as a code (`0` = none).
     pub load_v: u8,
     pub load_a: u8,
+    /// Format reported in the live pipeline's video information, not panel output.
+    pub video_format: u8,
+    /// Decoded PCM channel count reported by the pipeline, when available.
+    pub decoded_audio_channels: u8,
     pub dts_pcm: Option<DtsPcmDiag>,
     pub dts_ac3: bool,
     /// Why the video feeder is where it is, as a code (`0` = nothing fed yet).
@@ -660,7 +686,7 @@ impl FeedDiag {
     /// A feed with no session: the values its mailboxes are reset to.
     pub const IDLE: Self = Self {
         place_rv: i32::MIN, placed_w: 0, placed_h: 0, load_completed: false, cb_count: 0,
-        aq_video: 0, aq_audio: 0, fed_v_pts: 0, fed_a_pts: 0, load_v: 0, load_a: 0, feed_state: 0,
+        aq_video: 0, aq_audio: 0, fed_v_pts: 0, fed_a_pts: 0, load_v: 0, load_a: 0, video_format: 0, decoded_audio_channels: 0, feed_state: 0,
         cb_err: 0, cb_err_at: 0, net_rx: 0, load_at: 0, frame_at: 0, video_fps_milli: 0,
         fed_v: 0, fed_a: 0, pushed_any: false, dts_pcm: None, dts_ac3: false,
     };

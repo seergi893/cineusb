@@ -436,9 +436,16 @@ fn refresh_hud(app: &mut App) {
         }
     }
     if app.hud.is_none() {
-        let hud = plx_appkit::player_hud::loaded::load_classic(plx_plex::plex::identity::version(), cx, app.bridge.measure());
+        let hud = builtin_hud(cx, app.bridge.measure());
         adopt_hud(&mut app.bridge, &mut app.hud, hud);
     }
+}
+
+fn builtin_hud(cx: &plx_platform::i18n::LocaleContext, measure: &dyn plx_machine::machine::Measure)
+    -> plx_appkit::player_hud::loaded::LoadedHud {
+    use plx_appkit::player_hud::loaded::{load_cineusb, load_classic};
+    let load = if cfg!(feature = "local-usb") { load_cineusb } else { load_classic };
+    load(plx_plex::plex::identity::version(), cx, measure)
 }
 
 /// **The app's HUD at construction, compiled outside any frame**: bridge's measurer and the viewer's
@@ -451,7 +458,7 @@ pub(super) fn boot_hud(bridge: &mut super::bridge::Bridge, controlled: bool) -> 
     if controlled {
         return None;
     }
-    let loaded = plx_appkit::player_hud::loaded::load_classic(plx_plex::plex::identity::version(), plx_platform::i18n::current(), bridge.measure());
+    let loaded = builtin_hud(plx_platform::i18n::current(), bridge.measure());
     bridge.huds_start(loaded.clone());
     let mut hud = None;
     adopt_hud(bridge, &mut hud, loaded);
@@ -662,6 +669,7 @@ fn hud_model(
     let playpos_ns = plx_media::player::playpos_ns(ps).unwrap_or(0);
     plx_appkit::player_hud::model::HudModel {
         finish_clock: None,
+        local_formats: None,
         paused: viewer_paused,
         marker_prefs: Default::default(),
         playback_id: plx_media::route::playback_trace_generation(),
@@ -714,7 +722,10 @@ fn publish_player_model(app: &mut App) {
     model.marker_prefs = app.bridge.marker_preferences();
     model.covered = app.pages.surface_up();
     #[cfg(feature = "local-usb")]
-    { model.finish_clock = super::local_usb::finish_clock(app); }
+    {
+        model.finish_clock = super::local_usb::finish_clock(app);
+        model.local_formats = super::local_usb::hud_formats(&app.player.session);
+    }
     if let Some(screen) = super::bridge::player_mut(&mut app.pages) { screen.set_model(model); }
 }
 

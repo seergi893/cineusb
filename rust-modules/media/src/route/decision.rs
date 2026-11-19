@@ -2116,6 +2116,8 @@ pub(crate) fn convert_local_dts(ps: &PlaybackSession) -> bool {
         })
 }
 
+pub fn is_local_file(ps: &PlaybackSession) -> bool { ps.local_file.is_some() }
+
 pub(crate) fn local_file(ps: &PlaybackSession) -> Option<std::sync::Arc<std::fs::File>> {
     ps.local_file.clone()
 }

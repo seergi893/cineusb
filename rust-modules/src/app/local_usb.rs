@@ -4073,6 +4073,112 @@ fn clean_video_title(stem: &str) -> String {
     stem.to_owned()
 }
 
+/// Use a deliberate container title when supplied, or remove a marked release suffix
+/// from the filename. Plain trailing numbers stay part of the title.
+fn hud_movie_title(stem: &str, metadata: Option<&str>) -> String {
+    fn clean(value: &str) -> String {
+        const TECH: &[&str] = &[
+            "2160p", "1080p", "720p", "4k", "uhd", "hdr", "hdr10", "hdr10plus", "hdr10+",
+            "dovi", "dolbyvision", "dolby vision", "dv", "bdremux", "remux", "bluray", "blu-ray",
+            "web-dl", "webdl", "webrip", "bdrip", "hevc", "h.265", "h.264", "h265", "h264",
+            "x265", "x264", "av1", "truehd", "dts-hd ma", "dts-hd", "atmos", "eac3",
+        ];
+        let value = value.trim();
+        let value = if is_video_path(std::path::Path::new(value)) {
+            value.rsplit_once('.').map_or(value, |(stem, _)| stem)
+        } else { value };
+        let trim = |ch: char| matches!(ch, ' ' | '.' | '_' | '-');
+        let lower = value.to_ascii_lowercase();
+        fn technical_tail(text: &str) -> Option<&str> {
+            TECH.iter().find_map(|tag| {
+                text.strip_prefix(tag).filter(|tail| tail.chars().next().is_none_or(|c| !c.is_alphanumeric()))
+            })
+        }
+        let mut cut = value.len();
+        for (index, ch) in lower.char_indices().skip(1) {
+            if !matches!(ch, ' ' | '.' | '_' | '-' | '(' | '[') { continue; }
+            let rest = &lower[index + ch.len_utf8()..];
+            if technical_tail(rest).is_some_and(|suffix| {
+                let suffix = suffix.trim();
+                let next = suffix.trim_start_matches(|c: char| matches!(c, ' ' | '.' | '_'));
+                suffix.is_empty() || suffix.starts_with(['-', ']', ')', '['])
+                    || technical_tail(next).is_some() || next.starts_with("5.1") || next.starts_with("7.1")
+            }) {
+                let prefix = value[..index].trim_end_matches(trim);
+                if !prefix.is_empty() {
+                    cut = index;
+                    break;
+                }
+            }
+        }
+        let before = value[..cut].trim_end_matches(trim);
+        let year = |part: &str| part.len() == 4 && part.parse::<u16>().is_ok_and(|n| (1888..=2035).contains(&n));
+        let explicit = [" - ", " (", " ["].into_iter().find_map(|separator| {
+            let (title, suffix) = before.rsplit_once(separator)?;
+            let suffix = match separator {
+                " (" => suffix.strip_suffix(')')?,
+                " [" => suffix.strip_suffix(']')?,
+                _ => suffix,
+            };
+            (year(suffix) && !title.is_empty()).then_some(title)
+        });
+        let dotted = if cut < value.len() {
+            before.rsplit_once('.').and_then(|(title, suffix)| year(suffix).then_some(title))
+        } else { None };
+        let title = explicit.or(dotted).unwrap_or(before);
+        let title = if cut < value.len() && !title.contains(' ') && title.contains('.') {
+            title.replace('.', " ")
+        } else { title.to_owned() };
+        title.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    let tagged = metadata.filter(|title| title.len() <= 512 && !title.chars().any(char::is_control))
+        .map(clean).filter(|title| !title.is_empty());
+    tagged.unwrap_or_else(|| clean(stem))
+}
+
+/// The player handoff is scoped to the current physical Feed snapshot.
+pub(super) fn hud_formats(ps: &plx_media::route::PlaybackSession)
+    -> Option<plx_appkit::player_hud::model::LocalFormats> {
+    if !plx_media::route::is_local_file(ps) { return None; }
+    let declared_dv = plx_media::route::stream_dv_decision(ps).presentation.declared().is_some();
+    Some(formats_from_feed(ps.readout().raw().diag, declared_dv))
+}
+
+fn formats_from_feed(feed: plx_playback_contract::feed::FeedDiag, declared_dv: bool)
+    -> plx_appkit::player_hud::model::LocalFormats {
+    use plx_appkit::player_hud::model::LocalFormats;
+    let video = if feed.load_completed && feed.fed_v > 0 {
+        plx_playback_contract::feed::VideoFormat::label(feed.video_format, declared_dv)
+    } else { None };
+    let audio = if feed.load_completed && feed.fed_a > 0 {
+        match feed.load_a {
+            1 => Some("Dolby Digital"),
+            2 => Some("Dolby Digital Plus"),
+            3 => Some("AAC"),
+            4 => Some("DTS"),
+            5 => Some("PCM"),
+            6 => Some("Opus"),
+            _ => None,
+        }
+    } else { None };
+    let channels = audio.and_then(|_| {
+        if feed.dts_ac3 { return Some("5.1"); }
+        let count = feed.dts_pcm.map_or(feed.decoded_audio_channels, |pcm| pcm.output.channels as u8);
+        match count {
+            1 => Some("1.0"),
+            2 => Some("2.0"),
+            3 => Some("3 ch"),
+            4 => Some("4 ch"),
+            5 => Some("5 ch"),
+            6 => Some("6 ch"),
+            7 => Some("7 ch"),
+            8 => Some("8 ch"),
+            _ => None,
+        }
+    });
+    LocalFormats { video, audio, channels }
+}
+
 fn display_name(entry: &Entry, extensions: bool) -> String {
     let name = std::path::Path::new(&entry.name);
     match entry.kind {
@@ -4198,6 +4304,7 @@ pub(super) fn tick(app: &mut App) {
         can_normalize_loudness: false, immersive: false, sample_rate: info.audio_rate,
         bit_depth: info.audio_depth,
     });
+    let title = hud_movie_title(&title, info.title.as_deref());
     let item = local_playing_item(&info, dovi);
     let forced = initial_forced_subtitle(&item, app.usb.settings.forced_subtitles);
     let ok = plx_media::route::set_stream_declaration(ps, &info.video, &info.audio, info.fps, dovi, false)
@@ -5445,6 +5552,7 @@ mod usb_browser_tests {
 
     fn media() -> plx_play_feed::LocalMedia {
         plx_play_feed::LocalMedia {
+            title: None,
             duration_secs: None,
             video: "hevc".into(), audio: "eac3".into(), audio_channels: 6,
             audio_rate: 48_000, audio_depth: 16, audio_stream_index: 1,
@@ -5466,6 +5574,45 @@ mod usb_browser_tests {
                     forced: false, default: false, sdh: true },
             ],
         }
+    }
+
+    #[test]
+    fn hud_title_prefers_the_tag_and_preserves_meaningful_numbers() {
+        for (file, title) in [
+            ("La Odisea - 2026 - BDremux 4K UHD - HDR.mkv", "La Odisea"),
+            ("Blade.Runner.2049.2160p.HDR10+.x265-Group", "Blade Runner 2049"),
+            ("1917 (2019) BluRay", "1917"),
+            ("2012.1080p.WEB-DL", "2012"),
+            ("Se7en", "Se7en"),
+            ("El viaje (2025) HDR10", "El viaje"),
+            ("千と千尋の神隠し - 2001 - 1080p", "千と千尋の神隠し"),
+            ("The HDR Story", "The HDR Story"),
+        ] {
+            assert_eq!(hud_movie_title(file, None), title);
+        }
+        assert_eq!(hud_movie_title("disc_0001", Some("Le Fabuleux Destin d’Amélie Poulain")),
+            "Le Fabuleux Destin d’Amélie Poulain");
+        assert_eq!(hud_movie_title("Avatar", Some("  ")), "Avatar");
+    }
+
+    #[test]
+    fn hud_format_follows_the_current_feed_and_never_infers_immersive_output() {
+        use plx_playback_contract::feed::{FeedDiag, VideoFormat};
+        let mut feed = FeedDiag { video_format: VideoFormat::DolbyVision as u8,
+            load_a: 2, decoded_audio_channels: 6, ..FeedDiag::IDLE };
+        assert_eq!(formats_from_feed(feed, true), Default::default(), "the Load alone is insufficient");
+        feed.load_completed = true;
+        feed.fed_a = 1;
+        feed.fed_v = 1;
+        assert_eq!(formats_from_feed(feed, false).video, None);
+        assert_eq!(formats_from_feed(feed, true).video, Some("Dolby Vision"));
+        assert_eq!(formats_from_feed(feed, true).audio, Some("Dolby Digital Plus"));
+        assert_eq!(formats_from_feed(feed, true).channels, Some("6 ch"));
+        feed.video_format = VideoFormat::Hdr10 as u8;
+        feed.load_a = 5;
+        feed.decoded_audio_channels = 2;
+        let after = formats_from_feed(feed, false);
+        assert_eq!((after.video, after.audio, after.channels), (Some("HDR10"), Some("PCM"), Some("2.0")));
     }
 
     #[test]

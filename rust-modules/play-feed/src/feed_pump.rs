@@ -1331,6 +1331,8 @@ fn native_feed_diag() -> FeedDiag {
         fed_a_pts: FEED_SHARED.dg_fed_a_pts.load(Relaxed),
         load_v: FEED_SHARED.dg_load_v.load(Relaxed),
         load_a: FEED_SHARED.dg_load_a.load(Relaxed),
+        video_format: FEED_SHARED.dg_video_format.load(Relaxed),
+        decoded_audio_channels: FEED_SHARED.dg_decoded_audio_channels.load(Relaxed),
         dts_pcm: *FEED_SHARED.dg_dts_pcm.lock().unwrap(),
         dts_ac3: FEED_SHARED.dg_dts_ac3.load(Relaxed),
         feed_state: FEED_SHARED.dg_feed_state.load(Relaxed),
