@@ -55,46 +55,41 @@ jobs:
         id: usb-deps
         run: |
           if ! command -v ffmpeg || ! command -v nasm || ! pkg-config --exists sdl2 SDL2_ttf gl; then
-            # Avoid the runner's Azure mirror+file source, which can hang for
-            # many minutes on DNS failures. Use a dedicated Ubuntu 24.04 source.
             sources="$RUNNER_TEMP/cineusb-ubuntu.sources"
-            cat > "$sources" <<'APT_SOURCES'
-          Types: deb
-          URIs: https://archive.ubuntu.com/ubuntu/
-          Suites: noble noble-updates noble-backports noble-security
-          Components: main universe
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-          APT_SOURCES
             apt_options=(
               -o "Dir::Etc::sourcelist=$sources"
-              -o "Dir::Etc::sourceparts=-"
+              -o Dir::Etc::sourceparts=-
               -o Acquire::ForceIPv4=true
               -o Acquire::Retries=0
               -o Acquire::http::Timeout=12
               -o Acquire::https::Timeout=12
             )
-            # Fail promptly on runner-wide DNS outages rather than retrying APT
-            # for the entire job timeout. A new runner may resolve transient DNS.
-            if ! timeout 12s getent ahostsv4 archive.ubuntu.com >/dev/null; then
-              echo "::warning::Runner DNS unavailable; USB smoke tests cannot run. The build must stop until tests can run."
-              echo "### USB smoke tests NOT RUN" >> "$GITHUB_STEP_SUMMARY"
-              echo "Runner DNS could not resolve archive.ubuntu.com; required host dependencies were unavailable. This is not a passing test result." >> "$GITHUB_STEP_SUMMARY"
-              exit 1
-            fi
-            for attempt in 1 2; do
-              echo "APT dependency setup attempt $attempt/2 (90s maximum per command)"
+            installed=false
+            for mirror in archive.ubuntu.com mirrors.mit.edu; do
+              if ! timeout 12s getent ahostsv4 "$mirror" >/dev/null; then
+                echo "::warning::Runner could not resolve $mirror"
+                continue
+              fi
+              cat > "$sources" <<APT_SOURCES
+          Types: deb
+          URIs: https://$mirror/ubuntu/
+          Suites: noble noble-updates noble-backports noble-security
+          Components: main universe
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          APT_SOURCES
+              echo "Installing USB test dependencies from $mirror"
               if sudo timeout 90s apt-get "${apt_options[@]}" update -o APT::Update::Error-Mode=any &&
                  sudo timeout 90s env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install --no-install-recommends -y ffmpeg nasm libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev; then
+                installed=true
                 break
               fi
-              if [ "$attempt" -eq 2 ]; then
-                echo "::warning::Ubuntu dependencies unavailable; USB smoke tests cannot run. Check runner network/APT logs."
-                echo "### USB smoke tests NOT RUN" >> "$GITHUB_STEP_SUMMARY"
-                echo "Host dependencies could not be installed; no USB smoke tests were executed. This is not a passing test result." >> "$GITHUB_STEP_SUMMARY"
-                exit 1
-              fi
-              sleep 5
             done
+            if [ "$installed" != true ]; then
+              echo "::warning::Ubuntu dependencies unavailable; USB smoke tests cannot run. Check runner network/APT logs."
+              echo "### USB smoke tests NOT RUN" >> "$GITHUB_STEP_SUMMARY"
+              echo "Host dependencies could not be installed; no USB smoke tests were executed. This is not a passing test result." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
           fi
           pkg-config --exists sdl2 SDL2_ttf gl
           command -v ffmpeg
