@@ -41,16 +41,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             rust-modules/target
-          key: cineusb-cargo-host-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml') }}-${{ github.sha }}
-          restore-keys: |
-            cineusb-cargo-host-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml') }}-
+          key: cineusb-cargo-host-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml', '.github/workflows/cineusb-ipk.yml') }}
       - name: Discard cached workspace outputs
         run: python3 ci/cargo-cache.py rust-modules/target
       - name: Cache host FFmpeg
+        id: host-ffmpeg-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/ffmpeg-prefix-host
-          key: cineusb-ffmpeg-host-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-ffmpeg.sh', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py') }}
+          key: cineusb-ffmpeg-host-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-ffmpeg.sh', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py') }}
       - name: Install USB test dependencies
         id: usb-deps
         run: |
@@ -100,8 +99,15 @@ jobs:
           command -v ffmpeg
           command -v nasm
       - name: Test local MKV and MP4 with the bundled FFmpeg configuration
+        env:
+          HOST_FFMPEG_CACHE_HIT: ${{ steps.host-ffmpeg-cache.outputs.cache-hit }}
         run: |
-          HOST=1 RELEASE=1 ci/build-ffmpeg.sh
+          if [ "$HOST_FFMPEG_CACHE_HIT" = true ]; then
+            (cd vendor/ffmpeg-prefix-host && sha256sum --strict --check .cineusb-checksums)
+          else
+            HOST=1 RELEASE=1 ci/build-ffmpeg.sh
+            (cd vendor/ffmpeg-prefix-host && find . \( -type f -o -type l \) ! -name .cineusb-checksums -print0 | sort -z | xargs -0 sha256sum > .cineusb-checksums)
+          fi
           export PLXNATIVE_APP_DIR="$PWD/vendor/ffmpeg-prefix-host/lib"
           export CINEUSB_FD_FIXTURES="$RUNNER_TEMP/cineusb-fd-fixtures"
           mkdir -p "$CINEUSB_FD_FIXTURES"
@@ -195,9 +201,7 @@ jobs:
             ~/.cargo/git
             rust-modules/target-release
             rust-modules/target-release-storage
-          key: cineusb-cargo-arm-both-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml', 'Makefile', 'ci/dependencies.json') }}-${{ github.sha }}
-          restore-keys: |
-            cineusb-cargo-arm-both-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml', 'Makefile', 'ci/dependencies.json') }}-
+          key: cineusb-cargo-arm-both-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-modules/rust-toolchain.toml', 'rust-modules/Cargo.lock', 'rust-modules/**/Cargo.toml', 'rust-modules/.cargo/config.toml', 'Makefile', 'ci/dependencies.json', '.github/workflows/cineusb-ipk.yml') }}
       - name: Discard cached workspace outputs
         run: python3 ci/cargo-cache.py rust-modules/target-release rust-modules/target-release-storage
       - name: Cache verified native dependencies
