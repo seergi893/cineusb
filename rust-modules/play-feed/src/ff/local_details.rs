@@ -35,7 +35,8 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
         bytes: file.metadata().ok().map(|meta| meta.len()).filter(|bytes| *bytes > 0),
         ..LocalVideoDetails::default()
     };
-    let _ = read_local_format(file, true, |fmt| {
+    let retry = read_local_format(file, true, |fmt| {
+        let mut retry = None;
         unsafe {
             details.title = local_title_tag(fmt);
             let duration = fmt_duration(fmt);
@@ -47,22 +48,8 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
                 let params = stream_codecpar(*(*fmt).streams.add(index as usize));
                 let (width, height) = ((*params).width, (*params).height);
                 if width > 0 && height > 0 { details.resolution = Some((width as u32, height as u32)); }
-                let dovi = dovi_conf(params).filter(|record| record.dv_profile != 0);
-                let hdr = container_hdr(params);
-                let pq = hdr.trc == 16 && hdr.pri == 9;
-                let stream_plus = has_dynamic_side_data((*params).coded_side_data, (*params).nb_coded_side_data);
-                let stream_static = meaningful_mastering(hdr.mastering) || meaningful_cll(hdr.cll);
-                let (packet_plus, packet_static) = if dovi.is_none() && !stream_plus {
-                    sample_hdr_metadata(fmt, index, params)
-                } else { (false, false) };
-                let plus = stream_plus || packet_plus;
-                details.hdr10_plus = plus;
-                details.range = video_range(dovi, hdr.trc, hdr.pri, plus, stream_static || packet_static);
-                details.hdr10_base = match details.range {
-                    Some(VideoRange::DolbyVisionHdr10 | VideoRange::Hdr10) => true,
-                    Some(VideoRange::Hdr10Plus) => pq,
-                    _ => false,
-                };
+                read_video_range(fmt, index, params, &mut details);
+                retry = retry_video_range((*params).codec_id, (*params).color_trc, details.range).then_some(index);
             }
             let best = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, std::ptr::null_mut(), 0);
             let tracks: Vec<_> = (0..(*fmt).nb_streams).filter_map(|index| {
@@ -81,9 +68,63 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
                 })
             });
         }
-        Ok(())
-    });
+        Ok(retry)
+    }).ok().flatten();
+    if let Some(index) = retry {
+        // The compact library probe can run out of bytes before FFmpeg's
+        // HEVC parser has recovered the signal from a large access unit.
+        // Retry off-frame at the same probe budget used to open playback.
+        let _ = read_local_format(file, false, |fmt| {
+            unsafe {
+                if av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, index, -1, std::ptr::null_mut(), 0) == index {
+                    let params = stream_codecpar(*(*fmt).streams.add(index as usize));
+                    if (*params).codec_id != AV_CODEC_ID_HEVC { return Ok(()); }
+                    let mut observed = LocalVideoDetails::default();
+                    read_video_range(fmt, index, params, &mut observed);
+                    if observed.range.is_some() {
+                        details.range = observed.range;
+                        details.hdr10_base = observed.hdr10_base;
+                        details.hdr10_plus = observed.hdr10_plus;
+                    }
+                }
+            }
+            Ok(())
+        });
+    }
     details
+}
+
+fn retry_video_range(codec: c_int, transfer: c_int, range: Option<VideoRange>) -> bool {
+    codec == AV_CODEC_ID_HEVC && transfer != 18 && matches!(range, None | Some(VideoRange::Hdr))
+}
+
+#[test]
+fn cineusb_retries_inconclusive_hevc_without_reprobing_confirmed_formats() {
+    assert!(retry_video_range(AV_CODEC_ID_HEVC, 2, None));
+    assert!(retry_video_range(AV_CODEC_ID_HEVC, 16, Some(VideoRange::Hdr)));
+    assert!(!retry_video_range(AV_CODEC_ID_HEVC, 18, Some(VideoRange::Hdr)));
+    assert!(!retry_video_range(AV_CODEC_ID_HEVC, 16, Some(VideoRange::Hdr10)));
+    assert!(!retry_video_range(AV_CODEC_ID_HEVC, 1, Some(VideoRange::Sdr)));
+    assert!(!retry_video_range(AV_CODEC_ID_AV1, 2, None));
+}
+
+unsafe fn read_video_range(fmt: *mut AVFormatContext, index: c_int,
+    params: *const AVCodecParameters, details: &mut LocalVideoDetails) {
+    let dovi = dovi_conf(params).filter(|record| record.dv_profile != 0);
+    let hdr = container_hdr(params);
+    let pq = hdr.trc == 16 && hdr.pri == 9;
+    let stream_plus = has_dynamic_side_data((*params).coded_side_data, (*params).nb_coded_side_data);
+    let stream_static = meaningful_mastering(hdr.mastering) || meaningful_cll(hdr.cll);
+    let (packet_plus, packet_static) = if dovi.is_none() && !stream_plus {
+        sample_hdr_metadata(fmt, index, params)
+    } else { (false, false) };
+    details.hdr10_plus = stream_plus || packet_plus;
+    details.range = video_range(dovi, hdr.trc, hdr.pri, details.hdr10_plus, stream_static || packet_static);
+    details.hdr10_base = match details.range {
+        Some(VideoRange::DolbyVisionHdr10 | VideoRange::Hdr10) => true,
+        Some(VideoRange::Hdr10Plus) => pq,
+        _ => false,
+    };
 }
 
 fn audio_label(codec: &str, profile: c_int) -> Option<&'static str> {
