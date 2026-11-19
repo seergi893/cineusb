@@ -413,6 +413,7 @@ impl DemuxMedia for FeedDemuxMedia {
             DemuxEffect::ContainerHdr(hdr) => {
                 *FEED_SHARED.container_hdr.lock().unwrap() = hdr;
             }
+            DemuxEffect::DtsAc3Produced => FEED_SHARED.dg_dts_ac3.store(true, Ordering::Relaxed),
             DemuxEffect::DtsPcm(diag) => *FEED_SHARED.dg_dts_pcm.lock().unwrap() = diag,
             DemuxEffect::FirstAudioPts(pts) =>
                 FEED_SHARED.first_audio_pts.store(pts, Ordering::Release),

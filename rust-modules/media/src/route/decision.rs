@@ -203,6 +203,7 @@ pub struct PlaybackSession {
     /// The stream URL for this playback (empty = nothing resolved, or torn down).
     url: String,
     local_file: Option<std::sync::Arc<std::fs::File>>,
+    convert_local_dts: bool,
     /// The server-side transcode session id, EMPTY on a direct play — that emptiness is the
     /// "is this a transcode?" test ([`is_transcoding`]) and the key the stop is sent with.
     tsession: String,
@@ -1685,6 +1686,7 @@ impl PlaybackSession {
         requested_resume_ns: 0,
         url: String::new(),
         local_file: None,
+        convert_local_dts: false,
         tsession: String::new(),
         play_verdict: None,
         pms_decline: None,
@@ -1793,6 +1795,7 @@ impl PlaybackSession {
             requested_resume_ns,
             url,
             local_file: _,
+            convert_local_dts: _,
             tsession,
             play_verdict,
             pms_decline,
@@ -1883,6 +1886,7 @@ impl PlaybackSession {
             requested_resume_ns: *requested_resume_ns,
             url: url.clone(),
             local_file: None,
+            convert_local_dts: false,
             tsession: tsession.clone(),
             play_verdict: play_verdict.clone(),
             pms_decline: *pms_decline,
@@ -2069,12 +2073,13 @@ pub fn set_url(ps: &mut PlaybackSession, s: &str) {
 pub fn clear_url(ps: &mut PlaybackSession) {
     ps.url.clear();
     ps.local_file = None;
+    ps.convert_local_dts = false;
 }
 
 pub fn set_local_source(ps: &mut PlaybackSession, file: std::fs::File, title: &str,
     audio: Option<CarriedAudio>, forced: Option<(i64, i32)>,
     item: &plx_data::metadata::PlayingItem,
-    caps: std::sync::Arc<plx_platform::devcaps::Caps>) -> bool {
+    caps: std::sync::Arc<plx_platform::devcaps::Caps>, convert_dts: bool) -> bool {
     ps.begin_attempt(caps);
     if !ps.qualify_explicit_feed_source() { return false; }
     // A USB file is a new item, not a retry/seek of the previous one. Keep the
@@ -2092,6 +2097,7 @@ pub fn set_local_source(ps: &mut PlaybackSession, file: std::fs::File, title: &s
         .map_or("", |track| track.lang_code.as_str());
     ps.track_ctx = Some(TrackContext::of_landing(item, selected_language, None));
     ps.local_file = Some(std::sync::Arc::new(file));
+    ps.convert_local_dts = convert_dts;
     crate::player::set_audio_track(ps, audio.as_ref().map_or(-1, |track| track.ordinal));
     ps.cur_audio = audio;
     ps.url = "file:///cineusb-video".into();
@@ -2100,6 +2106,14 @@ pub fn set_local_source(ps: &mut PlaybackSession, file: std::fs::File, title: &s
         set_c(ps.ctxline.as_mut_ptr(), ps.ctxline.len(), "USB");
     }
     true
+}
+
+pub(crate) fn convert_local_dts(ps: &PlaybackSession) -> bool {
+    ps.local_file.is_some() && ps.convert_local_dts
+        && carried_audio_of_stream(ps).is_some_and(|a| {
+            plx_platform::devcaps::audio_codec_id(&a.codec) == "dts"
+                && a.channels == 6 && a.sample_rate == 48_000
+        })
 }
 
 pub(crate) fn local_file(ps: &PlaybackSession) -> Option<std::sync::Arc<std::fs::File>> {
@@ -11352,6 +11366,7 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             requested_resume_ns,
             url: plan.url,
             local_file: None,
+            convert_local_dts: false,
             tsession: plan.tsession,
             // Installed on EVERY landing, not only a refusing one: a plan that resolved is itself
             // the statement that the last refusal is over, and assigning unconditionally is what

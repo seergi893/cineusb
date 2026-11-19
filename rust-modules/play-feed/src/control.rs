@@ -850,7 +850,7 @@ pub(crate) mod tests {
         assert_eq!(mailboxes().raw.diag, FeedDiag {
             place_rv: -3, placed_w: 3840, placed_h: 2160, load_completed: true, cb_count: 41,
             aq_video: 9_000_001, aq_audio: 9_000_002, fed_v_pts: 10_400_000_000,
-            fed_a_pts: 10_300_000_000, load_v: 2, load_a: 5, dts_pcm: None, feed_state: 4, cb_err: 18, cb_err_at: 7,
+            fed_a_pts: 10_300_000_000, load_v: 2, load_a: 5, dts_pcm: None, dts_ac3: false, feed_state: 4, cb_err: 18, cb_err_at: 7,
             net_rx: 13_000_000, load_at: 4_200, frame_at: 5_300, video_fps_milli: 23_976,
             fed_v: 5_000, fed_a: 4_800, pushed_any: true,
         });

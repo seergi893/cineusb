@@ -753,6 +753,9 @@ fn pipeline_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::
     #[cfg(not(feature = "play-feed"))]
     let (speed, speed_bad) = (String::new(), false);
     audio.push_str(&speed);
+    if feed && d.dts_ac3 {
+        audio.push_str(" · DTS 6ch → app AC3 6ch 48000 Hz · HDMI output unverified");
+    }
     if let Some(pcm) = d.dts_pcm.filter(|_| feed) {
         audio.push_str(&dts_pcm_suffix(pcm));
     }

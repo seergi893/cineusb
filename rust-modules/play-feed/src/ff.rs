@@ -6144,7 +6144,7 @@ pub fn demux(
     aqa: SendPtr<AuQueue>,
     hs: SendPtr<HttpStream>,
 ) {
-    demux_source(off, origin, path, None, acodec, transport, session, abr, auto_original, aq, aqa, hs)
+    demux_source(off, origin, path, None, acodec, false, transport, session, abr, auto_original, aq, aqa, hs)
 }
 
 pub(crate) fn demux_source(
@@ -6153,6 +6153,7 @@ pub(crate) fn demux_source(
     path: String,
     local_file: Option<Arc<File>>,
     acodec: String,
+    convert_dts: bool,
     transport: DemuxTransport,
     mut session: Box<dyn DemuxSession>,
     abr: Option<Box<dyn plx_playback_contract::adaptive::AdaptiveSession>>,
@@ -6521,7 +6522,7 @@ pub(crate) fn demux_source(
                 };
                 // Native DTS: the set's own decoder takes the core. Not when the Load declared the lossy PCM,
                 // which is the app decoding DTS itself (`pcm_dec` below, `Caps::app_decodes_lossy_track`).
-                let dts_audio = ai >= 0 && !pcm_lossy() && std::ffi::CStr::from_ptr(avcodec_get_name(
+                let dts_audio = ai >= 0 && !convert_dts && !pcm_lossy() && std::ffi::CStr::from_ptr(avcodec_get_name(
                     (*stream_codecpar(*streams.add(ai as usize))).codec_id
                 )).to_bytes() == b"dts";
                 if dts_audio {
@@ -6565,11 +6566,31 @@ pub(crate) fn demux_source(
                     free_avio(avio);
                     break;
                 }
+                let mut ac3_encoder = if convert_dts {
+                    let opened = if ai >= 0 {
+                        crate::dts_ac3::DtsAc3::open(stream_codecpar(*streams.add(ai as usize)))
+                    } else {
+                        Err("no selected DTS stream".into())
+                    };
+                    match opened {
+                        Ok(encoder) => Some(encoder),
+                        Err(why) => {
+                            session.media().record(&format!("ff: experimental DTS to AC3 refused — {why}"));
+                            session.media().publish(DemuxEffect::Failed);
+                            avformat_close_input(&mut fmt);
+                            free_avio(avio);
+                            break;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let mut reported_ac3 = false;
                 let mut pcm_dec: Option<crate::ff_pcm::PcmDecoder> = None;
                 let mut dts_pcm_diag = None;
                 session.media().publish(DemuxEffect::DtsPcm(None));
                 if let Some(name) = app_decoded.as_deref().filter(|_| {
-                    FEED_AUDIO.load(Ordering::Relaxed) && speed_permille == crate::shared::RATE_NORMAL
+                    !convert_dts && FEED_AUDIO.load(Ordering::Relaxed) && speed_permille == crate::shared::RATE_NORMAL
                 }) {
                     let opened = match pcm_out() {
                         Some(out) => crate::ff_pcm::PcmDecoder::open(
@@ -6910,6 +6931,13 @@ pub(crate) fn demux_source(
                         ));
                         headroom.restart(aq_p);
                         annexb_wait_key = (nal_input == NalInput::StartCodes).then_some(0u32);
+                        if let Some(encoder) = ac3_encoder.as_mut() {
+                            if let Err(why) = encoder.reset() {
+                                session.media().record(&format!("ff: DTS to AC3 seek reset failed — {why}"));
+                                session.media().publish(DemuxEffect::IoFailed);
+                                break;
+                            }
+                        }
                         if let Some(dec) = pcm_dec.as_mut() {
                             dec.reset_stream();
                         }
@@ -6923,6 +6951,21 @@ pub(crate) fn demux_source(
                         // Genuine end of stream, teardown, or an unrecovered I/O error published by
                         // `frame_read_failed`. NOT an app seek — that is serviced at the top of this
                         // loop and never surfaces as a read error.
+                        if let Some(encoder) = ac3_encoder.as_mut() {
+                            match encoder.finish() {
+                                Ok(Some((au_pts, au))) => {
+                                    crate::aq::aq_push_gated(
+                                        aqa_p, au.as_ptr(), au.len() as c_int, au_pts, 1, 2,
+                                        audio_push_gate(aq_p, headroom.video_reach_ns()), || state.drain_wire(),
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(why) => {
+                                    session.media().record(&format!("ff: DTS to AC3 tail failed — {why}"));
+                                    session.media().publish(DemuxEffect::IoFailed);
+                                }
+                            }
+                        }
                         if let Some((au_pts, au)) = pcm_batch.as_mut().and_then(|b| b.take()) {
                             crate::aq::aq_push_gated(
                                 aqa_p, au.as_ptr(), au.len() as c_int, au_pts, 1, 2, audio_push_gate(aq_p, headroom.video_reach_ns()),
@@ -7100,7 +7143,33 @@ pub(crate) fn demux_source(
                         // The audio lane runs past its soft cap while the video lane is starved
                         // ([`AUDIO_AHEAD_HEADROOM`]); the gate is what makes that decision, here.
                         let gate = audio_push_gate(aq_p, headroom.video_reach_ns());
-                        let pushed = if let Some(dec) = speed_dec.as_mut() {
+                        let pushed = if let Some(encoder) = ac3_encoder.as_mut() {
+                            let units = match encoder.decode(pkt, pts) {
+                                Ok(units) => units,
+                                Err(why) => {
+                                    session.media().record(&format!("ff: DTS to AC3 failed — {why}"));
+                                    session.media().publish(DemuxEffect::IoFailed);
+                                    av_packet_unref(pkt);
+                                    break;
+                                }
+                            };
+                            if !reported_ac3 && !units.is_empty() {
+                                session.media().record("ff: DTS 6ch -> AC3 6ch, 48 kHz (HDMI output unverified)");
+                                session.media().publish(DemuxEffect::DtsAc3Produced);
+                                reported_ac3 = true;
+                            }
+                            let mut rv = 0;
+                            for (au_pts, au) in units {
+                                rv = crate::aq::aq_push_gated(
+                                    aqa_p, au.as_ptr(), au.len() as c_int, au_pts, 1, 2, gate,
+                                    || state.drain_wire(),
+                                );
+                                if rv != 0 {
+                                    break;
+                                }
+                            }
+                            rv
+                        } else if let Some(dec) = speed_dec.as_mut() {
                             let mut rv = 0;
                             for (au_pts, pcm) in dec.decode(pkt, pts) {
                                 rv = crate::aq::aq_push_gated(

@@ -14,6 +14,7 @@ pub mod feed_state;
 #[cfg(feature = "hostsim")]
 pub mod ffi_host;
 pub mod ff_pcm;
+mod dts_ac3;
 mod ff;
 pub use ff::{boot, demux, pushed_any, set_feed_audio, set_pcm_out, DemuxTransport};
 pub use ff::{probe_local, probe_local_with_audio, LocalAudio, LocalMedia, LocalSubtitle};

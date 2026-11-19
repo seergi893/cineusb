@@ -404,6 +404,7 @@ pub fn launch_native_open(
             // `teardown(true) + start_bufferfeed()` (reload_at / reload_transcode /
             // switch_audio_native), which respawns this thread with the new value.
             let acodec = std::mem::take(&mut open.audio_codec);
+            let convert_dts = open.feed_payload.convert_dts;
             let demux_transport = (hooks.demux_transport)();
             let session = open.session.take().expect("one demux session per captured feed open");
             let abr = open.hls_abr.take();
@@ -413,7 +414,7 @@ pub fn launch_native_open(
             // A clock-only reader (a sidecar) reads no subtitle: the demuxer keeps what it enumerates.
             shared.side_subs_owner.store(side_reader.embedded_owner(), Ordering::Release);
             stream_th = plx_base::task::spawn_off_frame_keeping("demux", move |off| {
-                crate::ff::demux_source(off, origin, path, local_file, acodec, demux_transport, session, abr, auto_original, aqp, aqap, hsp)
+                crate::ff::demux_source(off, origin, path, local_file, acodec, convert_dts, demux_transport, session, abr, auto_original, aqp, aqap, hsp)
             });
             if stream_th.is_none() {
                 shared.side_subs_owner.store(false, Ordering::Release);
@@ -1961,7 +1962,7 @@ pub fn prepare_native_open(
     shared: &'static PhysicalShared,
     user_held: bool,
     seek_preroll: bool,
-    open: Option<PhysicalOpen>,
+    mut open: Option<PhysicalOpen>,
     sample: Option<Box<SampleBuf>>,
     is_h265: bool,
     session_rate: i32,
@@ -1998,6 +1999,10 @@ pub fn prepare_native_open(
     shared.applied_rate_permille.store(session_rate, Ordering::Relaxed);
     if session_rate != crate::shared::RATE_NORMAL {
         plx_base::eventlog::log(&format!("speed: this Load plays at {session_rate} (audio decoded in the app, fed as PCM)"));
+    }
+    if let Some(open) = open.as_mut() {
+        open.feed_payload.convert_dts = open.feed_payload.convert_dts
+            && !no_audio && session_rate == crate::shared::RATE_NORMAL && crate::dts_ac3::available();
     }
     let payload_str: &str = if stream {
         let open = open.as_ref().expect("stream request was captured");
@@ -2037,10 +2042,12 @@ pub fn prepare_native_open(
             // LG's pipeline names E-AC3 "AC3 PLUS" (Dolby Digital Plus), NOT "EAC3" — the
             // wrong string leaves the audio ES unconfigured, and with audioSync the video
             // sink slaves to the dead audio clock and stalls (verified: video-only plays).
-            let codec = &open.audio_codec;
+            let convert_dts = open.feed_payload.convert_dts;
+            let codec = if convert_dts { "ac3" } else { open.audio_codec.as_str() };
             // App-decoded audio: the Load must state the PCM shape, and the demuxer must produce
             // exactly that. Missing facts refuse the Load — a guessed rate plays at the wrong pitch.
-            let pcm = match crate::app_pcm_for_rate(session_rate, open.feed_payload.pcm.clone()) {
+            let pcm_plan = if convert_dts { None } else { open.feed_payload.pcm.clone() };
+            let pcm = match crate::app_pcm_for_rate(session_rate, pcm_plan) {
                 Some(Ok(f)) => Some(f),
                 Some(Err(why)) => {
                     plx_base::eventlog::log(&format!("start_bufferfeed: PCM audio refused — {why}"));
@@ -2053,7 +2060,7 @@ pub fn prepare_native_open(
             // on an output the default was not filmed on.
             let lead_override = plx_base::devtrig::read("pcmavoffset");
             let Some(audio) = load_audio(
-                &codec, session_rate, pcm.is_some(), lead_override.as_deref(), plx_platform::devcaps::audio_stack(),
+                codec, session_rate, pcm.is_some(), lead_override.as_deref(), plx_platform::devcaps::audio_stack(),
             ) else {
                 plx_base::eventlog::log(&format!("start_bufferfeed: unsupported audio codec {codec:?}; refusing incorrect Load declaration"));
                 shared.fail_demux_latch(hooks.load_refusal_latch);
@@ -2066,7 +2073,7 @@ pub fn prepare_native_open(
                 pcm.is_some() && open.pcm_is_lossy,
             );
             if let Some(f) = pcm {
-                plx_base::eventlog::log(&crate::pcm_decode_line(&codec, &f));
+                plx_base::eventlog::log(&crate::pcm_decode_line(codec, &f));
             }
             shared.dg_load_a.store(audio.diagnostic, Ordering::Relaxed);
             // App-decoded audio (`pcm`) and a speed session (`ff::SpeedDecoder`) both declare PCM;

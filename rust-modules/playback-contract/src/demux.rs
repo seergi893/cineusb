@@ -146,6 +146,7 @@ pub enum DemuxEffect {
     SideAnchor(Option<Anchor>),
     ContainerHdr(Option<crate::video::ContainerHdr>),
     DtsPcm(Option<crate::feed::DtsPcmDiag>),
+    DtsAc3Produced,
     FirstAudioPts(i64),
     FileSize(i64),
     TransportRc(i32),

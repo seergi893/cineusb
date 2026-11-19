@@ -300,10 +300,10 @@ const ACTIONS: [(Action, Rect); 3] = [
     (Action::DeleteFolders, Rect::new(1625.0, 222.0, 185.0, 45.0)),
 ];
 
-const UNIFIED_SETTINGS_COUNT: usize = 12;
-const SETTINGS_ORDER: [usize; UNIFIED_SETTINGS_COUNT] = [0, 1, 8, 2, 3, 4, 5, 6, 7, 9, 10, 11];
+const UNIFIED_SETTINGS_COUNT: usize = 13;
+const SETTINGS_ORDER: [usize; UNIFIED_SETTINGS_COUNT] = [0, 1, 8, 2, 3, 4, 12, 5, 6, 7, 9, 10, 11];
 const SETTINGS_GROUPS: [(&[usize], f32); 4] = [
-    (&[0, 1, 8], 118.0), (&[2, 3, 4], 344.0), (&[5], 566.0), (&[6, 7, 9, 10, 11], 676.0),
+    (&[0, 1, 8], 100.0), (&[2, 3, 4, 12], 305.0), (&[5], 560.0), (&[6, 7, 9, 10, 11], 667.0),
 ];
 const SETTING_ROW_PITCH: f32 = 54.0;
 fn unified_setting_rect(index: usize) -> Rect {
@@ -353,6 +353,9 @@ fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'s
             tr("Ajusta la hora a tres tamaños. Pequeño conserva el tamaño original.",
                 "Ajusta l’hora a tres mides. Petit conserva la mida original."),
             [tr("Pequeño", "Petit"), tr("Mediano", "Mitjà"), tr("Grande", "Gran")][settings.clock_size].into()),
+        12 => (tr("Convertir DTS (experimental)", "Converteix DTS (experimental)"),
+            tr("Convierte DTS 5.1 de 48 kHz a Dolby Digital al abrir el vídeo.", "Converteix DTS 5.1 de 48 kHz a Dolby Digital en obrir el vídeo."),
+            on(settings.convert_dts).into()),
         _ => unreachable!("valid setting"),
     }
 }
@@ -384,6 +387,7 @@ struct Settings {
     show_clock: bool,
     clock_format: usize,
     clock_size: usize,
+    convert_dts: bool,
 }
 
 enum SettingsJob {
@@ -585,7 +589,7 @@ impl Browser {
             next_clock_format: now, scan_phase: 0,
             action: None, dialog: None, option: 0, mutating: false,
             selection: None, progress: None,
-            settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0, extensions: false, show_clock: true, clock_format: 0, clock_size: 1 },
+            settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0, extensions: false, show_clock: true, clock_format: 0, clock_size: 1, convert_dts: false },
             settings_job: None, settings_started: false,
             pending: None, scanning: None, next_scan: now, last_tick: now,
             retired_reads: Vec::new(), retired_scans: Vec::new(),
@@ -1909,6 +1913,7 @@ impl Browser {
             9 => next.show_clock = !next.show_clock,
             10 => next.clock_format = step(next.clock_format, 3),
             11 => next.clock_size = step(next.clock_size, 3),
+            12 => next.convert_dts = !next.convert_dts,
             _ => return,
         }
         self.change_settings(next);
@@ -3550,14 +3555,15 @@ fn parse_settings(record: &str) -> Result<Option<Settings>, String> {
     let show_clock = flag(fields.next().or(Some("1")))?;
     let clock_format = choice(fields.next())?;
     let clock_size = choice(fields.next().or(Some("1")))?;
+    let convert_dts = flag(fields.next().or(Some("0")))?;
     if fields.next().is_some() { return Err("invalid settings record".into()); }
-    Ok(Some(Settings { language, forced_subtitles, spanish_audio, auto_next, accent, cards, sort, extensions, show_clock, clock_format, clock_size }))
+    Ok(Some(Settings { language, forced_subtitles, spanish_audio, auto_next, accent, cards, sort, extensions, show_clock, clock_format, clock_size, convert_dts }))
 }
 
 fn save_settings(settings: Settings) -> Result<(), String> {
-    let record = format!("{} {} {} {} {} {} {} {} {} {} {}", if settings.language == Preference::Ca { "ca" } else { "es" },
+    let record = format!("{} {} {} {} {} {} {} {} {} {} {} {}", if settings.language == Preference::Ca { "ca" } else { "es" },
         u8::from(settings.forced_subtitles), u8::from(settings.spanish_audio), u8::from(settings.auto_next),
-        settings.accent, settings.cards, settings.sort, u8::from(settings.extensions), u8::from(settings.show_clock), settings.clock_format, settings.clock_size);
+        settings.accent, settings.cards, settings.sort, u8::from(settings.extensions), u8::from(settings.show_clock), settings.clock_format, settings.clock_size, u8::from(settings.convert_dts));
     #[cfg(not(feature = "hostsim"))]
     return plx_platform::tv::usb::save_preferences(&record).map_err(|error| format!("{error:?}"));
     #[cfg(feature = "hostsim")]
@@ -3945,7 +3951,7 @@ pub(super) fn tick(app: &mut App) {
     let item = local_playing_item(&info, dovi);
     let forced = initial_forced_subtitle(&item, app.usb.settings.forced_subtitles);
     let ok = plx_media::route::set_stream_declaration(ps, &info.video, &info.audio, info.fps, dovi, false)
-        && plx_media::route::set_local_source(ps, file, &title, audio, forced, &item, playback::start_caps());
+        && plx_media::route::set_local_source(ps, file, &title, audio, forced, &item, playback::start_caps(), app.usb.settings.convert_dts);
     if ok {
         plx_media::route::set_stream_source_raster(ps, info.width, info.height);
         if playback::start_playback(ps, &mut app.adapters.player, resume.min(i64::MAX as u64) as i64, playback::Origin::Here,
@@ -4063,6 +4069,14 @@ mod usb_browser_tests {
         assert!(!settings.show_clock);
         assert_eq!(settings.clock_format, 2);
         assert!(parse_settings("ca 0 1 1 2 1 0 1 1 3").is_err());
+    }
+
+    #[test]
+    fn experimental_dts_setting_defaults_to_off_and_restores_saved_value() {
+        assert!(!Browser::new().settings.convert_dts);
+        assert!(!parse_settings("es 0 0 1 0 0 0 0 1 0 1").unwrap().unwrap().convert_dts);
+        assert!(parse_settings("es 0 0 1 0 0 0 0 1 0 1 1").unwrap().unwrap().convert_dts);
+        assert!(parse_settings("es 0 0 1 0 0 0 0 1 0 1 2").is_err());
     }
 
     #[test]
@@ -4631,6 +4645,8 @@ mod usb_browser_tests {
         let language = unified_setting_rect(5);
         assert!(browser.pointer(language.x + 15.0, language.y + 15.0));
         assert_eq!(browser.option, 5);
+        browser.key(Key::Up, false);
+        assert_eq!(browser.option, 12);
         browser.key(Key::Up, false);
         assert_eq!(browser.option, 4);
         // Keep the click on its normal path without writing real preferences.

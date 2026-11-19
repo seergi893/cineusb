@@ -1332,6 +1332,7 @@ fn native_feed_diag() -> FeedDiag {
         load_v: FEED_SHARED.dg_load_v.load(Relaxed),
         load_a: FEED_SHARED.dg_load_a.load(Relaxed),
         dts_pcm: *FEED_SHARED.dg_dts_pcm.lock().unwrap(),
+        dts_ac3: FEED_SHARED.dg_dts_ac3.load(Relaxed),
         feed_state: FEED_SHARED.dg_feed_state.load(Relaxed),
         cb_err: FEED_SHARED.dg_cb_err.load(Relaxed),
         cb_err_at: FEED_SHARED.dg_cb_err_at.load(Relaxed),
