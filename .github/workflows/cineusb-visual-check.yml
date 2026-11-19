@@ -4,6 +4,9 @@ on:
     branches: [codex/cineusb-card-visual-check]
 permissions:
   contents: read
+concurrency:
+  group: cineusb-native-card-captures
+  cancel-in-progress: true
 jobs:
   captures:
     runs-on: ubuntu-24.04
@@ -13,10 +16,18 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/rust-toolchain
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: vendor/ffmpeg-prefix-host
+          key: cineusb-ffmpeg-host-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/dependencies.json', 'ci/build-ffmpeg.sh', 'ci/deps.py', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py') }}
       - name: Install simulator prerequisites
         run: |
-          for try in 1 2 3; do
-            if sudo apt-get -o Acquire::Retries=2 update && sudo apt-get -o Acquire::Retries=2 install --no-install-recommends -y ffmpeg nasm libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev xvfb xauth; then exit 0; fi
+          for mirror in archive.ubuntu.com mirrors.mit.edu; do
+            sources="$RUNNER_TEMP/visual.sources"
+            printf 'Types: deb\nURIs: https://%s/ubuntu/\nSuites: noble noble-updates noble-security\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' "$mirror" > "$sources"
+            opts=(-o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sourceparts=- -o Acquire::ForceIPv4=true -o Acquire::Retries=0 -o Acquire::https::Timeout=12)
+            if sudo timeout 90s apt-get "${opts[@]}" update -o APT::Update::Error-Mode=any &&
+              sudo timeout 90s apt-get "${opts[@]}" install --no-install-recommends -y ffmpeg nasm libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev xvfb xauth; then exit 0; fi
           done
           exit 1
       - name: Compile the Linux USB simulator and bundled FFmpeg
