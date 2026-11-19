@@ -4,7 +4,7 @@ use plx_appkit::player_hud::format_logos::{FormatLogo, FormatLogos};
 use plx_gfx::{gfx, svg, text::TtfMeasure};
 use plx_machine::machine::Measure;
 use plx_play_feed::{LocalVideoDetails, VideoRange};
-use plx_ui::{Painter, Rect, View, hstack::{Flow, Item}, icons::{self, Icon}, label::Label, text_view::TextView, theme};
+use plx_ui::{Painter, Rect, hstack::{Flow, Item}, icons::{self, Icon}, label::Label, text_view::TextView, theme};
 use std::cell::RefCell;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +45,7 @@ impl Category {
         }
     }
 
-    fn symbol(self) -> icons::Svg {
+    fn symbol(self) -> icons::Svg<'static> {
         icons::Svg::new(match self {
             Self::Movie => r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="none" stroke="white" stroke-width="2" stroke-linejoin="round" d="M3 11h18v9H3zm0 0L2 6l17-4 1 5z"/></svg>"#,
             Self::Series => r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="none" stroke="white" stroke-width="2" stroke-linejoin="round" d="m8 2 4 4 4-4M3 6h18v13H3zm5 16h8"/></svg>"#,
@@ -268,8 +268,8 @@ impl Art {
         let gap = if compact { 5.0 } else { 7.0 };
         let size = if compact { theme::size::USB_CARD_META } else { theme::size::DIAGNOSTIC };
         let height = if compact { 13.0 } else { 17.0 };
-        let width = |index, size, height| labels[index].map_or(0.0, |label| mark_width(label, logos[index], size, height));
-        let total = |count, size, height| {
+        let width = |index: usize, size, height| labels[index].map_or(0.0, |label| mark_width(label, logos[index], size, height));
+        let total = |count: usize, size, height| {
             let widths: [f32; 5] = std::array::from_fn(|index| width(index, size, height));
             format_row_width(&widths[..count], gap)
         };

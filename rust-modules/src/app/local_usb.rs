@@ -3596,7 +3596,9 @@ impl Browser {
         if lift > 0.0 {
             p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, theme::with_a(self.accent(), lift));
         }
-        widgets::poster_title(p, card, radius, title, false, &TtfMeasure);
+        let caption = widgets::poster_title(p, card, radius, title, false, &TtfMeasure);
+        draw_line(p, kind, Rect::new(card.x + 16.0, caption.y - 30.0, card.w - 32.0, 28.0),
+            theme::size::CAPTION, false);
     }
 }
 
