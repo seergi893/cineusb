@@ -251,7 +251,53 @@ fn discover_media_folders(volume: &Volume, kind: usize) -> Vec<PathBuf> {
     matched.into_iter().map(|(_, _, path)| path).collect()
 }
 
+const MOVIES_TAB: usize = 1;
 const DOCUMENTALS_TAB: usize = 3;
+const QUALITY_PILL: Rect = Rect::new(1430.0, 128.0, 394.0, 54.0);
+const QUALITY_TABS: [Rect; 3] = [
+    Rect::new(1436.0, 133.0, 120.0, 44.0),
+    Rect::new(1561.0, 133.0, 128.0, 44.0),
+    Rect::new(1694.0, 133.0, 124.0, 44.0),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MovieQuality { Uhd, FullHd }
+
+impl MovieQuality {
+    fn of(width: u32, height: u32) -> Option<Self> {
+        // Midpoint between 1920 and 3840. Use the long edge for rotated sources
+        // and ignore the short edge for cropped cinema once both are known.
+        if width == 0 || height == 0 { return None; }
+        Some(if width.max(height) >= 2880 { Self::Uhd } else { Self::FullHd })
+    }
+
+    fn label(self) -> &'static str {
+        match self { Self::Uhd => "4K UHD", Self::FullHd => "1080p" }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum MovieFilter { #[default] All, Uhd, FullHd }
+
+impl MovieFilter {
+    const TABS: [Self; 3] = [Self::All, Self::Uhd, Self::FullHd];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => tr("Todas", "Totes"),
+            Self::Uhd => MovieQuality::Uhd.label(),
+            Self::FullHd => MovieQuality::FullHd.label(),
+        }
+    }
+
+    fn matches(self, quality: Option<MovieQuality>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Uhd => quality == Some(MovieQuality::Uhd),
+            Self::FullHd => quality == Some(MovieQuality::FullHd),
+        }
+    }
+}
 const FAVORITES_TAB: usize = 4;
 const SETTINGS_TAB: usize = 5;
 const EJECT_TAB: usize = 6;
@@ -561,6 +607,13 @@ pub(super) struct Browser {
     nav_focus: Option<usize>,
     nav_hover: Option<usize>,
     nav_strip: widgets::TabStrip,
+    movie_filter: MovieFilter,
+    movie_entries: Vec<usize>,
+    movie_count: usize,
+    movie_pending: usize,
+    quality_focus: Option<usize>,
+    quality_hover: Option<usize>,
+    quality_strip: widgets::TabStrip,
     discovery_cache: BTreeMap<(PathBuf, u64, usize), Vec<PathBuf>>,
     favorite_section: (bool, Instant, f32),
     dialog_started: Option<Instant>,
@@ -604,6 +657,8 @@ impl Browser {
             queued_history_clears: BTreeSet::new(), loading_favorites: false, favorite_view: None,
             media_view: None,
             nav_tab: 0, nav_focus: None, nav_hover: None, nav_strip: widgets::TabStrip::new(), discovery_cache: BTreeMap::new(),
+            movie_filter: MovieFilter::All, movie_entries: Vec::new(), movie_count: 0, movie_pending: 0,
+            quality_focus: None, quality_hover: None, quality_strip: widgets::TabStrip::new(),
             favorite_section: (false, now, 0.0),
             dialog_started: None, settings_exit: None, settings_return_focus: None,
             button_motion: None, settings_focus_y: Spring::at(unified_setting_rect(0).y), favorite_motion: None,
@@ -618,7 +673,70 @@ impl Browser {
         if let Some(view) = self.media_cards() {
             return if self.documental_folder_picker(view) { view.paths.len() } else { 0 };
         }
+        if self.movie_grid() { return self.movie_entries.len(); }
         self.favorite_cards().map_or_else(|| self.folders.last().map_or(self.scan.volumes.len(), |folder| folder.entries.len()), |view| view.paths.len())
+    }
+
+    fn movie_grid(&self) -> bool {
+        self.nav_tab == MOVIES_TAB && self.media_view.as_ref().is_some_and(|view| self.folders.len() > view.depth)
+    }
+
+    fn folder_index(&self, index: usize) -> Option<usize> {
+        if self.movie_grid() { self.movie_entries.get(index).copied() } else { Some(index) }
+    }
+
+    fn folder_entry(&self, index: usize) -> Option<&Entry> {
+        self.folders.last()?.entries.get(self.folder_index(index)?)
+    }
+
+    fn visible_index_of(&self, name: Option<&std::ffi::OsStr>) -> Option<usize> {
+        let name = name?;
+        (0..self.len()).find(|&index| self.folder_entry(index).is_some_and(|entry| entry.name == name))
+    }
+
+    fn rebuild_movie_grid(&mut self) {
+        self.movie_entries.clear();
+        self.movie_count = 0;
+        self.movie_pending = 0;
+        if !self.movie_grid() { return; }
+        let folder = self.folders.last().expect("movie directory is open");
+        for (index, entry) in folder.entries.iter().enumerate() {
+            // Keep subfolders navigable under every filter. Count films only.
+            if entry.kind == Kind::Folder {
+                self.movie_entries.push(index);
+                continue;
+            }
+            let details = self.details.get(&Self::detail_key(folder, entry));
+            let quality = details.and_then(|d| d.resolution)
+                .and_then(|(width, height)| MovieQuality::of(width, height));
+            self.movie_pending += usize::from(details.is_none());
+            if self.movie_filter.matches(quality) {
+                self.movie_entries.push(index);
+                self.movie_count += 1;
+            }
+        }
+    }
+
+    fn refresh_movie_grid(&mut self) {
+        if !self.movie_grid() { return; }
+        let selected = self.folder_entry(self.selected).map(|entry| entry.name.clone());
+        self.rebuild_movie_grid();
+        let index = self.visible_index_of(selected.as_deref()).unwrap_or(self.selected);
+        if index != self.selected || self.selected >= self.len() { self.select(index, true); }
+    }
+
+    fn choose_movie_filter(&mut self, index: usize) {
+        let filter = MovieFilter::TABS[index];
+        if self.movie_filter == filter { return; }
+        self.movie_filter = filter;
+        self.rebuild_movie_grid();
+        self.restore_view(0, 0.0);
+    }
+
+    fn focus_movie_filter(&mut self) -> bool {
+        if !self.movie_grid() { return false; }
+        self.quality_focus = MovieFilter::TABS.iter().position(|&value| value == self.movie_filter);
+        true
     }
 
     fn request(&mut self, run: impl FnOnce() -> DiskResult + Send + 'static) {
@@ -666,6 +784,7 @@ impl Browser {
                         disk::sort_entries_by(&mut entries, self.settings.sort);
                         let collection = path.strip_prefix(&volume.path).ok().and_then(art::collection);
                         self.folders.push(Folder { volume, path, entries, collection, selected: 0, scroll: 0.0 });
+                        self.rebuild_movie_grid();
                         self.select(0, true);
                         self.status.clear();
                     }
@@ -706,6 +825,7 @@ impl Browser {
                             if let Some(folder) = self.folders.last_mut() {
                                 folder.entries.retain(|entry| path.file_name() != Some(entry.name.as_os_str()));
                             }
+                            self.rebuild_movie_grid();
                             self.select(self.selected, true);
                         }
                         self.facts = None;
@@ -728,6 +848,7 @@ impl Browser {
                         }
                         self.selection = None;
                         self.action = None;
+                        self.rebuild_movie_grid();
                         self.select(self.selected, true);
                         self.status = format!("{}: {}/{total}", tr("Carpetas eliminadas", "Carpetes esborrades"), removed.len());
                         if let Some(error) = error {
@@ -803,6 +924,7 @@ impl Browser {
                         && (self.scan != scan || self.status == tr("Buscando discos USB…", "Buscant discos USB…")) {
                         let selected = self.scan.volumes.get(self.selected).cloned();
                         self.details.clear();
+                        self.refresh_movie_grid();
                         self.invalidate_series_counts();
                         self.scan = scan;
                         self.discovery_cache.retain(|(path, id, _), _| self.scan.volumes.iter()
@@ -880,6 +1002,7 @@ impl Browser {
         self.nav_strip.update(selected_tab as i32, focused_tab as i32,
             |index| NAV_TABS.get(index).map(|rect| (rect.x, rect.w)), widgets::SelMark::Travels, dt);
         changed |= self.nav_strip.moving();
+        changed |= self.step_movie_filter(dt);
         if self.eject_feedback.as_ref().is_some_and(|(_, success, start)| *success && start.elapsed() >= Duration::from_secs(3)) {
             self.eject_feedback = None;
             changed = true;
@@ -962,6 +1085,10 @@ impl Browser {
     }
 
     fn grid_has_focus(&self) -> bool {
+        if self.movie_grid() {
+            return self.quality_focus.is_none() && self.quality_hover.is_none()
+                && self.nav_focus.is_none() && self.nav_hover.is_none();
+        }
         !self.drive_picker() || (self.nav_focus.is_none() && self.nav_hover.is_none())
     }
 
@@ -1050,6 +1177,7 @@ impl Browser {
         if self.media_library() {
             ACTIONS.map(|(action, mut rect)| {
                 rect.y -= 90.0;
+                if self.movie_grid() { rect.x -= QUALITY_PILL.w + 32.0; }
                 (action, rect)
             })
         } else {
@@ -1287,6 +1415,13 @@ impl Browser {
     }
 
     fn leave_media(&mut self) {
+        self.movie_filter = MovieFilter::All;
+        self.quality_focus = None;
+        self.quality_hover = None;
+        self.quality_strip = widgets::TabStrip::new();
+        self.movie_entries.clear();
+        self.movie_count = 0;
+        self.movie_pending = 0;
         if let Some(view) = self.media_view.take() {
             self.folders.truncate(view.depth);
             self.restore_view(view.library_selected, view.library_scroll);
@@ -1318,6 +1453,13 @@ impl Browser {
 
     fn open_nav_tab(&mut self, tab: usize) {
         if self.mutating { return; }
+        if tab == MOVIES_TAB && self.movie_grid() {
+            self.nav_focus = None;
+            self.nav_hover = None;
+            return;
+        }
+        self.quality_focus = None;
+        self.quality_hover = None;
         if matches!(tab, 0 | 1 | 2 | DOCUMENTALS_TAB | FAVORITES_TAB) {
             // A new section supersedes reads from the previous section.
             self.retire_read();
@@ -1498,6 +1640,13 @@ impl Browser {
         plx_machine::idle::invalidate();
     }
 
+    fn is_library_movie(&self, volume: &Volume, path: &std::path::Path) -> bool {
+        self.movie_grid() || path.strip_prefix(&volume.path).is_ok_and(|relative| {
+            relative.parent().is_some_and(|parent| parent.iter()
+                .any(|name| media_folder_score(&name.to_string_lossy(), MOVIES_TAB) > 0))
+        })
+    }
+
     fn video_is_episode(&self, volume: &Volume, path: &std::path::Path) -> bool {
         // Keep episode menus episode-only even when an old standalone favorite
         // is opened from the Favorites tab without a parent folder on the stack.
@@ -1538,8 +1687,8 @@ impl Browser {
                 Err(TryRecvError::Empty) => return false,
                 result => {
                     if self.scan.volumes.contains(&job.volume) {
-                        if self.details.len() >= 1024 { self.details.clear(); }
                         self.details.insert(job.key.clone(), result.unwrap_or_default());
+                        self.refresh_movie_grid();
                     }
                     self.details_job = None;
                     changed = true;
@@ -1554,10 +1703,11 @@ impl Browser {
             }
             None if self.favorite_cards().is_none() && self.pending.is_none() => {
                 self.folders.last().and_then(|folder| {
-                    let grid = self.grid();
-                    poster_grid::visible_in(&grid, self.len(), self.grid_top(), self.scroll.pos)
-                        .filter_map(|index| folder.entries.get(index))
-                        .filter(|entry| entry.kind == Kind::Video)
+                    let visible = self.visible_cards().filter_map(|index| self.folder_entry(index));
+                    // A quality-filtered grid hides unprobed videos. Keep discovering them
+                    // from the same directory listing and the same single metadata worker.
+                    let remaining = folder.entries.iter().filter(|_| self.movie_grid());
+                    visible.chain(remaining).filter(|entry| entry.kind == Kind::Video)
                         .map(|entry| Self::detail_key(folder, entry))
                         .find(|key| !self.details.contains_key(key))
                         .map(|key| (folder.volume.clone(), key))
@@ -1578,6 +1728,7 @@ impl Browser {
             self.details_job = Some(DetailsRequest { volume, key, reply });
         } else {
             self.details.insert(key, Default::default());
+            self.refresh_movie_grid();
         }
         changed
     }
@@ -1720,11 +1871,12 @@ impl Browser {
                             }
                             if let Some((volume, path, mut entries)) = dashboard.refreshed_folder.take() {
                                 disk::sort_entries_by(&mut entries, self.settings.sort);
+                                let selected = self.folder_entry(self.selected).map(|entry| entry.name.clone());
                                 if let Some(folder) = self.folders.last_mut().filter(|folder| folder.volume == volume && folder.path == path) {
-                                    let selected = folder.entries.get(self.selected).map(|entry| entry.name.clone());
                                     folder.entries = entries;
-                                    self.selected = selected.and_then(|name| folder.entries.iter().position(|entry| entry.name == name))
-                                        .unwrap_or(self.selected).min(folder.entries.len().saturating_sub(1));
+                                    self.rebuild_movie_grid();
+                                    let index = self.visible_index_of(selected.as_deref()).unwrap_or(self.selected);
+                                    self.selected = index.min(self.len().saturating_sub(1));
                                 }
                             }
                             if job.manual {
@@ -1740,6 +1892,7 @@ impl Browser {
                             if job.manual {
                                 self.invalidate_series_counts();
                                 self.details.clear();
+                                self.refresh_movie_grid();
                                 if self.favorite_cards().is_some() && self.pending.is_none() { self.show_favorites(); }
                                 self.refresh_notice = Some((tr("Biblioteca actualizada", "Biblioteca actualitzada").into(), now));
                             }
@@ -1815,6 +1968,7 @@ impl Browser {
         self.settings_job = None;
         match result {
             Ok(Some(settings)) => {
+                let selected = self.folder_entry(self.selected).map(|entry| entry.name.clone());
                 let sort_changed = self.settings.sort != settings.sort;
                 let size_changed = self.settings.cards != settings.cards;
                 self.settings = settings;
@@ -1825,6 +1979,10 @@ impl Browser {
                         folder.selected = disk::resort(&mut folder.entries, old, settings.sort);
                         if index == last { self.selected = folder.selected; }
                     }
+                }
+                if sort_changed && self.movie_grid() {
+                    self.rebuild_movie_grid();
+                    self.selected = self.visible_index_of(selected.as_deref()).unwrap_or(self.selected);
                 }
                 if size_changed || sort_changed { self.select(self.selected, true); }
                 i18n::apply_usb_language(settings.language);
@@ -1952,8 +2110,7 @@ impl Browser {
                 }
             }
             Some(Dialog::Next { volume, path, .. }) if self.option == 0 && self.scan.volumes.contains(&volume) => {
-                if let Some(index) = self.folders.last().and_then(|folder| folder.entries.iter()
-                    .position(|entry| Some(entry.name.as_os_str()) == path.file_name())) {
+                if let Some(index) = self.visible_index_of(path.file_name()) {
                     self.select(index, true);
                 }
                 self.play_video_at(&volume, path, false);
@@ -2017,6 +2174,7 @@ impl Browser {
                 self.prepared = None;
                 self.ready = None;
                 self.details.clear();
+                self.refresh_movie_grid();
                 // Drain in-flight workers before ejecting. Dropping their reply
                 // channels does not close descriptors held by those workers.
                 self.invalidate_series_counts();
@@ -2112,7 +2270,7 @@ impl Browser {
             return;
         }
         if let Some(folder) = self.folders.last() {
-            let Some(entry) = folder.entries.get(self.selected) else { return };
+            let Some(entry) = self.folder_index(self.selected).and_then(|index| folder.entries.get(index)) else { return };
             if let Some(marked) = &mut self.selection {
                 if entry.kind == Kind::Folder && !marked.remove(&entry.name) {
                     marked.insert(entry.name.clone());
@@ -2261,6 +2419,7 @@ impl Browser {
         } else {
             (self.scan.volumes.iter().position(|volume| *volume == folder.volume).unwrap_or_default(), 0.0)
         };
+        self.rebuild_movie_grid();
         self.restore_view(index, scroll);
         self.status.clear();
     }
@@ -2299,6 +2458,16 @@ impl Browser {
             }
             return previous != self.option;
         }
+        let previous_quality = self.quality_hover;
+        self.quality_hover = if self.movie_grid() && self.nav_available() && hit(QUALITY_PILL, x, y) {
+            QUALITY_TABS.iter().position(|&rect| hit(rect, x, y)).or(previous_quality)
+        } else { None };
+        if self.quality_hover.is_some() {
+            let left_nav = self.nav_hover.take().is_some() | self.nav_focus.take().is_some();
+            let left_action = self.action.take().is_some();
+            let left_focus = self.quality_focus.take().is_some();
+            return self.quality_hover != previous_quality || left_nav || left_action || left_focus;
+        }
         let previous = self.nav_hover;
         self.nav_hover = if self.nav_available() && hit(NAV_PILL, x, y) {
             // Keep the capsule on its last tab while crossing the gap to the next.
@@ -2308,18 +2477,20 @@ impl Browser {
         };
         if self.nav_hover.is_some() {
             self.nav_focus = None;
+            self.quality_focus = None;
         } else if self.nav_available() {
             if let Some(index) = self.card_at(x, y) {
                 let left_nav = self.nav_focus.take().is_some();
                 let left_action = self.action.take().is_some();
+                let left_quality = self.quality_focus.take().is_some() || previous_quality.is_some();
                 if index != self.selected {
                     self.select(index, false);
                     return true;
                 }
-                return previous.is_some() || left_nav || left_action;
+                return previous.is_some() || left_nav || left_action || left_quality;
             }
         }
-        previous != self.nav_hover
+        previous != self.nav_hover || previous_quality != self.quality_hover
     }
 
     fn click(&mut self, x: f32, y: f32) {
@@ -2352,6 +2523,18 @@ impl Browser {
             }
             return;
         }
+        if self.movie_grid() && hit(QUALITY_PILL, x, y) {
+            if let Some(index) = QUALITY_TABS.iter().position(|&rect| hit(rect, x, y)) {
+                self.nav_focus = None;
+                self.action = None;
+                self.quality_focus = None;
+                self.quality_hover = Some(index);
+                self.choose_movie_filter(index);
+            }
+            return;
+        }
+        self.quality_focus = None;
+        self.quality_hover = None;
         if let Some((action, rect)) = self.content_actions().into_iter()
             .find(|(action, rect)| self.action_available(*action) && hit(*rect, x, y)) {
             self.nav_focus = None;
@@ -2377,13 +2560,15 @@ impl Browser {
         match key {
             Key::PointerHidden => {
                 self.nav_hover = None;
+                self.quality_hover = None;
                 return;
             }
             Key::Ok if repeat => {}
             Key::Up | Key::Down | Key::Left { alt: false } | Key::Right { alt: false } | Key::Ok => {
                 self.nav_focus = self.nav_hover.take().or(self.nav_focus);
+                self.quality_focus = self.quality_hover.take().or(self.quality_focus);
             }
-            Key::Back => self.nav_hover = None,
+            Key::Back => { self.nav_hover = None; self.quality_hover = None; }
             _ => {}
         }
         if let Some(tab) = self.nav_focus {
@@ -2394,6 +2579,7 @@ impl Browser {
                     self.nav_focus = None;
                     self.action = ACTIONS.iter().find(|(action, _)| self.action_available(*action))
                         .map(|(action, _)| *action);
+                    if self.action.is_none() { self.focus_movie_filter(); }
                 }
                 Key::Back => self.nav_focus = None,
                 Key::Ok if !repeat => self.open_nav_tab(tab),
@@ -2445,6 +2631,25 @@ impl Browser {
             }
             return;
         }
+        if self.movie_grid() {
+            if let Some(index) = self.quality_focus {
+                match key {
+                    Key::Left { alt: false } => self.quality_focus = Some(index.saturating_sub(1)),
+                    Key::Right { alt: false } => self.quality_focus = Some((index + 1).min(QUALITY_TABS.len() - 1)),
+                    Key::Up => {
+                        self.quality_focus = None;
+                        self.action = ACTIONS.iter().rev().find(|(action, _)| self.action_available(*action))
+                            .map(|(action, _)| *action);
+                        if self.action.is_none() { self.nav_focus = Some(self.nav_tab); }
+                    }
+                    Key::Down => self.quality_focus = None,
+                    Key::Back if !repeat => self.quality_focus = None,
+                    Key::Ok if !repeat => self.choose_movie_filter(index),
+                    _ => {}
+                }
+                return;
+            }
+        }
         if let Some(action) = self.action {
             let actions: Vec<_> = ACTIONS.iter().map(|(action, _)| *action)
                 .filter(|action| self.action_available(*action)).collect();
@@ -2452,7 +2657,7 @@ impl Browser {
             match key {
                 Key::Left { alt: false } => self.action = actions.get(index.saturating_sub(1)).copied(),
                 Key::Right { alt: false } => self.action = actions.get(index + 1).copied().or(Some(action)),
-                Key::Down => self.action = None,
+                Key::Down => { self.action = None; self.focus_movie_filter(); }
                 Key::Up => { self.action = None; self.nav_focus = Some(self.nav_tab); },
                 Key::Back if !repeat => self.back(),
                 Key::Ok if !repeat => {
@@ -2465,7 +2670,7 @@ impl Browser {
         }
         let dir = match key {
             Key::Up if self.selected < self.grid().cols && (!self.drive_picker() || self.selected < self.scan.volumes.len()) => {
-                self.nav_focus = Some(self.nav_tab);
+                if !self.focus_movie_filter() { self.nav_focus = Some(self.nav_tab); }
                 return;
             }
             Key::Up => Dir::Up,
@@ -2530,7 +2735,7 @@ impl Browser {
             return Some((name, tr("Sèrie", "Sèrie"), cover));
         }
         if let Some(folder) = self.folders.last() {
-            let entry = folder.entries.get(index)?;
+            let entry = self.folder_entry(index)?;
             let (cover, kind) = art::entry_cover(entry, folder.collection);
             Some((display_name(entry, false), kind, cover))
         } else {
@@ -2584,6 +2789,7 @@ impl Browser {
                 }
             }
         }
+        if self.movie_grid() { self.draw_movie_filter(p); }
         if self.media_library() {
             if let Some(name) = self.media_series_name() {
                 draw_line(p, &name, Rect::new(x, 122.0, 880.0, 42.0), theme::size::HEADLINE, true);
@@ -2617,6 +2823,9 @@ impl Browser {
                 if self.loading_favorites { tr("Cargando favoritos…", "Carregant els favorits…") }
                 else if !self.status.is_empty() { self.status.as_str() }
                 else { tr("No hay favoritos en este USB.", "No hi ha cap favorit en aquest USB.") }
+            } else if self.movie_grid() {
+                if self.movie_pending > 0 { tr("Identificando resolución…", "Identificant la resolució…") }
+                else { tr("No hay películas.", "No hi ha pel·lícules.") }
             } else if self.folders.last().is_some() {
                 tr("No hay contenido disponible.", "No hi ha contingut disponible.")
             } else {
@@ -2720,7 +2929,10 @@ impl Browser {
     }
 
     fn draw_browser_hints(&self, p: Painter, x: f32) {
-        let primary = if self.selection.is_some() && self.action.is_none() {
+        let quality_focused = self.movie_grid() && self.quality_focus.or(self.quality_hover).is_some();
+        let primary = if quality_focused {
+            tr("Elegir", "Tria")
+        } else if self.selection.is_some() && self.action.is_none() {
             tr("Marcar", "Marca")
         } else if self.action.is_some() {
             tr("Elegir", "Tria")
@@ -2733,11 +2945,17 @@ impl Browser {
             tr("Volver", "Torna")
         };
         let mut cursor = x;
-        if self.action.is_none() {
-            cursor = draw_hint(p, cursor, HintKey::Icon(Icon::ChevronUp), tr("Barra superior", "Barra superior"));
+        let (direction, target) = if quality_focused {
+            (Icon::ChevronDown, tr("Tarjetas", "Targetes"))
+        } else if self.movie_grid() && self.nav_focus.is_none() {
+            let direction = if self.action.is_some() { Icon::ChevronDown } else { Icon::ChevronUp };
+            (direction, tr("Calidad", "Qualitat"))
+        } else if self.action.is_none() {
+            (Icon::ChevronUp, tr("Barra superior", "Barra superior"))
         } else {
-            cursor = draw_hint(p, cursor, HintKey::Icon(Icon::ChevronDown), tr("Tarjetas", "Targetes"));
-        }
+            (Icon::ChevronDown, tr("Tarjetas", "Targetes"))
+        };
+        cursor = draw_hint(p, cursor, HintKey::Icon(direction), target);
         cursor = draw_hint(p, cursor, HintKey::Ok, primary);
         draw_hint(p, cursor, HintKey::Icon(Icon::ChevronLeft), back);
     }
@@ -2776,6 +2994,39 @@ impl Browser {
         plx_ui::text_view::TextView::new(description, theme::size::CAPTION, theme::TEXT_SECONDARY)
             .with_measure(&TtfMeasure).break_long_words().max_lines(4)
             .draw(p, Rect::new(620.0, 595.0, 690.0, 132.0));
+    }
+
+    fn step_movie_filter(&mut self, dt: f32) -> bool {
+        if !self.movie_grid() { return false; }
+        self.quality_strip.update(self.movie_filter as i32,
+            self.quality_hover.or(self.quality_focus).map_or(-1, |index| index as i32),
+            |index| QUALITY_TABS.get(index).map(|rect| (rect.x, rect.w)), widgets::SelMark::Travels, dt);
+        self.quality_strip.moving()
+    }
+
+    fn draw_movie_filter(&self, p: Painter) {
+        let count = match self.movie_count {
+            1 => tr("1 película", "1 pel·lícula").to_owned(),
+            n => format!("{n} {}", tr("películas", "pel·lícules")),
+        };
+        let size = theme::size::CAPTION;
+        let count_rect = Rect::new(plx_ui::consts::MARGIN_X, QUALITY_PILL.y, 400.0, QUALITY_PILL.h);
+        let run = TtfMeasure.fit_line(&count, count_rect.w, size, false);
+        Label::new(run.as_ptr(), size, theme::TEXT_SECONDARY).draw(p, count_rect);
+        p.rect(QUALITY_PILL, QUALITY_PILL.h * 0.5, theme::USB_CHROME_TOP, theme::USB_CHROME_BOTTOM, 0.0);
+        let ground = widgets::TabGround::Tracked { glass: false };
+        self.quality_strip.draw(p, QUALITY_TABS[0].y, QUALITY_TABS[0].h, ground);
+        for (index, (filter, rect)) in MovieFilter::TABS.into_iter().zip(QUALITY_TABS).enumerate() {
+            let run = TtfMeasure.fit_line(filter.label(), rect.w - 16.0, size, true);
+            let ink = self.quality_strip.pill_ink(rect, ground);
+            widgets::paint_inked(p, &ink, |fm, sm| {
+                Label::new(run.as_ptr(), size, widgets::TabPill::mixed_ink(fm, sm))
+                    .h(HAlign::Center).bold().draw(p, rect);
+            });
+            if self.quality_hover.is_none() && self.quality_focus == Some(index) {
+                p.rring(rect, rect.h * 0.5, 1.5, self.accent());
+            }
+        }
     }
 
     fn draw_nav_pill(&self, p: Painter) {
@@ -2990,9 +3241,9 @@ impl Browser {
         }
         draw_line(p, &subject, Rect::new(x, title_y + 67.0, w, 52.0), theme::size::BODY, true);
         draw_line(p, detail, Rect::new(x, title_y + 133.0, w, 48.0), theme::size::CAPTION, false);
-        if let Dialog::Video { path, .. } = dialog {
+        if let Dialog::Video { volume, path } = dialog {
             if let Some(details) = self.details.get(&self.detail_key_for(path)) {
-                draw_video_details(p, *details, x, 490.0);
+                draw_video_details(p, *details, self.is_library_movie(volume, path), x, 490.0);
             }
         }
         let resume_label = match dialog {
@@ -3202,7 +3453,7 @@ impl Browser {
             draw_line(p, &title, Rect::new(text_x, card.y + card.h - 49.0, text_width, 30.0), theme::size::CAPTION, false);
             return;
         }
-        let current = self.folders.last().filter(|_| self.favorite_cards().is_none() && self.media_cards().is_none()).and_then(|folder| folder.entries.get(index).map(|entry| (folder, entry)));
+        let current = self.folders.last().filter(|_| self.favorite_cards().is_none() && self.media_cards().is_none()).and_then(|folder| self.folder_entry(index).map(|entry| (folder, entry)));
         let record = current.and_then(|(folder, entry)| {
             let identity = self.identity(&folder.volume)?;
             let path = folder.path.join(&entry.name);
@@ -3290,7 +3541,7 @@ impl Browser {
             else { p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, focus); }
         }
         if let Some(marked) = &self.selection {
-            if let Some(entry) = self.folders.last().and_then(|folder| folder.entries.get(index)).filter(|entry| entry.kind == Kind::Folder) {
+            if let Some(entry) = self.folder_entry(index).filter(|entry| entry.kind == Kind::Folder) {
                 let checked = marked.contains(&entry.name);
                 let mark = Rect::new(card.x + card.w - 57.0, card.y + 17.0, 40.0, 40.0);
                 let fill = if checked { self.accent() } else { theme::scrim_black(0.6) };
@@ -3309,7 +3560,7 @@ impl Browser {
             let duration = details.and_then(|details| details.duration_secs)
                 .map(|seconds| card_duration(seconds, slots[1].w - 6.0));
             let quality = details.and_then(|details| details.resolution)
-                .map(|(width, height)| resolution_label(width, height));
+                .and_then(|(width, height)| resolution_label(width, height, self.is_library_movie(&folder.volume, &folder.path.join(&entry.name))));
             let compact = video_card_size(card) == VideoCardSize::Compact;
             for (text, badge) in [episode, duration, quality].into_iter().zip(slots) {
                 let Some(text) = text else { continue };
@@ -3426,21 +3677,20 @@ fn video_duration(seconds: u64) -> String {
     }
 }
 
-fn resolution_label(width: u32, height: u32) -> String {
-    // Use the encoded width for cropped cinema, not the smaller visible height.
-    // Do not promote QHD (2560 pixels wide) to 4K.
-    let wide = width.max(height);
-    let short = width.min(height);
-    match (wide, short) {
-        (3840..=4096, 1600..=2160) => "4K UHD".into(),
-        (1920, 800..=1080) => "1080p".into(),
+fn resolution_label(width: u32, height: u32, movie: bool) -> Option<String> {
+    let quality = MovieQuality::of(width, height)?;
+    let (wide, short) = (width.max(height), width.min(height));
+    if movie || quality == MovieQuality::Uhd || (wide >= 1800 && wide < 2100) {
+        return Some(quality.label().into());
+    }
+    Some(match (wide, short) {
         (1280, 500..=720) => "720p".into(),
         (1..=1024, 1..=576) => "SD".into(),
         _ => format!("{width}×{height}"),
-    }
+    })
 }
 
-fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, start: f32, mut y: f32) {
+fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, movie: bool, start: f32, mut y: f32) {
     use plx_play_feed::VideoRange;
     let dolby = matches!(details.range, Some(VideoRange::DolbyVision | VideoRange::DolbyVisionHdr10));
     let formats = [
@@ -3451,7 +3701,7 @@ fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, sta
     ];
     let size = details.bytes.map(video_size);
     let duration = details.duration_secs.map(video_duration);
-    let resolution = details.resolution.map(|(width, height)| resolution_label(width, height));
+    let resolution = details.resolution.and_then(|(width, height)| resolution_label(width, height, movie));
     let labels = resolution.as_deref().into_iter().map(|text| (text, false)).chain(
         formats.into_iter().flatten().map(|text| (text, true))).chain(
         [size.as_deref(), duration.as_deref()].into_iter().flatten().map(|text| (text, false)));
@@ -4768,6 +5018,129 @@ mod usb_browser_tests {
         assert_eq!(browser.series_root(), Some(volume.path.join("SERIES/Empty Show")));
     }
 
+    fn movie_quality_browser() -> Browser {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
+        let path = volume.path.join("PELIS");
+        browser.scan.volumes.push(volume.clone());
+        browser.nav_tab = MOVIES_TAB;
+        browser.media_view = Some(FavoriteView {
+            volume: volume.clone(), paths: vec![path.clone()], depth: 0, selected: 0, scroll: 0.0,
+            library_selected: 0, library_scroll: 0.0,
+        });
+        let entries = [("B.mkv", 30), ("C.mkv", 15), ("A.mkv", 20), ("D.mkv", 10)]
+            .into_iter().map(|(name, size)| Entry {
+                name: name.into(), kind: Kind::Video, modified: None, size: Some(size),
+            }).collect();
+        browser.folders.push(Folder { volume, path, entries, collection: Some(Cover::Movie), selected: 0, scroll: 0.0 });
+        let folder = browser.folders.last_mut().unwrap();
+        disk::sort_entries_by(&mut folder.entries, browser.settings.sort);
+        for (name, resolution) in [("B.mkv", (3840, 1608)), ("C.mkv", (1920, 804)), ("A.mkv", (3836, 1600))] {
+            let entry = folder.entries.iter().find(|entry| entry.name == name).unwrap();
+            browser.details.insert(Browser::detail_key(folder, entry), plx_play_feed::LocalVideoDetails {
+                resolution: Some(resolution), ..Default::default()
+            });
+        }
+        browser.rebuild_movie_grid();
+        browser
+    }
+
+    fn movie_names(browser: &Browser) -> Vec<String> {
+        (0..browser.len()).map(|index| browser.folder_entry(index).unwrap().name.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn movie_quality_filters_partition_sorted_movies_after_metadata_arrives() {
+        let mut browser = movie_quality_browser();
+        assert_eq!(movie_names(&browser), ["A.mkv", "B.mkv", "C.mkv", "D.mkv"]);
+        assert_eq!((browser.movie_count, browser.movie_pending), (4, 1));
+        browser.choose_movie_filter(1);
+        assert_eq!(movie_names(&browser), ["A.mkv", "B.mkv"]);
+        assert_eq!(browser.movie_count, 2);
+        browser.choose_movie_filter(2);
+        assert_eq!(movie_names(&browser), ["C.mkv"]);
+        let (send, reply) = mpsc::sync_channel(1);
+        let folder = browser.folders.last().unwrap();
+        let entry = folder.entries.iter().find(|entry| entry.name == "D.mkv").unwrap();
+        browser.details_job = Some(DetailsRequest {
+            volume: folder.volume.clone(), key: Browser::detail_key(folder, entry), reply,
+        });
+        send.send(plx_play_feed::LocalVideoDetails {
+            resolution: Some((1904, 800)), ..Default::default()
+        }).unwrap();
+        assert!(browser.update_video_details());
+        assert_eq!(movie_names(&browser), ["C.mkv", "D.mkv"]);
+        assert_eq!((browser.movie_count, browser.movie_pending), (2, 0));
+        let mut partition = movie_names(&browser);
+        browser.choose_movie_filter(1);
+        partition.extend(movie_names(&browser));
+        partition.sort();
+        assert_eq!(partition, ["A.mkv", "B.mkv", "C.mkv", "D.mkv"]);
+        assert!(browser.details_job.is_none());
+        assert!(browser.pending.is_none(), "changing filters does not list the USB again");
+
+        let mut settings = browser.settings;
+        settings.sort = 2;
+        let (send, reply) = mpsc::sync_channel(1);
+        send.send(Ok(settings)).unwrap();
+        browser.settings_started = true;
+        browser.settings_job = Some(SettingsJob::Save(reply));
+        assert!(browser.update_settings());
+        assert_eq!(movie_names(&browser), ["B.mkv", "A.mkv"]);
+        assert_eq!(browser.selected, 1, "sorting keeps A selected");
+        browser.choose_movie_filter(0);
+        assert_eq!(movie_names(&browser), ["B.mkv", "A.mkv", "C.mkv", "D.mkv"]);
+    }
+
+    #[test]
+    fn movie_quality_selection_moves_with_pointer_and_remote_and_resets_on_exit() {
+        let mut browser = movie_quality_browser();
+        let initial_grid = browser.tile_rect(0);
+        for _ in 0..90 { browser.step_movie_filter(1.0 / 60.0); }
+        assert!(!browser.quality_strip.moving());
+        browser.key(Key::Up, false);
+        assert_eq!(browser.quality_focus, Some(0));
+        browser.key(Key::Right { alt: false }, false);
+        assert_eq!(browser.movie_filter, MovieFilter::All, "focus alone keeps the grid");
+        browser.key(Key::Ok, false);
+        assert_eq!(browser.movie_filter, MovieFilter::Uhd);
+        assert!(browser.step_movie_filter(1.0 / 60.0));
+        for _ in 0..90 { browser.step_movie_filter(1.0 / 60.0); }
+        assert!(!browser.quality_strip.moving());
+        assert_eq!(browser.tile_rect(0), initial_grid);
+        browser.key(Key::Down, false);
+        assert!(browser.grid_has_focus());
+        let hd = QUALITY_TABS[2];
+        assert!(browser.pointer(hd.x + 5.0, hd.y + 5.0));
+        assert_eq!(browser.quality_hover, Some(2));
+        assert_eq!(browser.movie_filter, MovieFilter::Uhd);
+        browser.click(hd.x + 5.0, hd.y + 5.0);
+        assert_eq!(movie_names(&browser), ["C.mkv"]);
+        browser.open_nav_tab(MOVIES_TAB);
+        assert_eq!(browser.movie_filter, MovieFilter::FullHd);
+        // Returning from a subfolder keeps the movie quality filter.
+        let volume = browser.folders[0].volume.clone();
+        let nested = browser.folders[0].path.join("Subfolder");
+        browser.folders.push(Folder { volume, path: nested, entries: vec![], collection: Some(Cover::Movie),
+            selected: 0, scroll: 0.0 });
+        browser.rebuild_movie_grid();
+        assert_eq!(browser.movie_count, 0);
+        browser.back();
+        assert_eq!(movie_names(&browser), ["C.mkv"]);
+        browser.back();
+        assert!(!browser.movie_grid());
+        assert_eq!(browser.movie_filter, MovieFilter::All);
+        assert!(!browser.pointer(hd.x + 5.0, hd.y + 5.0));
+        let volume = browser.scan.volumes[0].clone();
+        browser.enter_media(volume, MOVIES_TAB, vec![]);
+        assert_eq!(browser.movie_filter, MovieFilter::All);
+        assert_eq!(browser.details.len(), 3, "re-entering keeps discovered resolutions");
+        for section in [0, 2, DOCUMENTALS_TAB, FAVORITES_TAB] {
+            browser.nav_tab = section;
+            assert!(!browser.focus_movie_filter());
+        }
+    }
+
     #[test]
     fn pelis_folder_is_recognized_as_movies_not_series() {
         assert_eq!(media_folder_score("PELIS", 1), 3);
@@ -4989,15 +5362,24 @@ mod usb_browser_tests {
 
     #[test]
     fn cinematic_quality_badges_do_not_promote_qhd_to_uhd() {
-        assert_eq!(resolution_label(3840, 2160), "4K UHD");
-        assert_eq!(resolution_label(3840, 1608), "4K UHD");
-        assert_eq!(resolution_label(4096, 1716), "4K UHD");
-        assert_eq!(resolution_label(1920, 800), "1080p");
-        assert_eq!(resolution_label(1280, 536), "720p");
-        assert_eq!(resolution_label(2560, 1440), "2560×1440");
-        assert_eq!(resolution_label(2560, 1080), "2560×1080");
-        assert_eq!(resolution_label(1608, 3840), "4K UHD");
-        assert_eq!(video_duration(95 * 60), "1 h 35 min");
+        for (width, height) in [(3840, 2160), (3840, 1608), (3840, 1600), (4096, 1716),
+            (3840, 2076), (3838, 1596), (3860, 2190), (1608, 3840), (2880, 1200)] {
+            assert_eq!(MovieQuality::of(width, height), Some(MovieQuality::Uhd));
+            assert_eq!(resolution_label(width, height, true).as_deref(), Some("4K UHD"));
+        }
+        for (width, height) in [(1920, 1080), (1920, 800), (1920, 804), (1920, 816),
+            (1920, 1040), (1904, 796), (1936, 1096), (2560, 1080), (2879, 1200), (1280, 536)] {
+            assert_eq!(MovieQuality::of(width, height), Some(MovieQuality::FullHd));
+            assert_eq!(resolution_label(width, height, true).as_deref(), Some("1080p"));
+        }
+        assert_eq!(MovieQuality::of(0, 1080), None);
+        assert_eq!(resolution_label(3840, 0, true), None);
+        assert_eq!(resolution_label(1280, 536, false).as_deref(), Some("720p"));
+        assert_eq!(resolution_label(2560, 1440, false).as_deref(), Some("2560×1440"));
+        for width in 1..=4096 {
+            let quality = MovieQuality::of(width, 800);
+            assert_ne!(MovieFilter::Uhd.matches(quality), MovieFilter::FullHd.matches(quality));
+        }
     }
 
     #[test]
