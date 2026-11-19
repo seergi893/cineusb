@@ -45,6 +45,7 @@ pub(super) fn side_reader_request(ps: &route::PlaybackSession, stream: bool)
 /// already applied route and can also be passed to the pure payload builder in host tests.
 pub(super) struct PayloadFacts {
     pub pcm: Option<Result<route::PcmFormat, String>>,
+    pub convert_dts: bool,
     pub max_raster: (u16, u16),
     pub fps: f64,
     pub dovi: plx_data::metadata::Dovi,
@@ -68,6 +69,7 @@ impl PayloadFacts {
     pub fn to_feed(&self) -> plx_playback_contract::feed::PayloadFacts {
         plx_playback_contract::feed::PayloadFacts {
             pcm: self.pcm.clone().map(|value| value.map(Into::into)),
+            convert_dts: self.convert_dts,
             max_raster: self.max_raster,
             fps: self.fps,
             dv: self.dv_presentation.declared().map(|n| plx_playback_contract::feed::DolbyHdrInfo {
@@ -83,6 +85,7 @@ impl PayloadFacts {
     pub fn capture(ps: &route::PlaybackSession) -> Self {
         Self {
             pcm: route::stream_pcm(ps),
+            convert_dts: route::convert_local_dts(ps),
             max_raster: route::sink_max_raster(ps),
             fps: route::stream_fps(ps),
             dovi: route::stream_dovi(ps),

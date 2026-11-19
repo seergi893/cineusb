@@ -149,6 +149,9 @@ SAME(AV_SAMPLE_FMT_U8P, 5, "speed_audio::SampleFormat::from_av U8P");
 SAME(AV_SAMPLE_FMT_S16P, 6, "speed_audio::SampleFormat::from_av S16P");
 SAME(AV_SAMPLE_FMT_S32P, 7, "speed_audio::SampleFormat::from_av S32P");
 SAME(AV_SAMPLE_FMT_FLTP, 8, "speed_audio::SampleFormat::from_av FLTP");
+SAME(AV_CODEC_ID_AC3, 0x15003, "dts_ac3::AC3_ID");
+SAME(AV_CH_LAYOUT_5POINT1, 0x60f, "dts_ac3::SIDE");
+SAME(AV_CH_LAYOUT_5POINT1_BACK, 0x3f, "dts_ac3::BACK");
 SAME(AV_SAMPLE_FMT_DBLP, 9, "speed_audio::SampleFormat::from_av DBLP");
 SAME64(offsetof(AVFrame, pts), 136, "OFF_FRAME_PTS != 96 (ARM EABI int64 alignment) [host]");
 
