@@ -34,7 +34,7 @@ jobs:
         run: |
           HOST=1 RELEASE=1 ci/build-ffmpeg.sh
           cd rust-modules
-          CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" build --locked -p plxnative-modules --bin plxnative-sim --no-default-features --features hostsim,local-usb,devtriggers,play-feed
+          CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" build --profile tvdev --locked -p plxnative-modules --bin plxnative-sim --no-default-features --features hostsim,local-usb,devtriggers,play-feed
           CARGO_INCREMENTAL=0 cargo +"$RUST_TOOLCHAIN" check --locked -p plxnative-modules --lib --no-default-features --features play-uri,play-feed,local-usb
       - name: Capture the native renderer with networking disabled
         run: |

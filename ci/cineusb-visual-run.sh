@@ -11,7 +11,7 @@ for size in 0 1 2; do
     export PLXNATIVE_RUNTIME_DIR="$temp/card-runtime-$size"
     export PLXNATIVE_SHOT="$PLXNATIVE_RUNTIME_DIR/shot.png"
     remote="$PLXNATIVE_RUNTIME_DIR/plxnative-remote"
-    rust-modules/target/debug/plxnative-sim 127.0.0.1 32400 > "$temp/card-shots/simulator-$size.log" 2>&1 &
+    rust-modules/target/tvdev/plxnative-sim 127.0.0.1 32400 > "$temp/card-shots/simulator-$size.log" 2>&1 &
     simulator=$!
     trap 'kill "$simulator" 2>/dev/null || true' EXIT
     for _ in $(seq 1 100); do
