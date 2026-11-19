@@ -7,8 +7,8 @@ mkdir -p "$CINEUSB_SIM_ROOT/Series/Narcos.Mexico.2018.1080p.WEB-DL/Season 3"
 mkdir -p "$CINEUSB_SIM_ROOT/Documentals/Nuestro.Planeta.2019.1080p/Season 2"
 create_media() {
     local name=$1 size=$2 trc=$3 space=$4 primaries=$5 codec=$6
-    ffmpeg -nostdin -v error -f lavfi -i "color=size=$size:rate=1" +      -f lavfi -i anullsrc=r=48000:cl=stereo -t 3 -c:v libx264 -preset ultrafast +      -c:a "$codec" -color_trc "$trc" -colorspace "$space" -color_primaries "$primaries" +      "$temp/$name-source.mkv"
-    ffmpeg -nostdin -v error -itsscale 1800 -i "$temp/$name-source.mkv" -i "$temp/$name-source.mkv" +      -map 0:v -map 1:a -c copy "$temp/$name.mkv"
+    ffmpeg -nostdin -v error -f lavfi -i "color=size=$size:rate=1" -f lavfi -i anullsrc=r=48000:cl=stereo -t 3 -c:v libx264 -threads 2 -preset ultrafast -c:a "$codec" -color_trc "$trc" -colorspace "$space" -color_primaries "$primaries" "$temp/$name-source.mkv"
+    ffmpeg -nostdin -v error -itsscale 3300 -i "$temp/$name-source.mkv" -i "$temp/$name-source.mkv" -map 0:v -map 1:a -c copy "$temp/$name.mkv"
 }
 create_media hdr 3840x1608 smpte2084 bt2020nc bt2020 eac3
 create_media hd 1920x800 bt709 bt709 bt709 ac3
