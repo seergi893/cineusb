@@ -26,6 +26,7 @@ use plx_media_codecs::ffi::{
     OFF_AFRAME_SAMPLE_RATE, OFF_FRAME_DATA, OFF_FRAME_FORMAT,
 };
 use plx_media_codecs::speed_audio::SampleFormat;
+use plx_playback_contract::feed::{DtsPcmDiag, PcmFormat};
 #[cfg(test)]
 use plx_media_codecs::speed_audio::Resampler;
 pub use plx_media_codecs::pcm::*;
@@ -49,6 +50,7 @@ pub struct PcmDecoder {
     /// and held by a host test; the decode works without it, only costlier.
     core_only: bool,
     errors: ErrorBudget,
+    dts_pcm: Option<DtsPcmDiag>,
     /// The pts of the packet being decoded until its first frame is converted (a later frame of the same
     /// packet follows the converter's own clock), and the stamp of the first block of it the converter produced.
     packet_pts: Option<i64>,
@@ -124,7 +126,24 @@ impl PcmDecoder {
         Ok(PcmDecoder {
             ctx, frame, out, buf: Vec::new(), conv, lossy: entry.lossy, core_only, errors: ErrorBudget::default(),
             packet_pts: None, stamp: None,
+            dts_pcm: (entry.id == "dts").then(|| DtsPcmDiag {
+                source_channels: (*par).ch_layout.nb_channels.max(0) as u32,
+                source_rate: (*par).sample_rate.max(0) as u32,
+                source_bits: (*par).bits_per_raw_sample.max(0) as u32,
+                decoded_channels: 0,
+                decoded_rate: 0,
+                core_only,
+                output: PcmFormat {
+                    sample_rate: out.rate, bits: out.bits, channels: out.channels,
+                    source_rate: (*par).sample_rate.max(0) as u32,
+                },
+            }),
         })
+    }
+
+    /// The most recent DTS frame that emitted PCM.
+    pub fn dts_pcm_diag(&self) -> Option<DtsPcmDiag> {
+        self.dts_pcm.filter(|d| d.decoded_channels > 0)
     }
 
     /// The batcher for this decoder's output: blocks shorter than [`MIN_AU_MS`] are gathered into one AU.
@@ -259,6 +278,10 @@ impl PcmDecoder {
                 vec![std::slice::from_raw_parts(*data, nb * width * channels)]
             };
             let stamp = conv.convert(self.packet_pts.take(), rate as u32, fmt, planar, channels, mask, nb, &planes, &mut self.buf);
+            if let (Some(_), Some(diag)) = (stamp, self.dts_pcm.as_mut()) {
+                diag.decoded_channels = channels as u32;
+                diag.decoded_rate = rate as u32;
+            }
             self.stamp = self.stamp.or(stamp);
             return Ok(());
         }

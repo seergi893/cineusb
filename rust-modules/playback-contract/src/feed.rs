@@ -69,6 +69,22 @@ pub struct PcmFormat {
     pub source_rate: u32,
 }
 
+/// Observations from the app's DTS decoder for the active Feed attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DtsPcmDiag {
+    /// The selected DTS stream as probed by FFmpeg. Zero means unspecified.
+    pub source_channels: u32,
+    pub source_rate: u32,
+    /// Source sample precision reported by FFmpeg, when available.
+    pub source_bits: u32,
+    /// The frame that produced PCM, possibly decoded from the DTS core only.
+    pub decoded_channels: u32,
+    pub decoded_rate: u32,
+    pub core_only: bool,
+    /// PCM emitted by CineUSB, before the TV's playback pipeline.
+    pub output: PcmFormat,
+}
+
 /// The Dolby Vision node a Load declares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DolbyHdrInfo {
@@ -614,6 +630,7 @@ pub struct FeedDiag {
     /// The codec the Load payload declared, as a code (`0` = none).
     pub load_v: u8,
     pub load_a: u8,
+    pub dts_pcm: Option<DtsPcmDiag>,
     /// Why the video feeder is where it is, as a code (`0` = nothing fed yet).
     pub feed_state: u8,
     /// The type of the pipeline's first error callback (`18`, latched; 0 = none) and the callback
@@ -643,7 +660,7 @@ impl FeedDiag {
         place_rv: i32::MIN, placed_w: 0, placed_h: 0, load_completed: false, cb_count: 0,
         aq_video: 0, aq_audio: 0, fed_v_pts: 0, fed_a_pts: 0, load_v: 0, load_a: 0, feed_state: 0,
         cb_err: 0, cb_err_at: 0, net_rx: 0, load_at: 0, frame_at: 0, video_fps_milli: 0,
-        fed_v: 0, fed_a: 0, pushed_any: false,
+        fed_v: 0, fed_a: 0, pushed_any: false, dts_pcm: None,
     };
 }
 

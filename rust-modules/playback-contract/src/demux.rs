@@ -145,6 +145,7 @@ pub enum DemuxEffect {
     TrackNames { audio: Vec<String>, subs: Vec<String> },
     SideAnchor(Option<Anchor>),
     ContainerHdr(Option<crate::video::ContainerHdr>),
+    DtsPcm(Option<crate::feed::DtsPcmDiag>),
     FirstAudioPts(i64),
     FileSize(i64),
     TransportRc(i32),

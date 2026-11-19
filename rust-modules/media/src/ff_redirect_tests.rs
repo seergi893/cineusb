@@ -142,6 +142,7 @@ fn hls_open_plain(
         }
         Ok((Src::Curl(_), size, _)) => Ok(("<curl>".into(), size)),
         Ok((Src::Idle, _, _)) => Err("idle".into()),
+        Ok((Src::Local(_), _, _)) => Err("unexpected local file".into()),
         Err(e) => Err(format!("{e:?}")),
     };
     plx_net::stream::http_close(&mut *hs);
@@ -159,6 +160,7 @@ fn progressive_open(port: u16, path: &str) -> Result<(String, i64), String> {
         Ok((Src::Socket { path, .. }, size)) => Ok((path.to_string_lossy().into_owned(), size)),
         Ok((Src::Curl(_), size)) => Ok(("<curl>".into(), size)),
         Ok((Src::Idle, _)) => Err("idle".into()),
+        Ok((Src::Local(_), _)) => Err("unexpected local file".into()),
         Err(e) => Err(format!("{e:?}")),
     };
     plx_net::stream::http_close(&mut *hs);

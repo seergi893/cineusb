@@ -753,6 +753,9 @@ fn pipeline_rows(ps: &plx_media::route::PlaybackSession, d: &plx_media::player::
     #[cfg(not(feature = "play-feed"))]
     let (speed, speed_bad) = (String::new(), false);
     audio.push_str(&speed);
+    if let Some(pcm) = d.dts_pcm.filter(|_| feed) {
+        audio.push_str(&dts_pcm_suffix(pcm));
+    }
     v.push(
         Field::new(plx_platform::i18n::msg::browse_diagnostics_field_audio(), audio)
             .fault((d.load_a == 0 && d.load_v != 0) || speed_bad),
@@ -1022,6 +1025,30 @@ const STALL_MS: u32 = 8_000;
 
 /// The frame count with its clock. `frames` is SEEK-scoped, so "0" has three meanings and the
 /// panel has to say which.
+/// DTS format as observed inside the app. The Feed and HDMI sink can have different formats.
+fn dts_pcm_suffix(d: plx_playback_contract::feed::DtsPcmDiag) -> String {
+    let fact = |value, unit: &str| {
+        if value == 0 { "?".to_string() } else { format!("{value}{unit}") }
+    };
+    let mut line = format!(
+        " · DTS source {} {} {} → app PCM {}ch {} Hz {}-bit",
+        fact(d.source_channels, "ch"), fact(d.source_rate, " Hz"), fact(d.source_bits, "-bit"),
+        d.output.channels, d.output.sample_rate, d.output.bits,
+    );
+    if d.core_only || d.decoded_channels != d.source_channels || d.decoded_rate != d.source_rate {
+        let decoded = if d.core_only { "core" } else { "decoded" };
+        line.push_str(&format!(" · {decoded} {}ch {} Hz", d.decoded_channels, d.decoded_rate));
+    }
+    if d.decoded_channels > d.output.channels {
+        line.push_str(" · downmix");
+    }
+    if d.decoded_rate != d.output.sample_rate {
+        line.push_str(" · resampled");
+    }
+    line.push_str(" · HDMI output unverified");
+    line
+}
+
 /// The Audio row's playback-speed suffix: nothing at 1x on a set that takes speed; the speed, PCM
 /// and the pipeline's verdict on it during a speed session; and a note once the safety net has
 /// turned speed off on this television.
@@ -2049,6 +2076,26 @@ mod tests {
     /// panel must stay above.
     fn transport_top() -> f32 {
         plx_appkit::player_hud::audit_geometry().row_anchor.top
+    }
+
+    #[test]
+    fn dts_audio_reports_source_core_and_pcm_without_claiming_hdmi_output() {
+        use plx_playback_contract::feed::{DtsPcmDiag, PcmFormat};
+        let mut d = DtsPcmDiag {
+            source_channels: 8, source_rate: 96_000, source_bits: 24,
+            decoded_channels: 6, decoded_rate: 48_000, core_only: true,
+            output: PcmFormat { sample_rate: 48_000, bits: 16, channels: 2, source_rate: 96_000 },
+        };
+        assert_eq!(dts_pcm_suffix(d),
+            " · DTS source 8ch 96000 Hz 24-bit → app PCM 2ch 48000 Hz 16-bit · core 6ch 48000 Hz · downmix · HDMI output unverified");
+        d.source_channels = 2;
+        d.source_rate = 44_100;
+        d.source_bits = 0;
+        d.decoded_channels = 2;
+        d.decoded_rate = 44_100;
+        d.core_only = false;
+        assert_eq!(dts_pcm_suffix(d),
+            " · DTS source 2ch 44100 Hz ? → app PCM 2ch 48000 Hz 16-bit · resampled · HDMI output unverified");
     }
 
     /// The Audio row's speed suffix says nothing at 1x, names the speed and the pipeline's verdict

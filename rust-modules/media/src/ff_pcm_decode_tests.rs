@@ -133,7 +133,7 @@ unsafe fn decode_file(path: &Path, out: PcmOut) -> Result<Vec<u8>, String> {
     decode_file_with(path, out, |_| {})
 }
 
-/// [`decode_file`], showing `inspect` the opened decoder first.
+/// [`decode_file`], showing `inspect` the decoder after it has processed the stream.
 unsafe fn decode_file_with(path: &Path, out: PcmOut, inspect: impl FnOnce(&PcmDecoder)) -> Result<Vec<u8>, String> {
     decode_blocks_with(path, out, inspect).map(|blocks| blocks.into_iter().flat_map(|b| b.pcm).collect())
 }
@@ -159,7 +159,6 @@ unsafe fn decode_blocks_with(path: &Path, out: PcmOut, inspect: impl FnOnce(&Pcm
         .expect("an audio stream");
     let result = (|| {
         let mut dec = PcmDecoder::open(stream_codecpar(*streams.add(ai)), out)?;
-        inspect(&dec);
         let mut pkt = av_packet_alloc();
         let mut all = Vec::new();
         let mut failure = None;
@@ -177,6 +176,9 @@ unsafe fn decode_blocks_with(path: &Path, out: PcmOut, inspect: impl FnOnce(&Pcm
             }
         }
         av_packet_free(&mut pkt);
+        if failure.is_none() {
+            inspect(&dec);
+        }
         failure.map_or(Ok(all), Err)
     })();
     avformat_close_input(&mut fmt);
@@ -269,11 +271,8 @@ fn a_file_that_contradicts_the_declared_load_is_refused_not_played_wrong() {
     assert!(why.contains("not an app-decoded codec"), "{why}");
 }
 
-/// **DTS, the lossy entry**: a 5.1 core goes in, stereo 48 kHz S16 comes out, for a 48 kHz and a
-/// 44.1 kHz source alike, over the real `dca` decoder of the bundled component list with
-/// `core_only` accepted. A lossy codec is not bit-exact, so the signal is a sine in the front-left
-/// only: the output must carry it on the left (the downmix ran), be about as long as the source
-/// (the resample kept the duration), and a file declared as anything but stereo 48 kHz is refused.
+/// Exercise each speaker in FFmpeg's 5.1 order and verify the stereo fallback's mapping,
+/// sample rate and duration at both a native output rate and a rate that needs resampling.
 #[test]
 #[ignore = "requires the bundled host FFmpeg and the ffmpeg tool; run make check-ffmpeg"]
 fn dts_decodes_to_stereo_48k_through_the_bundled_ffmpeg() {
@@ -285,20 +284,41 @@ fn dts_decodes_to_stereo_48k_through_the_bundled_ffmpeg() {
     let scratch = Scratch::new("dts");
     let stereo = PcmOut::exact(48_000, 16, 2);
     for (file, rate) in [("a.mkv", 48_000u32), ("b.mkv", 44_100)] {
-        let frames = rate as usize * 2;
-        let mut samples = Vec::with_capacity(frames * 6);
-        for i in 0..frames {
-            let v = ((i as f64 * 2.0 * std::f64::consts::PI * 440.0 / rate as f64).sin() * 12_000.0) as i32;
-            samples.extend_from_slice(&[v, 0, 0, 0, 0, 0]);
+        // One second per speaker: FL, FR, FC, LFE, BL, BR. Use a bass tone for LFE.
+        let mut samples = Vec::with_capacity(rate as usize * 36);
+        for channel in 0..6 {
+            let frequency = if channel == 3 { 60.0 } else { 440.0 };
+            for i in 0..rate {
+                let mut frame = [0; 6];
+                frame[channel] = ((f64::from(i) * std::f64::consts::TAU * frequency
+                    / f64::from(rate)).sin() * 12_000.0) as i32;
+                samples.extend_from_slice(&frame);
+            }
         }
         let src = encode(&scratch.0, file, S16, rate, 6, &samples, "dca", &["-strict", "-2", "-b:a", "768k"]);
-        let got = unsafe { decode_file_with(&src, stereo, |d| assert!(d.core_only(), "core_only was not accepted")) }
-            .unwrap_or_else(|why| panic!("{rate} Hz: {why}"));
-        let pcm: Vec<i16> = got.chunks(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        let got = unsafe { decode_file_with(&src, stereo, |d| {
+            let report = d.dts_pcm_diag().expect("DTS produced PCM");
+            assert!(report.core_only, "core_only was not accepted");
+            assert_eq!((report.source_channels, report.source_rate), (6, rate));
+            assert_eq!((report.decoded_channels, report.decoded_rate), (6, rate));
+            assert_eq!((report.output.channels, report.output.sample_rate, report.output.bits), (2, 48_000, 16));
+        }) }.unwrap_or_else(|why| panic!("{rate} Hz: {why}"));
+        let pcm: Vec<i16> = got.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
         let frames_out = pcm.len() / 2;
-        assert!((95_000..=97_500).contains(&frames_out), "{rate} Hz: 2 s is ~96000 frames at 48 kHz, got {frames_out}");
-        let energy = |ch: usize| pcm.iter().skip(ch).step_by(2).map(|&v| (v as f64).powi(2)).sum::<f64>();
-        assert!(energy(0) > 100.0 * energy(1).max(1.0), "{rate} Hz: the front-left sine must stay on the left");
+        assert!((287_000..=289_500).contains(&frames_out), "{rate} Hz: 6 s is ~288000 frames, got {frames_out}");
+        let energy = |speaker: usize, ch: usize| {
+            let first = speaker * 48_000 + 12_000;
+            pcm[first * 2 + ch..(first + 24_000) * 2].iter().step_by(2)
+                .map(|&v| f64::from(v).powi(2)).sum::<f64>()
+        };
+        for (speaker, side) in [(0, 0), (1, 1), (4, 0), (5, 1)] {
+            let signal = energy(speaker, side);
+            assert!(signal > 1e9 && signal > 100.0 * energy(speaker, 1 - side),
+                "{rate} Hz: speaker {speaker} must map to stereo channel {side}");
+        }
+        let (left, right) = (energy(2, 0), energy(2, 1));
+        assert!(left > 1e9 && (0.99..=1.01).contains(&(left / right)), "centre maps equally to both sides");
+        assert!(energy(3, 0) + energy(3, 1) < left / 1000.0, "LFE is dropped");
     }
     let src = scratch.0.join("a.mkv");
     for wrong in [PcmOut::exact(44_100, 16, 2), PcmOut::exact(48_000, 32, 2), PcmOut::exact(48_000, 16, 6)] {

@@ -599,6 +599,7 @@ pub struct Shared {
     /// "there is no sound": the pipeline was never asked for any.
     pub dg_load_v: AtomicU8,
     pub dg_load_a: AtomicU8,
+    pub dg_dts_pcm: Mutex<Option<plx_playback_contract::feed::DtsPcmDiag>>,
     /// Auto-quality facts written by the demux worker and read through `FeedRaw::abr`.
     /// Mode: 0 inactive, 1 progressive Original watchdog, 2 fixed-session HLS controller. The
     /// adaptive worker's own measurements and decisions are not mailboxes: it ships them to the
@@ -683,6 +684,7 @@ impl Shared {
             dg_fed_a_pts: AtomicI64::new(0),
             dg_load_v: AtomicU8::new(0),
             dg_load_a: AtomicU8::new(0),
+            dg_dts_pcm: Mutex::new(None),
             dg_abr_mode: AtomicU8::new(0),
             dg_abr_kbps: AtomicI64::new(0),
             dg_abr_declared_kbps: AtomicI64::new(-1),
@@ -1035,6 +1037,7 @@ impl Shared {
         self.dg_fed_a_pts.store(0, Ordering::Relaxed);
         self.dg_load_v.store(0, Ordering::Relaxed);
         self.dg_load_a.store(0, Ordering::Relaxed);
+        *self.dg_dts_pcm.lock().unwrap() = None;
         self.dg_abr_mode.store(0, Ordering::Relaxed);
         self.dg_abr_kbps.store(0, Ordering::Relaxed);
         self.dg_abr_declared_kbps.store(-1, Ordering::Relaxed);

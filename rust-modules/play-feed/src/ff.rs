@@ -6566,6 +6566,8 @@ pub(crate) fn demux_source(
                     break;
                 }
                 let mut pcm_dec: Option<crate::ff_pcm::PcmDecoder> = None;
+                let mut dts_pcm_diag = None;
+                session.media().publish(DemuxEffect::DtsPcm(None));
                 if let Some(name) = app_decoded.as_deref().filter(|_| {
                     FEED_AUDIO.load(Ordering::Relaxed) && speed_permille == crate::shared::RATE_NORMAL
                 }) {
@@ -7139,13 +7141,19 @@ pub(crate) fn demux_source(
                                     break;
                                 }
                             };
-                            match pcm_batch.as_mut().and_then(|b| b.push(pcm_pts, pcm)) {
+                            let queued = match pcm_batch.as_mut().and_then(|b| b.push(pcm_pts, pcm)) {
                                 None => 0,
                                 Some((au_pts, au)) => crate::aq::aq_push_gated(
                                     aqa_p, au.as_ptr(), au.len() as c_int, au_pts, 1, 2, gate,
                                     || state.drain_wire(),
                                 ),
+                            };
+                            let observed = dec.dts_pcm_diag();
+                            if observed != dts_pcm_diag {
+                                session.media().publish(DemuxEffect::DtsPcm(observed));
+                                dts_pcm_diag = observed;
                             }
+                            queued
                         } else if dts_audio {
                             let raw = std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize);
                             let Some(core) = dts_core_packet(raw) else {
