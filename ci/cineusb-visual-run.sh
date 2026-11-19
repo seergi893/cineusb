@@ -3,8 +3,11 @@ set -euo pipefail
 temp=$1
 repo=$2
 export CINEUSB_SIM_ROOT="$temp/card-library"
-export PLXNATIVE_APP_DIR="$repo/pkg"
-export PLX_FFMPEG_DIR="$repo/vendor/ffmpeg-prefix-host/lib"
+export PLXNATIVE_APP_DIR="$temp/card-assets"
+mkdir -p "$PLXNATIVE_APP_DIR"
+cp -a "$repo/pkg/." "$PLXNATIVE_APP_DIR/"
+cp -a "$repo/vendor/ffmpeg-prefix-host/lib"/libav*-plx.so* "$PLXNATIVE_APP_DIR/"
+test -f "$PLXNATIVE_APP_DIR/libavformat-plx.so.63"
 export PLXNATIVE_WIN=1920x1080
 cd "$repo"
 for size in 0 1 2; do
@@ -13,7 +16,7 @@ for size in 0 1 2; do
     remote="$PLXNATIVE_RUNTIME_DIR/plxnative-remote"
     rust-modules/target/tvdev/plxnative-sim 127.0.0.1 32400 > "$temp/card-shots/simulator-$size.log" 2>&1 &
     simulator=$!
-    trap 'kill "$simulator" 2>/dev/null || true' EXIT
+    trap 'kill "$simulator" 2>/dev/null || true; cp "$PLXNATIVE_RUNTIME_DIR/plxnative-events.log" "$temp/card-shots/events-$size.log" 2>/dev/null || true' EXIT
     for _ in $(seq 1 100); do
         test ! -p "$remote" || break
         kill -0 "$simulator"
@@ -42,6 +45,7 @@ for size in 0 1 2; do
         sleep 2
     }
     sleep 5
+    grep -q 'ff: bound avformat' "$PLXNATIVE_RUNTIME_DIR/plxnative-events.log"
     if test "$size" = 0; then
         command_keys down
         shot 01-continuar-viendo
