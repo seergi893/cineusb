@@ -93,12 +93,12 @@ pub(super) fn count(path: &Path, mount: Option<u64>, known_series: bool) -> io::
 }
 
 pub(super) fn count_cancellable(path: &Path, mount: Option<u64>, known_series: bool, cancelled: &AtomicBool) -> io::Result<Option<Listing>> {
-    let mut folders = vec![(path.to_path_buf(), None, true)];
+    let mut folders = vec![(path.to_path_buf(), None, false, true)];
     let mut episodic = false;
     let mut seasons = BTreeSet::new();
     let mut unnumbered = 0;
     let mut episodes = Vec::new();
-    while let Some((folder, season, is_root)) = folders.pop() {
+    while let Some((folder, season, covered, is_root)) = folders.pop() {
         if cancelled.load(Ordering::Relaxed) { return Err(io::ErrorKind::Interrupted.into()); }
         let mut unnumbered_episode = false;
         let mut children = Vec::new();
@@ -125,12 +125,15 @@ pub(super) fn count_cancellable(path: &Path, mount: Option<u64>, known_series: b
                         continue;
                     }
                     let named = art::is_season(&name).then(|| super::home::first_number(&name)).flatten();
-                    children.push((child, season.or(named), false));
+                    children.push((child, season.or(named), covered, false));
                 }
             }
         }
         // A populated, unnumbered container can stand for a season in a known show.
-        if known_series && !is_root && season.is_none() && unnumbered_episode { unnumbered += 1; }
+        if known_series && !is_root && !covered && season.is_none() && unnumbered_episode {
+            unnumbered += 1;
+            for child in &mut children { child.2 = true; }
+        }
         folders.extend(children);
     }
     if cancelled.load(Ordering::Relaxed) { return Err(io::ErrorKind::Interrupted.into()); }
@@ -204,7 +207,10 @@ mod usb_browser_tests {
                 std::fs::write(path, []).unwrap();
             }
         }
-        assert_eq!(count(&root, None, true).unwrap(), Some(Counts { seasons: 4, episodes: 8 }));
+        let archive = root.join("Primera entrega/Archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("Capítol 3.mkv"), []).unwrap();
+        assert_eq!(count(&root, None, true).unwrap(), Some(Counts { seasons: 4, episodes: 9 }));
         plx_base::testscratch::remove_tree(&root);
     }
 

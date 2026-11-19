@@ -198,6 +198,8 @@ SAME32(offsetof(AVCodecParameters, extradata_size), 16, "AVCodecParameters.extra
 SAME64(offsetof(AVCodecParameters, extradata_size), 24, "AVCodecParameters.extradata_size moved [host]");
 SAME32(offsetof(AVCodecParameters, format), 28, "AVCodecParameters.format moved");
 SAME64(offsetof(AVCodecParameters, format), 44, "AVCodecParameters.format moved [host]");
+SAME32(offsetof(AVCodecParameters, profile), 48, "AVCodecParameters.profile moved");
+SAME64(offsetof(AVCodecParameters, profile), 64, "AVCodecParameters.profile moved [host]");
 SAME32(offsetof(AVCodecParameters, width), 56, "AVCodecParameters.width moved");
 SAME64(offsetof(AVCodecParameters, width), 72, "AVCodecParameters.width moved [host]");
 SAME32(offsetof(AVCodecParameters, height), 60, "AVCodecParameters.height moved");

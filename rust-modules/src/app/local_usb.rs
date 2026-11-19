@@ -2908,7 +2908,7 @@ impl Browser {
             let bleed = if home { 26.0 } else { 14.0 };
             p.clip(Rect::new(0.0, top - bleed, 1920.0, GRID_BOTTOM - top + bleed));
             if home && !self.dashboard.items.is_empty() {
-                draw_line(p, tr("Seguir viendo", "Continua mirant"),
+                draw_line(p, tr("Continuar viendo", "Continua mirant"),
                     Rect::new(x, self.home_continue_top() - 46.0 - self.scroll.pos, width, 34.0),
                     theme::size::HEADLINE, true);
             }

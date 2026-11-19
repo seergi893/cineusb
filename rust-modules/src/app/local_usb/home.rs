@@ -198,7 +198,13 @@ pub(super) fn episode_numbers(path: &Path) -> Option<(u32, u32)> {
         let name = part.as_os_str().to_string_lossy().to_lowercase();
         super::art::is_season(&name).then(|| first_number(&name)).flatten()
     })?;
-    Some((season, first_number(&path.file_stem()?.to_string_lossy())?))
+    let title = path.file_stem()?.to_string_lossy().to_lowercase();
+    let mut words = title.split(|ch: char| !ch.is_alphanumeric()).filter(|word| !word.is_empty());
+    let first = words.next()?;
+    let number = if matches!(first, "episode" | "episodio" | "episodi" | "capítulo" | "capítol" | "cap") {
+        words.next()?
+    } else { first };
+    Some((season, number.parse().ok()?))
 }
 
 fn episode_order(a: &Path, b: &Path) -> std::cmp::Ordering {
@@ -262,7 +268,13 @@ pub(super) fn recommendations(drive: &Drive) -> Vec<Item> {
 
 pub(super) fn next_episode(drive: &Drive, current: &Path) -> Option<PathBuf> {
     let current = current.strip_prefix(&drive.volume.path).ok()?;
-    let show = drive.videos.iter().find(|video| video.path == current)?.show.as_ref()?;
+    let video = drive.videos.iter().find(|video| video.path == current)?;
+    let Some(show) = &video.show else {
+        let names = drive.videos.iter().filter(|video| video.path.parent() == current.parent())
+            .filter_map(|video| video.path.file_name());
+        let next = continuity::next_named_episode(current.file_name()?, names)?;
+        return Some(drive.volume.path.join(current.with_file_name(next)));
+    };
     drive.videos.iter().filter(|video| video.show.as_ref() == Some(show) && episode_order(&video.path, current).is_gt())
         .min_by(|a, b| episode_order(&a.path, &b.path)).map(|video| drive.volume.path.join(&video.path))
 }
@@ -447,6 +459,29 @@ mod usb_browser_tests {
         assert_eq!(items[0].path, first);
         assert_eq!(drive.stats.unwrap().documentaries, 2);
         plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn flat_episodes_from_home_advance_to_the_same_title() {
+        let (root, volume) = fixture("cineusb-home-flat-episodes");
+        let category = root.join("Sèries");
+        let current = category.join("Una S01E01.mkv");
+        let next = category.join("Una S01E02.mkv");
+        for path in [&current, &next, &category.join("Otra S01E02.mkv")] {
+            std::fs::write(path, []).unwrap();
+        }
+        assert_eq!(next_episode(&drive(volume, BTreeMap::new()), &current), Some(next));
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn season_folder_inference_ignores_release_resolution_and_year() {
+        for file in ["Season 1/Pilot 1080p.mkv", "Season 1/Pilot 2026.mkv"] {
+            assert_eq!(episode_numbers(Path::new(file)), None);
+        }
+        for file in ["Season 1/01 - Pilot.mkv", "Season 1/Capítulo 01.mkv", "Season 1/Pilot 1x01.mkv"] {
+            assert_eq!(episode_numbers(Path::new(file)), Some((1, 1)));
+        }
     }
 
     #[test]

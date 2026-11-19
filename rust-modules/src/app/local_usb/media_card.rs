@@ -111,7 +111,7 @@ impl Readout {
                 let season = if counts.seasons == 1 { "temporada" } else { tr("temporadas", "temporades") };
                 let episode = if counts.episodes == 1 { tr("capítulo", "capítol") } else { tr("capítulos", "capítols") };
                 (format!("{kind} · {} {season} · {} {episode}", counts.seasons, counts.episodes),
-                    format!("{kind} · {}T · {}c", counts.seasons, counts.episodes))
+                    format!("{kind}·{}T/{}c", counts.seasons, counts.episodes))
             }
             Self::Resume { episode, remaining } => {
                 let mut text = kind.to_owned();
@@ -187,7 +187,7 @@ impl Layout {
         let leading = title_size as f32 * 1.08;
         let title_y = rect.y + inset;
         let art_top = if wide { rect.y + 14.0 } else {
-            title_y + leading * 2.0 + if episode { 5.0 } else { 28.0 }
+            title_y + leading * 2.0 + if episode { 5.0 } else { 47.0 }
         };
         let art_bottom = footer_y - 10.0;
         let art_width = if wide { rect.w * 0.33 } else { width };
@@ -268,30 +268,40 @@ impl Art {
         let gap = if compact { 5.0 } else { 7.0 };
         let size = if compact { theme::size::USB_CARD_META } else { theme::size::DIAGNOSTIC };
         let height = if compact { 13.0 } else { 17.0 };
+        let width = |index, size, height| labels[index].map_or(0.0, |label| mark_width(label, logos[index], size, height));
         let total = |count, size, height| {
-            labels[..count].iter().zip(&logos[..count]).filter_map(|(label, logo)| {
-                let label = (*label)?;
-                Some(mark_width(label, *logo, size, height) + gap)
-            }).sum::<f32>() - gap
+            let widths: [f32; 5] = std::array::from_fn(|index| width(index, size, height));
+            format_row_width(&widths[..count], gap)
         };
-        let count = if total(labels.len(), size, height) <= rect.w { labels.len() } else { labels.len() - 1 };
-        let size = if total(count, size, height) > rect.w { theme::size::USB_CARD_META } else { size };
-        let (size, height) = if total(count, size, height) > rect.w {
-            (theme::size::USB_CARD_META_TIGHT, 11.0)
+        let mandatory = labels.len() - 1;
+        let (size, height) = if total(mandatory, size, height) > rect.w {
+            (theme::size::USB_CARD_META, 11.0)
         } else { (size, height) };
-        let mut flow = Flow::new(rect.x, gap);
-        for (label, logo) in labels[..count].iter().zip(&logos[..count]) {
+        let mut row = Flow::new(rect.x, gap);
+        let mut y = rect.y;
+        for (index, (label, logo)) in labels.iter().zip(&logos).enumerate() {
             let Some(label) = *label else { continue };
-            let remaining = rect.x + rect.w - flow.next_x();
-            let width = mark_width(label, *logo, size, height).min(remaining);
-            if width <= 0.0 { break; }
-            let Some(span) = flow.push(Item::new(width)) else { continue; };
-            let slot = Rect::new(span.x, rect.y, span.w, rect.h);
+            let available = rect.x + rect.w - row.next_x();
+            let mut font = size;
+            let mut mark = width(index, size, height);
+            if mark > available {
+                // Channel count is optional. Keep primary formats legible by
+                // wrapping whole marks when the card cannot fit them in one band.
+                if index == mandatory { break; }
+                row = Flow::new(rect.x, gap);
+                y += 19.0;
+            }
+            if mark > rect.w && logo.is_none() {
+                font = theme::size::USB_CARD_META_TIGHT;
+                mark = width(index, font, height);
+            }
+            let Some(span) = row.push(Item::new(mark.min(rect.w))) else { continue; };
+            let slot = Rect::new(span.x, y, span.w, rect.h);
             if let Some(logo) = logo {
                 logo.draw(p, Rect::new(slot.x, slot.y + (slot.h - height) / 2.0, slot.w, height), 1.0);
             } else {
-                let run = TtfMeasure.fit_line(label, width, size, true);
-                Label::new(run.as_ptr(), size, theme::TEXT_SECONDARY).bold().draw(p, slot);
+                let run = TtfMeasure.fit_line(label, slot.w, font, true);
+                Label::new(run.as_ptr(), font, theme::TEXT_SECONDARY).bold().draw(p, slot);
             }
         }
     }
@@ -299,15 +309,15 @@ impl Art {
     fn draw_footer(p: Painter, footer: Rect, card: &Card<'_>, color: [f32; 4], wide: bool) {
         let (full, short) = card.readout.labels(card.category);
         let ink = if card.watched { theme::USB_WATCHED_EDGE } else { color };
-        let smallest = theme::size::USB_CARD_META_TIGHT;
-        let icon_w = if !card.watched && TtfMeasure.width_str(&short, smallest, false) > footer.w - 23.0 { 0.0 } else { 23.0 };
-        if icon_w > 0.0 {
-            let symbol = Rect::new(footer.x, footer.y + 4.0, 17.0, 17.0);
-            if card.watched {
-                icons::draw(p, Icon::Check, symbol, ink);
-            } else {
-                icons::draw_svg(p, card.category.symbol(), symbol, ink);
-            }
+        let smallest = theme::size::USB_CARD_COUNT_TIGHT;
+        let icon_w = if TtfMeasure.width_str(&short, smallest, false) > footer.w - 23.0 { 0.0 } else { 23.0 };
+        let symbol_x = if icon_w > 0.0 { footer.x } else { footer.x + footer.w - 17.0 };
+        let symbol_y = if icon_w > 0.0 { footer.y + 4.0 } else { footer.y - 32.0 };
+        let symbol = Rect::new(symbol_x, symbol_y, 17.0, 17.0);
+        if card.watched {
+            icons::draw(p, Icon::Check, symbol, ink);
+        } else if icon_w > 0.0 {
+            icons::draw_svg(p, card.category.symbol(), symbol, ink);
         }
         let width = footer.w - icon_w;
         let (label, size) = footer_text(&TtfMeasure, &full, &short, width, wide);
@@ -319,11 +329,17 @@ impl Art {
 
 fn footer_text<'a>(measure: &dyn Measure, full: &'a str, short: &'a str, width: f32, wide: bool) -> (&'a str, i32) {
     let tight = theme::size::USB_CARD_META_TIGHT;
+    let smallest = theme::size::USB_CARD_COUNT_TIGHT;
     let candidates = [(full, theme::size::CAPTION), (full, theme::size::DIAGNOSTIC),
-        (full, theme::size::USB_CARD_META), (short, theme::size::USB_CARD_META), (short, tight)];
+        (full, theme::size::USB_CARD_META), (short, theme::size::USB_CARD_META), (short, tight), (short, smallest)];
     candidates.into_iter().skip(usize::from(!wide))
         .find(|(text, size)| measure.width_str(text, *size, false) <= width)
-        .unwrap_or((short, tight))
+        .unwrap_or((short, smallest))
+}
+
+fn format_row_width(widths: &[f32], gap: f32) -> f32 {
+    let present = widths.iter().filter(|&&width| width > 0.0);
+    present.clone().sum::<f32>() + present.count().saturating_sub(1) as f32 * gap
 }
 
 fn mark_width(label: &str, logo: Option<&FormatLogo>, size: i32, logo_height: f32) -> f32 {
@@ -341,7 +357,7 @@ mod usb_browser_tests {
             for scale in [1.0, 1.045] {
                 let rect = Rect::new(80.0, 204.0, grid.w * scale, grid.h * scale);
                 let layout = Layout::new(rect, false, false, true);
-                assert!(layout.title.y + layout.title.h + 27.9 <= layout.art.y);
+                assert!(layout.title.y + layout.title.h + 46.9 <= layout.art.y);
                 assert!(layout.art.y + layout.art.h < layout.progress.y);
                 assert!(layout.progress.y + layout.progress.h < layout.footer.y);
                 assert!(layout.footer.y + layout.footer.h < rect.y + rect.h);
