@@ -338,7 +338,7 @@ fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'s
             if settings.spanish_audio { tr("Español", "Castellà") } else { tr("Automático", "Automàtic") }.into()),
         5 => (tr("Idioma de CineUSB", "Idioma de CineUSB"),
             tr("Cambia el idioma de la interfaz.", "Canvia l'idioma de la interfície."),
-            if settings.language == Preference::Ca { "Català" } else { "Español" }.into()),
+            match settings.language { Preference::Ca => "Català", Preference::En => "English", _ => "Español" }.into()),
         6 => (tr("Color de acento", "Color de ressaltat"),
             tr("Personaliza el color de selección.", "Personalitza el color de selecció."),
             [tr("Morado", "Lila"), tr("Azul", "Blau"), tr("Gris neutro", "Gris neutre")][settings.accent].into()),
@@ -2128,7 +2128,9 @@ impl Browser {
             2 => next.auto_next = !next.auto_next,
             3 => next.forced_subtitles = !next.forced_subtitles,
             4 => next.spanish_audio = !next.spanish_audio,
-            5 => next.language = if next.language == Preference::Ca { Preference::Es } else { Preference::Ca },
+            5 => next.language = match next.language {
+                Preference::Ca => Preference::En, Preference::En => Preference::Es, _ => Preference::Ca,
+            },
             6 => next.accent = step(next.accent, 3),
             7 => next.cards = step(next.cards, 3),
             9 => next.show_clock = !next.show_clock,
@@ -3766,6 +3768,7 @@ fn parse_settings(record: &str) -> Result<Option<Settings>, String> {
     let language = match fields.next() {
         Some("es") => Preference::Es,
         Some("ca") => Preference::Ca,
+        Some("en") => Preference::En,
         _ => return Err("invalid settings language".into()),
     };
     let flag = |field| match field {
@@ -3791,7 +3794,8 @@ fn parse_settings(record: &str) -> Result<Option<Settings>, String> {
 }
 
 fn save_settings(settings: Settings) -> Result<(), String> {
-    let record = format!("{} {} {} {} {} {} {} {} {} {} {} {}", if settings.language == Preference::Ca { "ca" } else { "es" },
+    let language = match settings.language { Preference::Ca => "ca", Preference::En => "en", _ => "es" };
+    let record = format!("{} {} {} {} {} {} {} {} {} {} {} {}", language,
         u8::from(settings.forced_subtitles), u8::from(settings.spanish_audio), u8::from(settings.auto_next),
         settings.accent, settings.cards, settings.sort, u8::from(settings.extensions), u8::from(settings.show_clock), settings.clock_format, settings.clock_size, u8::from(settings.convert_dts));
     #[cfg(not(feature = "hostsim"))]
