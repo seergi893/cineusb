@@ -1,4 +1,6 @@
-use super::{art, continuity, disk::Kind, list_folder};
+use super::{DetailKey, art, continuity, disk::Kind, list_folder, media_card::Formats};
+use plx_play_feed::LocalVideoDetails;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,46 +11,133 @@ pub(super) struct Counts {
     pub episodes: usize,
 }
 
-#[cfg(test)]
-pub(super) fn count(path: &Path, mount: Option<u64>, known_series: bool) -> io::Result<Option<Counts>> {
-    count_cancellable(path, mount, known_series, &AtomicBool::new(false))
+#[derive(Debug)]
+pub(super) struct Listing {
+    pub counts: Counts,
+    pub episodes: Vec<DetailKey>,
 }
 
-pub(super) fn count_cancellable(path: &Path, mount: Option<u64>, known_series: bool, cancelled: &AtomicBool) -> io::Result<Option<Counts>> {
-    let mut counts = Counts::default();
-    let mut folders = vec![(path.to_path_buf(), false, true)];
+pub(super) struct Summary {
+    pub listing: Listing,
+    pub watched: usize,
+    next: usize,
+    resolution: Agreement<&'static str>,
+    video: Agreement<&'static str>,
+    audio: [Agreement<&'static str>; 2],
+    channels: [Agreement<u8>; 2],
+}
+
+struct Agreement<T> {
+    common: Option<T>,
+    unknown: bool,
+    mixed: bool,
+}
+
+impl<T: Copy + Eq> Agreement<T> {
+    fn new() -> Self { Self { common: None, unknown: false, mixed: false } }
+
+    fn add(&mut self, value: Option<T>) {
+        match value {
+            Some(value) => {
+                let first = self.common.get_or_insert(value);
+                self.mixed |= *first != value;
+            }
+            None => self.unknown = true,
+        }
+    }
+
+    fn common(&self, complete: bool) -> Option<T> {
+        self.common.filter(|_| complete && !self.unknown && !self.mixed)
+    }
+}
+
+impl Summary {
+    pub(super) fn new(listing: Listing) -> Self {
+        Self { listing, watched: 0, next: 0, resolution: Agreement::new(), video: Agreement::new(),
+            audio: std::array::from_fn(|_| Agreement::new()),
+            channels: std::array::from_fn(|_| Agreement::new()) }
+    }
+
+    /// Each file contributes once. Returning to a tab consumes the shared details cache.
+    pub(super) fn next_probe(&mut self, cache: &BTreeMap<DetailKey, LocalVideoDetails>) -> Option<&DetailKey> {
+        while let Some(key) = self.listing.episodes.get(self.next) {
+            let Some(details) = cache.get(key) else { return Some(key); };
+            let normal = Formats::file(details, false);
+            self.resolution.add(normal.resolution);
+            self.video.add(normal.video);
+            for (index, format) in [normal, Formats::file(details, true)].into_iter().enumerate() {
+                self.audio[index].add(format.audio);
+                self.channels[index].add(format.channels);
+            }
+            self.next += 1;
+        }
+        None
+    }
+
+    pub(super) fn formats(&self, spanish: bool) -> Formats {
+        let complete = self.next == self.listing.episodes.len();
+        let audio = &self.audio[usize::from(spanish)];
+        Formats {
+            resolution: if self.resolution.mixed { Some("4K UHD / 1080p") } else { self.resolution.common(complete) },
+            video: self.video.common(complete),
+            audio: audio.common(complete),
+            channels: audio.common(complete).and_then(|_| self.channels[usize::from(spanish)].common(complete)),
+            mixed: self.video.mixed || audio.mixed,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn count(path: &Path, mount: Option<u64>, known_series: bool) -> io::Result<Option<Counts>> {
+    count_cancellable(path, mount, known_series, &AtomicBool::new(false)).map(|result| result.map(|listing| listing.counts))
+}
+
+pub(super) fn count_cancellable(path: &Path, mount: Option<u64>, known_series: bool, cancelled: &AtomicBool) -> io::Result<Option<Listing>> {
+    let mut folders = vec![(path.to_path_buf(), None, true)];
     let mut episodic = false;
-    let mut recognized = false;
-    while let Some((folder, in_season, is_root)) = folders.pop() {
+    let mut seasons = BTreeSet::new();
+    let mut unnumbered = 0;
+    let mut episodes = Vec::new();
+    while let Some((folder, season, is_root)) = folders.pop() {
         if cancelled.load(Ordering::Relaxed) { return Err(io::ErrorKind::Interrupted.into()); }
-        let mut direct_episodes = 0;
+        let mut unnumbered_episode = false;
         let mut children = Vec::new();
         for entry in list_folder(&folder, mount)? {
+            let child = folder.join(&entry.name);
             match entry.kind {
                 Kind::Video => {
-                    counts.episodes += 1;
-                    direct_episodes += 1;
-                    episodic |= continuity::episode(&entry.name).is_some();
+                    let stem = child.file_stem().unwrap_or_default().to_string_lossy();
+                    if ["sample", "trailer", "muestra", "tráiler"].iter().any(|name| stem.eq_ignore_ascii_case(name)) {
+                        continue;
+                    }
+                    let tagged = continuity::episode(&entry.name).map(|(_, s, _)| s);
+                    episodic |= tagged.is_some();
+                    if let Some(number) = season.or(tagged) {
+                        seasons.insert(number);
+                    } else {
+                        unnumbered_episode = true;
+                    }
+                    episodes.push((child, entry.size, entry.modified));
                 }
                 Kind::Folder => {
-                    let season = art::is_season(&entry.name.to_string_lossy().to_lowercase());
-                    recognized |= season;
-                    if season && !in_season { counts.seasons += 1; }
-                    children.push((folder.join(entry.name), in_season || season, false));
+                    let name = entry.name.to_string_lossy().to_lowercase();
+                    if matches!(name.as_str(), "sample" | "samples" | "extras" | "trailers" | "featurettes") {
+                        continue;
+                    }
+                    let named = art::is_season(&name).then(|| super::home::first_number(&name)).flatten();
+                    children.push((child, season.or(named), false));
                 }
             }
         }
-        // In an established show, an unlabelled leaf container of episodes is
-        // a season. Root-level videos never invent a season.
-        if known_series && !is_root && !in_season && direct_episodes > 0 {
-            counts.seasons += 1;
-            for child in &mut children { child.1 = true; }
-        }
+        // A populated, unnumbered container can stand for a season in a known show.
+        if known_series && !is_root && season.is_none() && unnumbered_episode { unnumbered += 1; }
         folders.extend(children);
     }
     if cancelled.load(Ordering::Relaxed) { return Err(io::ErrorKind::Interrupted.into()); }
-    if !known_series && !episodic && !recognized { return Ok(None); }
-    Ok(Some(counts))
+    if !known_series && !episodic && seasons.is_empty() { return Ok(None); }
+    episodes.sort_unstable();
+    let counts = Counts { seasons: seasons.len() + unnumbered, episodes: episodes.len() };
+    Ok(Some(Listing { counts, episodes }))
 }
 
 #[cfg(test)]
@@ -61,6 +150,7 @@ mod usb_browser_tests {
         for file in [
             "Mixed/Primer.mkv", "Mixed/Season 1/Segon.mp4", "Mixed/Season 1/Arxiu/Tercer.mkv",
             "Mixed/Temporada 2 - Títol/Quart.mkv", "Mixed/S03/Cinquè.mkv", "Mixed/S03/Cinquè.srt",
+            "Mixed/S03/sample.mkv", "Mixed/Extras/Entrevista.mp4",
             "Mixed/Episodes from elsewhere/Another.mkv", "Mixed/Seasonal/Other.mp4",
             "Direct/One.mkv", "Direct/Two.mp4", "Episodes/Show.S01E01.mkv",
         ] {
@@ -68,11 +158,40 @@ mod usb_browser_tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, []).unwrap();
         }
+        std::fs::create_dir_all(root.join("Mixed/Season 4")).unwrap();
         assert_eq!(count(&root.join("Mixed"), None, false).unwrap(), Some(Counts { seasons: 3, episodes: 7 }));
         assert_eq!(count(&root.join("Direct"), None, true).unwrap(), Some(Counts { seasons: 0, episodes: 2 }));
         assert_eq!(count(&root.join("Direct"), None, false).unwrap(), None);
-        assert_eq!(count(&root.join("Episodes"), None, false).unwrap(), Some(Counts { seasons: 0, episodes: 1 }));
+        assert_eq!(count(&root.join("Episodes"), None, false).unwrap(), Some(Counts { seasons: 1, episodes: 1 }));
         plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn formats_only_claim_agreement_across_inspected_episodes() {
+        use plx_play_feed::{LocalAudioFormat, VideoRange};
+        let a = ("Show S01E01.mkv".into(), None, None);
+        let b = ("Show 1x02.mkv".into(), None, None);
+        let c = ("Show S01E03.mkv".into(), None, None);
+        let mut summary = Summary::new(Listing { counts: Counts { seasons: 1, episodes: 3 },
+            episodes: vec![a.clone(), b.clone(), c.clone()] });
+        let stereo = |label| Some(LocalAudioFormat { label, channels: Some(2) });
+        let mut cache = BTreeMap::from([(a, LocalVideoDetails {
+            resolution: Some((3840, 1608)), range: Some(VideoRange::DolbyVision),
+            audio: [stereo("Dolby Atmos"), stereo("Dolby Digital")], ..Default::default()
+        })]);
+        assert_eq!(summary.next_probe(&cache), Some(&b));
+        assert!(summary.formats(false).video.is_none() && summary.formats(false).audio.is_none());
+        cache.insert(b, LocalVideoDetails { resolution: Some((2048, 858)), range: Some(VideoRange::Hdr10),
+            audio: [stereo("AAC"), stereo("Dolby Digital")], ..Default::default() });
+        assert_eq!(summary.next_probe(&cache), Some(&c));
+        assert_eq!(summary.formats(false).resolution, Some("4K UHD / 1080p"));
+        cache.insert(c, LocalVideoDetails { audio: [None, stereo("Dolby Digital")], ..Default::default() });
+        assert_eq!(summary.next_probe(&cache), None);
+        let automatic = summary.formats(false);
+        assert!(automatic.mixed && automatic.video.is_none() && automatic.audio.is_none());
+        let spanish = summary.formats(true);
+        assert_eq!(spanish.audio, Some("Dolby Digital"));
+        assert_eq!(spanish.channels, Some(2));
     }
 
     #[test]

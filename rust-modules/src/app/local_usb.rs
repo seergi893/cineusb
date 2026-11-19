@@ -4,10 +4,12 @@ mod continuity;
 mod disk;
 mod series;
 mod home;
+mod media_card;
 
 use art::Cover;
 use super::{App, Key, playback};
 use disk::{Entry, Kind, Scan, Volume};
+use media_card::{Category, Readout};
 use plx_gfx::{gfx, text::TtfMeasure};
 use plx_machine::machine::Measure;
 use plx_ui::{
@@ -56,40 +58,6 @@ fn settings_ease(started: Instant) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The fixed metadata band never depends on how many lines a title occupies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VideoCardSize { Compact, Medium, Large }
-
-fn video_card_size(card: Rect) -> VideoCardSize {
-    if card.w < 195.0 { VideoCardSize::Compact }
-    else if card.w < 245.0 { VideoCardSize::Medium }
-    else { VideoCardSize::Large }
-}
-
-/// Reserve a stable metadata footer above the bottom content-type label.
-/// Coordinates derive from actual scaled card dimensions, not the poster size preset.
-fn video_badge_slots(card: Rect) -> [Rect; 3] {
-    let compact = video_card_size(card) == VideoCardSize::Compact;
-    let inset = if compact { 8.0 } else { 12.0 };
-    let gap = if compact { 4.0 } else { 6.0 };
-    let height = if compact { 22.0 } else { 26.0 };
-    let usable = (card.w - inset * 2.0).max(0.0);
-    let half = ((usable - gap) / 2.0).max(0.0);
-    // Preserve the established upper badge layout on normal and large cards.
-    // Only compact cards need a dedicated lower band away from the title.
-    let (first_y, second_y) = if compact {
-        let footer = card.y + card.h - 48.0;
-        (footer - height * 2.0 - 12.0, footer - height - 6.0)
-    } else {
-        (card.y + 81.0, card.y + 112.0)
-    };
-    [
-        Rect::new(card.x + inset, first_y, usable, height),
-        Rect::new(card.x + inset, second_y, half, height),
-        Rect::new(card.x + inset + half + gap, second_y, half, height),
-    ]
-}
-
 /// Compact clock notation for the fixed-width metadata badge. Never elide
 /// the minutes of an hour-long movie (e.g. 1h55, not 1 h 55...).
 fn card_duration(seconds: u64, available_width: f32) -> String {
@@ -106,15 +74,6 @@ fn card_duration(seconds: u64, available_width: f32) -> String {
     } else {
         format!("{hours} h {remainder:02} min")
     }
-}
-
-fn compact_badge_text(value: &str, compact: bool) -> String {
-    if !compact { return value.to_owned(); }
-    if value == "4K UHD" { return "4K".into(); }
-    if let Some(hours) = value.strip_suffix(" min") {
-        return format!("{hours}m");
-    }
-    value.to_owned()
 }
 
 fn nav_glyph_ink(index: usize, focus: f32, selected: f32) -> [f32; 4] {
@@ -522,14 +481,14 @@ struct SeriesRequest {
     known: bool,
     invalidated: bool,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    reply: Receiver<Option<series::Counts>>,
+    reply: Receiver<Option<series::Listing>>,
 }
 
 struct SeriesCacheEntry {
     checked: Instant,
     modified: Option<i64>,
     known: bool,
-    counts: Option<series::Counts>,
+    summary: Option<series::Summary>,
 }
 
 struct HomeRequest {
@@ -548,7 +507,7 @@ impl SeriesCacheEntry {
     fn fresh(&self, card: &SeriesCard<'_>, now: Instant) -> bool {
         now.duration_since(self.checked) < SERIES_REFRESH
             && (card.modified.is_none() || card.modified == self.modified)
-            && (!card.known || self.known || self.counts.is_some())
+            && (!card.known || self.known || self.summary.is_some())
     }
 }
 
@@ -580,6 +539,7 @@ pub(super) struct Browser {
     retired_scans: Vec<Receiver<ScanReply>>,
     details_job: Option<DetailsRequest>,
     details: BTreeMap<DetailKey, plx_play_feed::LocalVideoDetails>,
+    media_art: media_card::Art,
     series_job: Option<SeriesRequest>,
     series_cache: BTreeMap<PathBuf, SeriesCacheEntry>,
     dashboard: home::Dashboard,
@@ -648,6 +608,7 @@ impl Browser {
             retired_reads: Vec::new(), retired_scans: Vec::new(),
             details_job: None, details: BTreeMap::new(),
             series_job: None, series_cache: BTreeMap::new(),
+            media_art: Default::default(),
             dashboard: home::Dashboard { drives: vec![], items: vec![], refreshed_folder: None }, home_job: None,
             home_refresh: Instant::now(), home_force_refresh: false,
             manual_refresh: None, refresh_notice: None,
@@ -1139,7 +1100,8 @@ impl Browser {
         let (index, top, pitch, height) = if index < drives {
             (index, HOME_GRID_TOP, 218.0, 190.0)
         } else {
-            (index.saturating_sub(drives), self.home_continue_top(), 238.0, 210.0)
+            let height = [210.0, 190.0, 230.0][self.settings.cards];
+            (index.saturating_sub(drives), self.home_continue_top(), height + 28.0, height)
         };
         Rect::new(plx_ui::consts::MARGIN_X + (index % 3) as f32 * 582.0,
             top + (index / 3) as f32 * pitch, 564.0, height)
@@ -1318,6 +1280,7 @@ impl Browser {
                         }
                     }
                     self.history_job = None;
+                    self.refresh_series_watched(None);
                     changed = true;
                 }
             }
@@ -1337,12 +1300,47 @@ impl Browser {
         self.history.get(&key[..2 * (end + 1)])?.get(key).copied()
     }
 
+    fn file_record(&self, volume: &Volume, key: &DetailKey) -> u64 {
+        self.identity(volume).and_then(|identity| {
+            let records = self.history.get(&history_prefix(identity))?;
+            Some(file_record(records, identity, volume, key))
+        }).unwrap_or(0)
+    }
+
+    fn watched_episodes(&self, volume: &Volume, listing: &series::Listing) -> usize {
+        let Some(identity) = self.identity(volume) else { return 0; };
+        let Some(records) = self.history.get(&history_prefix(identity)) else { return 0; };
+        listing.episodes.iter().filter(|key| file_record(records, identity, volume, key) == WATCHED).count()
+    }
+
+    fn refresh_series_watched(&mut self, changed: Option<&str>) {
+        for volume in self.scan.volumes.clone() {
+            let Some(identity) = self.identity(&volume).map(str::to_owned) else { continue; };
+            let prefix = history_prefix(&identity);
+            let Some(records) = self.history.get(&prefix) else { continue; };
+            if changed.is_some_and(|key| !key.starts_with(&prefix)) { continue; }
+            for (path, summary) in self.series_cache.iter_mut().filter_map(|(path, entry)| {
+                path.starts_with(&volume.path).then_some((path, entry.summary.as_mut()?))
+            }) {
+                if let Some(key) = changed {
+                    let Some(base) = path_key(&identity, &volume, path) else { continue; };
+                    if !key.strip_prefix(&base).is_some_and(|tail| tail.starts_with("2f")) { continue; }
+                }
+                summary.watched = summary.listing.episodes.iter()
+                    .filter(|key| file_record(records, &identity, &volume, key) == WATCHED).count();
+            }
+        }
+    }
+
     fn change_history(&mut self, key: String, value: u64) {
         // The identity is separated from the filename by an encoded NUL. Only look at byte pairs.
         let Some(end) = key.as_bytes().chunks_exact(2).position(|pair| pair == b"00") else { return };
         let prefix = &key[..2 * (end + 1)];
         let records = self.history.entry(prefix.to_owned()).or_default();
         let previous = records.insert(key.clone(), value);
+        if previous != Some(value) && (value == WATCHED || previous == Some(WATCHED)) {
+            self.refresh_series_watched(Some(&key));
+        }
         self.home_force_refresh |= value == FAVORITE || previous == Some(FAVORITE);
         self.queued_progress.insert(key, value);
         self.flush_progress(false);
@@ -1592,12 +1590,18 @@ impl Browser {
             _ => None,
         }).collect();
         if let Some(index) = parts.iter().position(|name| media_folder_score(&name.to_string_lossy(), 2) > 0) {
+            if parts[..index].iter().any(|name| media_folder_score(&name.to_string_lossy(), DOCUMENTALS_TAB) > 0) {
+                return self.documentary_series_root(folder);
+            }
             if parts.get(index + 1).is_some() {
                 let mut root = folder.volume.path.clone();
                 for part in &parts[..=index + 1] { root.push(part); }
                 return Some(root);
             }
             return None;
+        }
+        if Self::category(&folder.volume, &folder.path, false) == Category::Documentary {
+            return self.documentary_series_root(folder);
         }
         if folder.path.file_name().is_some_and(|name| season_folder(&name.to_string_lossy())) {
             return folder.path.parent().filter(|parent| *parent != folder.volume.path).map(std::path::Path::to_path_buf);
@@ -1606,6 +1610,23 @@ impl Browser {
         folder.entries.iter().any(|entry| (entry.kind == Kind::Video && continuity::episode(&entry.name).is_some())
             || (entry.kind == Kind::Folder && season_folder(&entry.name.to_string_lossy())))
             .then(|| folder.path.clone())
+    }
+
+    fn documentary_series_root(&self, folder: &Folder) -> Option<PathBuf> {
+        let category = |path: &std::path::Path| path.file_name()
+            .is_some_and(|name| media_folder_score(&name.to_string_lossy(), DOCUMENTALS_TAB) > 0);
+        let populated_show = folder.path.ancestors().take_while(|path| !category(path)).find(|path| {
+            self.series_cache.get(*path).is_some_and(|entry| entry.summary.is_some())
+        });
+        if let Some(show) = populated_show { return Some(show.to_path_buf()); }
+        if category(&folder.path) { return None; }
+        if folder.path.file_name().is_some_and(|name| season_folder(&name.to_string_lossy())) {
+            return folder.path.parent().filter(|path| !category(path)).map(std::path::Path::to_path_buf);
+        }
+        folder.entries.iter().any(|entry| {
+            (entry.kind == Kind::Video && continuity::episode(&entry.name).is_some())
+                || (entry.kind == Kind::Folder && season_folder(&entry.name.to_string_lossy()))
+        }).then(|| folder.path.clone())
     }
 
     /// A series favorite belongs to the series folder, not to an individual
@@ -1674,10 +1695,31 @@ impl Browser {
     }
 
     fn detail_key_for(&self, path: &std::path::Path) -> DetailKey {
-        self.folders.last().and_then(|folder| folder.entries.iter()
+        self.folders.last().filter(|folder| path.parent() == Some(folder.path.as_path()))
+            .and_then(|folder| folder.entries.iter()
             .find(|entry| path.file_name() == Some(entry.name.as_os_str()))
             .map(|entry| Self::detail_key(folder, entry)))
+            .or_else(|| self.dashboard.items.iter().find(|item| item.path == path).map(|item| item.detail_key.clone()))
+            .or_else(|| self.dashboard.drives.iter().find_map(|drive| {
+                let relative = path.strip_prefix(&drive.volume.path).ok()?;
+                let video = drive.videos.iter().find(|video| video.path == relative)?;
+                Some((path.to_path_buf(), Some(video.size), Some(video.modified)))
+            }))
             .unwrap_or_else(|| (path.to_path_buf(), None, None))
+    }
+
+    fn card_file(&self, index: usize) -> Option<(&Volume, DetailKey)> {
+        if self.drive_picker() {
+            let item = self.dashboard.items.get(index.checked_sub(self.scan.volumes.len())?)?;
+            return Some((&item.volume, item.detail_key.clone()));
+        }
+        if let Some(view) = self.favorite_cards() {
+            let path = view.paths.get(index)?;
+            return is_video_path(path).then(|| (&view.volume, self.detail_key_for(path)));
+        }
+        let folder = self.folders.last().filter(|_| self.media_cards().is_none())?;
+        let entry = self.folder_entry(index)?;
+        (entry.kind == Kind::Video).then(|| (&folder.volume, Self::detail_key(folder, entry)))
     }
 
     fn update_video_details(&mut self) -> bool {
@@ -1701,17 +1743,19 @@ impl Browser {
                 let key = self.detail_key_for(path);
                 (!self.details.contains_key(&key)).then(|| (volume.clone(), key))
             }
-            None if self.favorite_cards().is_none() && self.pending.is_none() => {
-                self.folders.last().and_then(|folder| {
-                    let visible = self.visible_cards().filter_map(|index| self.folder_entry(index));
+            None if self.pending.is_none() => {
+                std::iter::once(self.selected).chain(self.visible_cards())
+                    .filter_map(|index| self.card_file(index))
+                    .find(|(_, key)| !self.details.contains_key(key))
+                    .or_else(|| {
+                    let folder = self.folders.last().filter(|_| self.movie_grid())?;
                     // A quality-filtered grid hides unprobed videos. Keep discovering them
                     // from the same directory listing and the same single metadata worker.
-                    let remaining = folder.entries.iter().filter(|_| self.movie_grid());
-                    visible.chain(remaining).filter(|entry| entry.kind == Kind::Video)
+                    folder.entries.iter().filter(|entry| entry.kind == Kind::Video)
                         .map(|entry| Self::detail_key(folder, entry))
                         .find(|key| !self.details.contains_key(key))
-                        .map(|key| (folder.volume.clone(), key))
-                })
+                        .map(|key| (&folder.volume, key))
+                }).map(|(volume, key)| (volume.clone(), key)).or_else(|| self.series_probe())
             }
             _ => None,
         };
@@ -1733,23 +1777,37 @@ impl Browser {
         changed
     }
 
+    fn series_probe(&mut self) -> Option<(Volume, DetailKey)> {
+        for index in self.visible_cards() {
+            let Some(card) = self.series_card(index) else { continue; };
+            let (volume, path) = (card.volume.clone(), card.path);
+            if let Some(summary) = self.series_cache.get_mut(&path).and_then(|entry| entry.summary.as_mut()) {
+                if let Some(key) = summary.next_probe(&self.details) {
+                    return Some((volume, key.clone()));
+                }
+            }
+        }
+        None
+    }
+
     fn series_card(&self, index: usize) -> Option<SeriesCard<'_>> {
         let card = if let Some(view) = self.favorite_cards() {
             let path = view.paths.get(index)?;
             if is_video_path(path) { return None; }
             SeriesCard { volume: &view.volume, path: path.clone(), modified: None, known: true }
         } else {
-            if !matches!(self.nav_tab, 0 | 2 | FAVORITES_TAB) || self.media_cards().is_some() { return None; }
+            if !matches!(self.nav_tab, 0 | 2 | DOCUMENTALS_TAB | FAVORITES_TAB) || self.media_cards().is_some() { return None; }
             let folder = self.folders.last()?;
             let entry = folder.entries.get(index)?;
             if entry.kind != Kind::Folder { return None; }
-            let parent_is_category = self.media_view.as_ref().and_then(|view| view.paths.first()) == Some(&folder.path)
+            let parent_is_category = (self.nav_tab == 2 && self.media_view.as_ref().and_then(|view| view.paths.first()) == Some(&folder.path))
                 || folder.path.file_name().is_some_and(|name| media_folder_score(&name.to_string_lossy(), 2) == 3);
             SeriesCard { volume: &folder.volume, path: folder.path.join(&entry.name),
                 modified: entry.modified, known: parent_is_category }
         };
         let name = card.path.file_name()?.to_string_lossy();
-        if art::is_season(&name.to_lowercase()) || (!card.known && media_folder_score(&name, 2) == 3) {
+        if art::is_season(&name.to_lowercase()) || [2, DOCUMENTALS_TAB].into_iter()
+            .any(|category| !card.known && media_folder_score(&name, category) == 3) {
             return None;
         }
         Some(card)
@@ -1766,8 +1824,8 @@ impl Browser {
     fn update_series_counts(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if let Some(job) = &self.series_job {
-            let counts = match job.reply.try_recv() {
-                Ok(counts) => counts,
+            let listing = match job.reply.try_recv() {
+                Ok(listing) => listing,
                 Err(TryRecvError::Disconnected) => None,
                 Err(TryRecvError::Empty) => return false,
             };
@@ -1778,15 +1836,19 @@ impl Browser {
                         .map(|(path, _)| path.clone());
                     if let Some(path) = oldest { self.series_cache.remove(&path); }
                 }
-                let previous = self.series_cache.insert(job.path, SeriesCacheEntry {
-                    checked: now, modified: job.modified, known: job.known, counts,
+                let mut summary = listing.map(series::Summary::new);
+                if let Some(summary) = &mut summary {
+                    summary.next_probe(&self.details);
+                    summary.watched = self.watched_episodes(&job.volume, &summary.listing);
+                }
+                self.series_cache.insert(job.path, SeriesCacheEntry {
+                    checked: now, modified: job.modified, known: job.known, summary,
                 });
-                changed = previous.and_then(|entry| entry.counts) != counts;
+                changed = true;
             }
         }
         if self.mutating || self.dialog.is_some() || self.pending.is_some() { return changed; }
-        let grid = self.grid();
-        let target = poster_grid::visible_in(&grid, self.len(), self.grid_top(), self.scroll.pos)
+        let target = self.visible_cards()
             .filter_map(|index| self.series_card(index))
             .find(|card| !self.series_cache.get(&card.path).is_some_and(|entry| entry.fresh(card, now)));
         let Some(card) = target else { return changed };
@@ -1889,6 +1951,7 @@ impl Browser {
                                 self.dashboard.items.truncate(12);
                                 self.discovery_cache.clear();
                             } else { self.dashboard = dashboard; }
+                            self.refresh_series_watched(None);
                             if job.manual {
                                 self.invalidate_series_counts();
                                 self.details.clear();
@@ -2721,16 +2784,16 @@ impl Browser {
         }
         if let Some(view) = self.media_cards() {
             let path = view.paths.get(index)?;
-            let name = path.file_name()?.to_string_lossy().into_owned();
+            let name = clean_media_title(&path.file_name()?.to_string_lossy(), None);
             let cover = path.strip_prefix(&view.volume.path).ok().and_then(art::collection).unwrap_or(Cover::Folder);
             return Some((name, tr("Carpeta", "Carpeta"), cover));
         }
         if let Some(view) = self.favorite_cards() {
             let path = view.paths.get(index)?;
             if is_video_path(path) {
-                return Some((clean_video_title(&path.file_stem()?.to_string_lossy()), tr("Vídeo", "Vídeo"), Cover::Movie));
+                return Some((video_title(path, None), tr("Vídeo", "Vídeo"), Cover::Movie));
             }
-            let name = path.file_name()?.to_string_lossy().into_owned();
+            let name = clean_media_title(&path.file_name()?.to_string_lossy(), None);
             let cover = path.strip_prefix(&view.volume.path).ok().and_then(art::collection).unwrap_or(Cover::Folder);
             return Some((name, tr("Sèrie", "Sèrie"), cover));
         }
@@ -2792,7 +2855,7 @@ impl Browser {
         if self.movie_grid() { self.draw_movie_filter(p); }
         if self.media_library() {
             if let Some(name) = self.media_series_name() {
-                draw_line(p, &name, Rect::new(x, 122.0, 880.0, 42.0), theme::size::HEADLINE, true);
+                draw_line(p, &clean_media_title(&name, None), Rect::new(x, 122.0, 880.0, 42.0), theme::size::HEADLINE, true);
             }
             if let Some(marked) = &self.selection {
                 let count = format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"));
@@ -3186,11 +3249,10 @@ impl Browser {
                 self.prepared.as_ref().map_or_else(String::new, |media| media.title.clone()), "",
                 ["", tr("Empezar desde el principio", "Torna a començar")]),
             Dialog::Next { path, .. } => (tr("Siguiente episodio", "Episodi següent"),
-                path.file_stem().unwrap_or_default().to_string_lossy().into_owned(), "",
+                video_title(path, None), "",
                 [tr("Reproducir ahora", "Reprodueix ara"), cancel]),
             Dialog::Video { path, .. } => (tr("Opciones del vídeo", "Opcions del vídeo"),
-                (if self.settings.extensions { path.file_name() } else { path.file_stem() })
-                    .unwrap_or_default().to_string_lossy().into_owned(),
+                self.dialog_video_title(path),
                 "",
                 [tr("Reproducir", "Reprodueix"), tr("Eliminar archivo", "Esborra el fitxer")]),
             Dialog::Delete { path, .. } => (tr("¿Eliminar este archivo?", "Vols esborrar aquest fitxer?"),
@@ -3243,7 +3305,7 @@ impl Browser {
         draw_line(p, detail, Rect::new(x, title_y + 133.0, w, 48.0), theme::size::CAPTION, false);
         if let Dialog::Video { volume, path } = dialog {
             if let Some(details) = self.details.get(&self.detail_key_for(path)) {
-                draw_video_details(p, *details, self.is_library_movie(volume, path), x, 490.0);
+                draw_video_details(p, details, self.is_library_movie(volume, path), x, 490.0);
             }
         }
         let resume_label = match dialog {
@@ -3284,6 +3346,17 @@ impl Browser {
                 self.draw_button(p, rect, label, self.option == index, destructive && index == 1, glyph);
             }
         }
+    }
+
+    fn dialog_video_title(&self, path: &std::path::Path) -> String {
+        let key = self.detail_key_for(path);
+        let tagged = self.details.get(&key).and_then(|details| details.title.as_deref());
+        let mut title = video_title(path, tagged);
+        if let Some(extension) = path.extension().filter(|_| self.settings.extensions) {
+            title.push('.');
+            title.push_str(&extension.to_string_lossy());
+        }
+        title
     }
 
     /// A compact, clearly stateful favorite action in the video's own menu.
@@ -3398,42 +3471,108 @@ impl Browser {
             }
             return;
         }
-        let Some(item) = self.dashboard.items.get(index - self.scan.volumes.len()) else { return };
-        let title = plx_ui::text_view::TextView::new(&item.title, theme::size::HEADLINE, theme::TEXT_PRIMARY)
-            .with_measure(&TtfMeasure).bold().break_long_words().leading(36.0).max_lines(2);
-        title.draw(p, Rect::new(x, card.y + 17.0, width - 38.0, 76.0));
-        if item.favorite {
-            draw_glyph(p, Glyph::Star(false), Rect::new(card.x + card.w - 47.0, card.y + 20.0, 25.0, 25.0), theme::USB_FAVORITES);
-        }
-        let episode = item.episode.map(|(season, ep)| format!("T{season} E{ep:02}"))
-            .unwrap_or_else(|| item.path.file_stem().unwrap_or_default().to_string_lossy().into_owned());
-        draw_glyph(p, Glyph::Play, Rect::new(x, card.y + 102.0, 20.0, 20.0), theme::TEXT_SECONDARY);
-        draw_line(p, &episode, Rect::new(x + 30.0, card.y + 96.0, width - 30.0, 32.0), theme::size::CAPTION, false);
-        let (position, duration) = unpack_progress(item.progress);
-        if position > 0 {
-            if duration > 0 {
-                let remaining = video_duration(duration.saturating_sub(position) / 1_000_000_000);
-                let text = format!("{} {remaining}", tr("Quedan", "Queden"));
-                draw_line(p, &text, Rect::new(x, card.y + 143.0, width, 28.0), theme::size::MICRO, false);
-                let bar = Rect::new(x, card.y + card.h - 22.0, width, 4.0);
-                p.rrect(bar, 2.0, 2.0, theme::RAIL_TRACK);
-                let fraction = (position as f64 / duration as f64).clamp(0.0, 1.0) as f32;
-                p.rrect(Rect::new(bar.x, bar.y, bar.w * fraction, bar.h), 2.0, 2.0, self.accent());
-            }
-        }
     }
 
     fn draw_tile(&self, p: Painter, index: usize, focused: bool) {
-        let Some((title, kind, cover)) = self.item(index) else { return };
         let frame = self.tile_rect(index);
         let scale = self.pop.scale(index, focused && self.action.is_none(), &USB_STYLE);
         let card = frame.scaled(scale);
         let radius = USB_STYLE.tile_radius(card, scale);
         let lift = ((scale - 1.0) / (USB_STYLE.focus_scale - 1.0)).clamp(0.0, 1.0);
         if self.drive_picker() {
-            self.draw_home_card(p, index, card, radius, lift);
+            if let Some(item) = index.checked_sub(self.scan.volumes.len()).and_then(|index| self.dashboard.items.get(index)) {
+                self.draw_resume_card(p, item, media_card::Frame { rect: card, radius, lift, accent: self.accent() });
+            } else {
+                self.draw_home_card(p, index, card, radius, lift);
+            }
             return;
         }
+        let media = self.draw_library_card(p, index, media_card::Frame { rect: card, radius, lift, accent: self.accent() });
+        if !media {
+            let Some((title, kind, cover)) = self.item(index) else { return };
+            self.draw_folder_card(p, card, radius, lift, &title, kind, cover);
+        }
+        if let Some(marked) = &self.selection {
+            if let Some(entry) = self.folder_entry(index).filter(|entry| entry.kind == Kind::Folder) {
+                let checked = marked.contains(&entry.name);
+                let mark = Rect::new(card.x + card.w - 57.0, card.y + 17.0, 40.0, 40.0);
+                let fill = if checked { self.accent() } else { theme::scrim_black(0.6) };
+                p.rect(mark, 20.0, fill, fill, 0.0);
+                p.rring(mark, 20.0, 2.0, theme::TEXT_PRIMARY);
+                if checked {
+                    p.rring(card, radius, 3.0, self.accent());
+                    icons::draw(p, Icon::Check, Rect::new(mark.x + 6.0, mark.y + 6.0, 28.0, 28.0), theme::ACCENT_INK);
+                }
+            }
+        }
+    }
+
+    fn category(volume: &Volume, path: &std::path::Path, episodic: bool) -> Category {
+        Category::for_path(path.strip_prefix(&volume.path).unwrap_or(path), episodic)
+    }
+
+    fn draw_resume_card(&self, p: Painter, item: &home::Item, frame: media_card::Frame) {
+        let details = self.details.get(&item.detail_key);
+        let duration = details.and_then(|details| details.duration_secs);
+        let title = if item.episode.is_some() || item.show {
+            clean_media_title(&item.title, None)
+        } else {
+            video_title(&item.path, details.and_then(|details| details.title.as_deref()))
+        };
+        let (fraction, remaining) = media_card::file_progress(item.progress, duration);
+        self.media_art.draw(p, frame, media_card::Card {
+            title: &title, category: Self::category(&item.volume, &item.path, item.show || item.episode.is_some()),
+            formats: details.map_or_else(Default::default, |details| media_card::Formats::file(details, self.settings.spanish_audio)),
+            readout: Readout::Resume { episode: item.episode, remaining },
+            fraction, watched: false, favorite: item.favorite,
+        });
+    }
+
+    fn draw_library_card(&self, p: Painter, index: usize, frame: media_card::Frame) -> bool {
+        if let Some((volume, key)) = self.card_file(index) {
+            let path = &key.0;
+            let details = self.details.get(&key);
+            let numbers = home::episode_numbers(path);
+            let episodic = numbers.is_some() || self.video_is_episode(volume, path);
+            let category = Self::category(volume, path, episodic);
+            let duration = details.and_then(|details| details.duration_secs);
+            let record = self.file_record(volume, &key);
+            let (fraction, _) = media_card::file_progress(record, duration);
+            let title = video_title(path, details.and_then(|details| details.title.as_deref()));
+            let favorite = !episodic && self.favorite_marked(volume, path);
+            self.media_art.draw(p, frame, media_card::Card {
+                title: &title, category, fraction, favorite, watched: record == WATCHED,
+                formats: details.map_or_else(Default::default, |details| media_card::Formats::file(details, self.settings.spanish_audio)),
+                readout: if episodic { Readout::Episode { number: numbers, duration } } else { Readout::File(duration) },
+            });
+            return true;
+        }
+        let Some(series) = self.series_card(index) else { return false; };
+        let summary = self.series_cache.get(&series.path).and_then(|entry| entry.summary.as_ref());
+        if summary.is_none() && !series.known { return false; }
+        let category = Self::category(series.volume, &series.path, true);
+        let title = clean_media_title(&series.path.file_name().unwrap_or_default().to_string_lossy(), None);
+        let counts = summary.map(|summary| summary.listing.counts);
+        let watched = summary.map_or(0, |summary| summary.watched);
+        let total = counts.map_or(0, |counts| counts.episodes);
+        self.media_art.draw(p, frame, media_card::Card {
+            title: &title, category,
+            formats: summary.map_or_else(Default::default, |summary| summary.formats(self.settings.spanish_audio)),
+            readout: counts.map_or(Readout::File(None), Readout::Series),
+            fraction: if total > 0 { watched as f32 / total as f32 } else { 0.0 },
+            watched: total > 0 && watched == total,
+            favorite: self.favorite_marked(series.volume, &series.path),
+        });
+        true
+    }
+
+    fn favorite_marked(&self, volume: &Volume, path: &std::path::Path) -> bool {
+        self.identity(volume).and_then(|id| favorite_key(id, volume, path))
+            .and_then(|key| self.history_value(&key)) == Some(FAVORITE)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_folder_card(&self, p: Painter, card: Rect, radius: f32, lift: f32, title: &str, kind: &str, cover: Cover) {
         if cover == Cover::Drive {
             p.shadow_outside(card, radius, 21.0, 9.0, theme::CARD_SHADOW);
             if lift > 0.0 {
@@ -3450,176 +3589,15 @@ impl Browser {
             let text_x = card.x + 19.0;
             let text_width = card.w - 38.0;
             draw_line(p, kind, Rect::new(text_x, card.y + card.h - 82.0, text_width, 33.0), theme::size::LABEL, true);
-            draw_line(p, &title, Rect::new(text_x, card.y + card.h - 49.0, text_width, 30.0), theme::size::CAPTION, false);
+            draw_line(p, title, Rect::new(text_x, card.y + card.h - 49.0, text_width, 30.0), theme::size::CAPTION, false);
             return;
         }
-        let current = self.folders.last().filter(|_| self.favorite_cards().is_none() && self.media_cards().is_none()).and_then(|folder| self.folder_entry(index).map(|entry| (folder, entry)));
-        let record = current.and_then(|(folder, entry)| {
-            let identity = self.identity(&folder.volume)?;
-            let path = folder.path.join(&entry.name);
-            let key = if entry.kind == Kind::Folder { favorite_key(identity, &folder.volume, &path) }
-                else { entry_key(identity, &folder.volume, &path, entry.size?, entry.modified?) }?;
-            self.history_value(&key)
-        }).unwrap_or_default();
-        if record == WATCHED {
-            if lift > 0.0 {
-                p.shadow_outside(card, radius, 14.0, 5.0, theme::scrim_black(lift * 0.24));
-            }
-            p.rect_sheened(card, radius, theme::USB_WATCHED_TOP, theme::USB_WATCHED_BOTTOM);
-            p.rring(card, radius, 2.0, theme::USB_WATCHED_EDGE);
-        } else { cover.draw(p, card, radius, lift); }
-        if let Some((folder, entry)) = current {
-            // A movie keeps its progress under entry_key and its favorite under
-            // favorite_key. A series episode resolves its favorite to the series
-            // folder. Neither may overwrite the independent playback progress.
-            let path = folder.path.join(&entry.name);
-            let target = if entry.kind == Kind::Video {
-                self.video_favorite_target(&folder.volume, &path)
-            } else {
-                path.clone()
-            };
-            let marked = self.identity(&folder.volume)
-                .and_then(|identity| favorite_key(identity, &folder.volume, &target))
-                .and_then(|key| self.history_value(&key))
-                == Some(FAVORITE);
-            let animation = self.favorite_motion.as_ref().filter(|(changed, _, at)|
-                at.elapsed() < MOTION && *changed == target);
-            // The series folder owns the favorite; its episodes must not each
-            // receive a misleading star badge (nor a favorite action).
-            let show_badge = entry.kind != Kind::Video || !self.video_is_episode(&folder.volume, &path);
-            if show_badge && (marked || animation.is_some()) {
-                let badge = Rect::new(card.x + card.w - 46.0, card.y + 10.0, 36.0, 36.0);
-                p.rect_sheened(badge, 18.0, theme::scrim_black(0.72), theme::scrim_black(0.72));
-                let star = Rect::new(badge.x + 6.0, badge.y + 6.0, 24.0, 24.0);
-                if let Some((_, becoming_marked, started)) = animation {
-                    let alpha = motion_alpha(*started);
-                    draw_glyph(p.alpha(1.0 - alpha), Glyph::Star(!becoming_marked), star, self.accent());
-                    draw_glyph(p.alpha(alpha), Glyph::Star(*becoming_marked), star, self.accent());
-                } else {
-                    draw_glyph(p, Glyph::Star(true), star, self.accent());
-                }
-            }
+        cover.draw(p, card, radius, lift);
+        if lift > 0.0 {
+            p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, theme::with_a(self.accent(), lift));
         }
-        let video = current.is_some_and(|(_, entry)| entry.kind == Kind::Video)
-            || self.favorite_cards().and_then(|view| view.paths.get(index)).is_some_and(|path| is_video_path(path));
-        if video { widgets::art_scrim(p, card, radius, 68.0, widgets::STILL_SCRIM_A); }
-        let series_counts = if video { None } else {
-            self.series_card(index).and_then(|series| self.series_cache.get(&series.path)?.counts)
-        };
-        let caption = if video {
-            // Fixed two-line title zone: a long filename never moves the
-            // episode, running time or resolution labels below it.
-            let compact = video_card_size(card) == VideoCardSize::Compact;
-            let inset = if compact { 8.0 } else { 12.0 };
-            let frame = Rect::new(card.x + inset, card.y + 12.0,
-                card.w - inset * 2.0, if compact { 49.0 } else { 56.0 });
-            let veil = theme::scrim_black(widgets::STILL_SCRIM_A);
-            p.rect(Rect::new(card.x + 6.0, card.y + 6.0, card.w - 12.0, frame.h + 14.0),
-                radius.min(10.0), veil, veil, 0.0);
-            let normal = plx_ui::text_view::TextView::new(&title, theme::size::LABEL, theme::TEXT_PRIMARY)
-                .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2);
-            if normal.truncates(frame.w) {
-                plx_ui::text_view::TextView::new(&title, theme::size::MICRO, theme::TEXT_PRIMARY)
-                    .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2)
-                    .draw(p, frame);
-            } else { normal.draw(p, frame); }
-            frame
-        } else if let Some(counts) = series_counts {
-            draw_series_caption(p, card, radius, &title, counts)
-        } else { widgets::poster_title(p, card, radius, &title, false, &TtfMeasure) };
-        let status_y = if video { card.y + card.h - 44.0 } else { caption.y - 30.0 };
-        let (position, duration) = unpack_progress(record);
-        if duration > 0 {
-            let bar = Rect::new(card.x + 14.0, status_y - 9.0, card.w - 28.0, 5.0);
-            p.rect_sheened(bar, 2.5, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
-            let fill = Rect::new(bar.x, bar.y, bar.w * (position as f64 / duration as f64).clamp(0.0, 1.0) as f32, bar.h);
-            p.rect_sheened(fill, 2.5, self.accent(), self.accent());
-        }
-        if focused && self.action.is_none() {
-            let focus = self.accent();
-            if record == WATCHED { p.rring(card.scaled(0.96), radius, 1.5, focus); }
-            else { p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, focus); }
-        }
-        if let Some(marked) = &self.selection {
-            if let Some(entry) = self.folder_entry(index).filter(|entry| entry.kind == Kind::Folder) {
-                let checked = marked.contains(&entry.name);
-                let mark = Rect::new(card.x + card.w - 57.0, card.y + 17.0, 40.0, 40.0);
-                let fill = if checked { self.accent() } else { theme::scrim_black(0.6) };
-                p.rect(mark, 20.0, fill, fill, 0.0);
-                p.rring(mark, 20.0, 2.0, theme::TEXT_PRIMARY);
-                if checked {
-                    p.rring(card, radius, 3.0, self.accent());
-                    icons::draw(p, Icon::Check, Rect::new(mark.x + 6.0, mark.y + 6.0, 28.0, 28.0), theme::ACCENT_INK);
-                }
-            }
-        }
-        if let Some((folder, entry)) = current.filter(|(_, entry)| entry.kind == Kind::Video) {
-            let details = self.details.get(&Self::detail_key(folder, entry));
-            let episode = continuity::episode(&entry.name).map(|(_, season, episode)| format!("{season}×{episode:02}"));
-            let slots = video_badge_slots(card);
-            let duration = details.and_then(|details| details.duration_secs)
-                .map(|seconds| card_duration(seconds, slots[1].w - 6.0));
-            let quality = details.and_then(|details| details.resolution)
-                .and_then(|(width, height)| resolution_label(width, height, self.is_library_movie(&folder.volume, &folder.path.join(&entry.name))));
-            let compact = video_card_size(card) == VideoCardSize::Compact;
-            for (text, badge) in [episode, duration, quality].into_iter().zip(slots) {
-                let Some(text) = text else { continue };
-                if badge.w < 15.0 { continue; }
-                let text = compact_badge_text(&text, compact);
-                let font = if compact { theme::size::MICRO } else { theme::size::DIAGNOSTIC };
-                let run = TtfMeasure.fit_line(&text, badge.w - 6.0, font, true);
-                p.rect_sheened(badge, 8.0, theme::scrim_black(0.75), theme::scrim_black(0.75));
-                if focused && self.action.is_none() { p.rring(badge, 8.0, 1.0, self.accent()); }
-                Label::new(run.as_ptr(), font, theme::TEXT_PRIMARY)
-                    .h(HAlign::Center).bold().draw(p, badge);
-            }
-        }
-        if record == WATCHED {
-            icons::draw(p, Icon::Check, Rect::new(card.x + 15.0, status_y + 5.0, 22.0, 22.0), theme::USB_WATCHED_EDGE);
-            draw_line(p, tr("Visto", "Vist"), Rect::new(card.x + 44.0, status_y, card.w - 58.0, 28.0), theme::size::MICRO, true);
-        } else if series_counts.is_none() {
-            draw_line(p, kind, Rect::new(card.x + 16.0, status_y, card.w - 32.0, 28.0), theme::size::CAPTION, false);
-        }
+        widgets::poster_title(p, card, radius, title, false, &TtfMeasure);
     }
-}
-
-fn draw_series_caption(p: Painter, card: Rect, radius: f32, title: &str, counts: series::Counts) -> Rect {
-    let episodes = format!("{} {}", counts.episodes, if counts.episodes == 1 {
-        tr("episodio", "capítol")
-    } else {
-        tr("episodios", "capítols")
-    });
-    let seasons = format!("{} {}", counts.seasons, if counts.seasons == 1 {
-        tr("temporada", "temporada")
-    } else {
-        tr("temporadas", "temporades")
-    });
-    let combined = format!("{seasons} · {episodes}");
-    let width = card.w - 24.0;
-    let x = card.x + 12.0;
-    let text_size = theme::size::MICRO;
-    let episodes_only = [episodes.as_str()];
-    let single_line = [combined.as_str()];
-    let stacked = [seasons.as_str(), episodes.as_str()];
-    let rows: &[&str] = if counts.seasons == 0 {
-        &episodes_only
-    } else if TtfMeasure.width_str(&combined, text_size, false) <= width {
-        &single_line
-    } else {
-        &stacked
-    };
-    let row_height = 27.0;
-    let meta_y = card.y + card.h - 8.0 - rows.len() as f32 * row_height;
-    let title = plx_ui::text_view::TextView::new(title, theme::size::LABEL, theme::TEXT_PRIMARY)
-        .with_measure(&TtfMeasure).bold().break_long_words().max_lines(2);
-    let title_height = title.measure_h(width);
-    let frame = Rect::new(x, meta_y - 4.0 - title_height, width, title_height);
-    widgets::art_scrim(p, card, radius, card.y + card.h - frame.y + 38.0, widgets::STILL_SCRIM_A);
-    title.draw(p, frame);
-    for (index, row) in rows.iter().enumerate() {
-        draw_line(p, row, Rect::new(x, meta_y + index as f32 * row_height, width, row_height), text_size, false);
-    }
-    frame
 }
 
 fn hit(rect: Rect, x: f32, y: f32) -> bool {
@@ -3690,7 +3668,7 @@ fn resolution_label(width: u32, height: u32, movie: bool) -> Option<String> {
     })
 }
 
-fn draw_video_details(p: Painter, details: plx_play_feed::LocalVideoDetails, movie: bool, start: f32, mut y: f32) {
+fn draw_video_details(p: Painter, details: &plx_play_feed::LocalVideoDetails, movie: bool, start: f32, mut y: f32) {
     use plx_play_feed::VideoRange;
     let dolby = matches!(details.range, Some(VideoRange::DolbyVision | VideoRange::DolbyVisionHdr10));
     let formats = [
@@ -3921,10 +3899,27 @@ fn entry_key(identity: &str, volume: &Volume, path: &std::path::Path, size: u64,
 // match. This keeps existing resume entries readable across driver differences.
 fn matching_size_resume(records: &BTreeMap<String, u64>, current: &str) -> Option<(String, u64)> {
     let prefix = current.get(..current.len().checked_sub(16)?)?;
-    records.iter().find_map(|(key, value)| {
-        (key.len() == current.len() && key.starts_with(prefix) && *value != 0 && *value != WATCHED
+    records.range(prefix.to_owned()..).take_while(|(key, _)| key.starts_with(prefix)).find_map(|(key, value)| {
+        (key.len() == current.len() && *value != 0 && *value != WATCHED
             && *value != FAVORITE).then(|| (key.clone(), *value))
     })
+}
+
+fn file_record(records: &BTreeMap<String, u64>, identity: &str, volume: &Volume, key: &DetailKey) -> u64 {
+    let (path, size, modified) = key;
+    if let Some((size, modified)) = size.zip(*modified) {
+        if let Some(exact) = entry_key(identity, volume, path, size, modified) {
+            if let Some(record) = records.get(&exact) { return *record; }
+            if let Some((_, record)) = matching_size_resume(records, &exact) { return record; }
+        }
+    }
+    let Some(base) = path_key(identity, volume, path).map(|base| format!("{base}00")) else { return 0; };
+    let mut partial = 0;
+    for (_, record) in records.range(base.clone()..).take_while(|(key, _)| key.starts_with(&base)) {
+        if *record == WATCHED { return WATCHED; }
+        if size.is_none() && *record != FAVORITE { partial = partial.max(*record); }
+    }
+    partial
 }
 
 fn progress_key(identity: &str, volume: &Volume, path: &std::path::Path, file: &File) -> Option<String> {
@@ -4057,31 +4052,17 @@ fn open_for_details(path: &std::path::Path, _mount_id: Option<u64>) -> Result<Fi
 }
 
 /// Remove trailing release tags without inventing technical metadata.
-fn clean_video_title(stem: &str) -> String {
-    let technical = ["2160p", "1080p", "720p", "480p", "hdr10", "hdr10plus", "hdr",
-        "dovi", "dolbyvision", "webdl", "webrip", "bluray", "bdrip", "remux",
-        "x264", "x265", "h264", "h265", "hevc", "av1"];
-    for (index, separator) in stem.char_indices() {
-        if index == 0 || !matches!(separator, '.' | '_' | ' ' | '[' | '(') { continue; }
-        let rest = &stem[index + separator.len_utf8()..];
-        let token = rest.split(|ch: char| !ch.is_ascii_alphanumeric()).next().unwrap_or_default();
-        if technical.iter().any(|tag| tag.eq_ignore_ascii_case(token)) {
-            let cleaned = stem[..index].trim_end_matches(|ch: char| matches!(ch, '.' | '_' | ' ' | '-'));
-            if !cleaned.is_empty() { return cleaned.to_owned(); }
-        }
-    }
-    stem.to_owned()
-}
-
 /// Use a deliberate container title when supplied, or remove a marked release suffix
 /// from the filename. Plain trailing numbers stay part of the title.
-fn hud_movie_title(stem: &str, metadata: Option<&str>) -> String {
+fn clean_media_title(stem: &str, metadata: Option<&str>) -> String {
     fn clean(value: &str) -> String {
         const TECH: &[&str] = &[
-            "2160p", "1080p", "720p", "4k", "uhd", "hdr", "hdr10", "hdr10plus", "hdr10+",
+            "2160p", "1440p", "1080p", "900p", "720p", "576p", "480p", "4k", "uhd", "hdr10+",
+            "hdr10plus", "hdr10", "hdr", "hlg", "sdr",
             "dovi", "dolbyvision", "dolby vision", "dv", "bdremux", "remux", "bluray", "blu-ray",
             "web-dl", "webdl", "webrip", "bdrip", "hevc", "h.265", "h.264", "h265", "h264",
-            "x265", "x264", "av1", "truehd", "dts-hd ma", "dts-hd", "atmos", "eac3",
+            "x265", "x264", "av1", "vp9", "truehd", "dts-hd ma", "dts-hd", "dts:x", "dts",
+            "dolby atmos", "atmos", "dolby digital plus", "dolby digital", "eac3", "ac3", "aac", "pcm",
         ];
         let value = value.trim();
         let value = if is_video_path(std::path::Path::new(value)) {
@@ -4091,7 +4072,11 @@ fn hud_movie_title(stem: &str, metadata: Option<&str>) -> String {
         let lower = value.to_ascii_lowercase();
         fn technical_tail(text: &str) -> Option<&str> {
             TECH.iter().find_map(|tag| {
-                text.strip_prefix(tag).filter(|tail| tail.chars().next().is_none_or(|c| !c.is_alphanumeric()))
+                let prefix = text.as_bytes().get(..tag.len())?;
+                if !prefix.iter().zip(tag.bytes()).all(|(&actual, expected)| {
+                    actual == expected || (expected == b' ' && matches!(actual, b'.' | b'_'))
+                }) { return None; }
+                text.get(tag.len()..).filter(|tail| tail.chars().next().is_none_or(|c| !c.is_alphanumeric()))
             })
         }
         let mut cut = value.len();
@@ -4126,14 +4111,30 @@ fn hud_movie_title(stem: &str, metadata: Option<&str>) -> String {
             before.rsplit_once('.').and_then(|(title, suffix)| year(suffix).then_some(title))
         } else { None };
         let title = explicit.or(dotted).unwrap_or(before);
-        let title = if cut < value.len() && !title.contains(' ') && title.contains('.') {
-            title.replace('.', " ")
+        let title = if !title.contains(' ') {
+            title.replace(['.', '_'], " ")
         } else { title.to_owned() };
         title.split_whitespace().collect::<Vec<_>>().join(" ")
     }
     let tagged = metadata.filter(|title| title.len() <= 512 && !title.chars().any(char::is_control))
         .map(clean).filter(|title| !title.is_empty());
     tagged.unwrap_or_else(|| clean(stem))
+}
+
+fn file_title(stem: &str, metadata: Option<&str>) -> String {
+    let clean = clean_media_title(stem, metadata);
+    let Some((prefix, _, _, suffix)) = continuity::episode_parts(std::ffi::OsStr::new(&clean)) else { return clean; };
+    let trim = |ch: char| matches!(ch, ' ' | '.' | '_' | '-' | '–' | ':' | '[' | ']' | '(' | ')');
+    let title = [suffix, prefix].into_iter().find_map(|part| {
+        let text = std::str::from_utf8(part).ok()?.trim_matches(trim);
+        (!text.is_empty()).then_some(text)
+    });
+    title.map_or_else(|| tr("Episodio", "Episodi").into(), str::to_owned)
+}
+
+fn video_title(path: &std::path::Path, metadata: Option<&str>) -> String {
+    let name = path.file_stem().or_else(|| path.file_name()).unwrap_or_default().to_string_lossy();
+    file_title(&name, metadata)
 }
 
 /// The player handoff is scoped to the current physical Feed snapshot.
@@ -4184,7 +4185,7 @@ fn display_name(entry: &Entry, extensions: bool) -> String {
     match entry.kind {
         Kind::Folder => entry.name.to_string_lossy().into_owned(),
         Kind::Video if extensions => entry.name.to_string_lossy().into_owned(),
-        Kind::Video => clean_video_title(&name.file_stem().unwrap_or(&entry.name).to_string_lossy()),
+        Kind::Video => video_title(name, None),
     }
 }
 
@@ -4304,7 +4305,7 @@ pub(super) fn tick(app: &mut App) {
         can_normalize_loudness: false, immersive: false, sample_rate: info.audio_rate,
         bit_depth: info.audio_depth,
     });
-    let title = hud_movie_title(&title, info.title.as_deref());
+    let title = file_title(&title, info.title.as_deref());
     let item = local_playing_item(&info, dovi);
     let forced = initial_forced_subtitle(&item, app.usb.settings.forced_subtitles);
     let ok = plx_media::route::set_stream_declaration(ps, &info.video, &info.audio, info.fps, dovi, false)
@@ -4500,7 +4501,9 @@ mod usb_browser_tests {
         let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
         browser.scan.volumes.push(volume.clone());
         browser.history.insert("keep".into(), BTreeMap::from([("deleted-episode".into(), WATCHED)]));
-        browser.dashboard.items.push(home::Item { volume: volume.clone(), path: volume.path.join("old.mkv"), title: "Keep".into(), episode: None, favorite: true, progress: 0 });
+        let path = volume.path.join("old.mkv");
+        browser.dashboard.items.push(home::Item { volume: volume.clone(), path: path.clone(), title: "Keep".into(),
+            episode: None, show: false, favorite: true, progress: 0, detail_key: (path, None, None) });
         let (send, reply) = mpsc::sync_channel(1);
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         browser.home_job = Some(HomeRequest { reply, cancelled: cancelled.clone(), volumes: vec![volume.clone()], manual: false });
@@ -4572,9 +4575,10 @@ mod usb_browser_tests {
         let mut browser = Browser::new();
         let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
         browser.scan.volumes.push(volume.clone());
-        browser.dashboard.items = (1..=5).map(|episode| home::Item {
-            volume: volume.clone(), path: volume.path.join(format!("Show S02E{episode:02}.mkv")),
-            title: "Una sèrie".into(), episode: Some((2, episode)), favorite: true, progress: 0,
+        browser.dashboard.items = (1..=5).map(|episode| {
+            let path = volume.path.join(format!("Show S02E{episode:02}.mkv"));
+            home::Item { volume: volume.clone(), path: path.clone(), title: "Una sèrie".into(),
+                episode: Some((2, episode)), show: true, favorite: true, progress: 0, detail_key: (path, None, None) }
         }).collect();
         assert_eq!(browser.len(), 6);
         browser.key(Key::Down, false);
@@ -4692,8 +4696,8 @@ mod usb_browser_tests {
         let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
         let path = volume.path.join("Sèries/Una sèrie");
         let now = Instant::now();
-        let counts = Some(series::Counts { seasons: 2, episodes: 13 });
-        let entry = SeriesCacheEntry { checked: now, modified: Some(1), known: true, counts };
+        let listing = series::Listing { counts: series::Counts { seasons: 2, episodes: 13 }, episodes: vec![] };
+        let entry = SeriesCacheEntry { checked: now, modified: Some(1), known: true, summary: None };
         let mut card = SeriesCard { volume: &volume, path: path.clone(), modified: Some(1), known: true };
         assert!(entry.fresh(&card, now));
         assert!(!entry.fresh(&card, now + SERIES_REFRESH));
@@ -4705,7 +4709,7 @@ mod usb_browser_tests {
         browser.series_job = Some(SeriesRequest { volume, path, modified: Some(1), known: true, invalidated: false,
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), reply });
         browser.invalidate_series_counts();
-        send.send(counts).unwrap();
+        send.send(Some(listing)).unwrap();
         browser.update_series_counts(now);
         assert!(browser.series_cache.is_empty());
         assert!(browser.series_job.is_none());
@@ -4831,26 +4835,6 @@ mod usb_browser_tests {
     }
 
     #[test]
-    fn adaptive_metadata_uses_footer_without_overlaps() {
-        for preset in 0..3 {
-            let g = grid_geometry(12, preset, true);
-            for scale in [0.97, 1.0, 1.07] {
-                let card = Rect::new(80.0, 340.0, g.w * scale, g.h * scale);
-                let slots = video_badge_slots(card);
-                assert!(slots[0].y > card.y + 65.0);
-                assert!(slots[0].y + slots[0].h < slots[1].y);
-                assert_eq!(slots[1].y, slots[2].y);
-                assert!(slots[1].x + slots[1].w < slots[2].x);
-                assert!(slots[2].x + slots[2].w <= card.x + card.w);
-                assert!(slots[1].y + slots[1].h <= card.y + card.h - 48.0);
-            }
-        }
-        assert_eq!(compact_badge_text("4K UHD", true), "4K");
-        assert_eq!(compact_badge_text("35 min", true), "35m");
-        assert_eq!(compact_badge_text("4K UHD", false), "4K UHD");
-    }
-
-    #[test]
     fn settings_motion_uses_a_clamped_eased_transition() {
         assert_eq!(SETTINGS_MOTION, Duration::from_millis(220));
         assert_eq!(theme::SURFACE_APP[3], 1.0);
@@ -4862,11 +4846,11 @@ mod usb_browser_tests {
     #[test]
     fn episode_titles_hide_file_extensions_independently_of_settings() {
         let entry = disk::media_entry("Serie.S01E02.2160p.mkv".into(), false).unwrap();
-        assert_eq!(display_name(&entry, false), "Serie.S01E02");
+        assert_eq!(display_name(&entry, false), "Serie");
         let movie = disk::media_entry("Película.mp4".into(), false).unwrap();
         assert_eq!(display_name(&movie, false), "Película");
-        assert_eq!(clean_video_title("Breaking.Bad.S01E01.1080p.WEB-DL"), "Breaking.Bad.S01E01");
-        assert_eq!(clean_video_title("Película.2025"), "Película.2025");
+        assert_eq!(file_title("Breaking.Bad.S01E01.Pilot.1080p.WEB-DL", None), "Pilot");
+        assert_eq!(file_title("Película.2025", None), "Película 2025");
     }
 
     #[test]
@@ -5584,15 +5568,18 @@ mod usb_browser_tests {
             ("1917 (2019) BluRay", "1917"),
             ("2012.1080p.WEB-DL", "2012"),
             ("Se7en", "Se7en"),
+            ("Narcos.Mexico.2018.1080p.WEB-DL", "Narcos Mexico"),
+            ("Planeta Tierra II", "Planeta Tierra II"),
+            ("Nuestro.Planeta.Dolby.Vision.Dolby.Atmos", "Nuestro Planeta"),
             ("El viaje (2025) HDR10", "El viaje"),
             ("千と千尋の神隠し - 2001 - 1080p", "千と千尋の神隠し"),
             ("The HDR Story", "The HDR Story"),
         ] {
-            assert_eq!(hud_movie_title(file, None), title);
+            assert_eq!(clean_media_title(file, None), title);
         }
-        assert_eq!(hud_movie_title("disc_0001", Some("Le Fabuleux Destin d’Amélie Poulain")),
+        assert_eq!(clean_media_title("disc_0001", Some("Le Fabuleux Destin d’Amélie Poulain")),
             "Le Fabuleux Destin d’Amélie Poulain");
-        assert_eq!(hud_movie_title("Avatar", Some("  ")), "Avatar");
+        assert_eq!(clean_media_title("Avatar", Some("  ")), "Avatar");
     }
 
     #[test]

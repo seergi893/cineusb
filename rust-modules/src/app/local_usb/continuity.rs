@@ -4,7 +4,11 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 pub(super) fn episode(name: &OsStr) -> Option<(&[u8], u32, u32)> {
-    let bytes = Path::new(name).file_stem()?.as_encoded_bytes();
+    episode_parts(Path::new(name).file_stem()?).map(|(prefix, season, episode, _)| (prefix, season, episode))
+}
+
+pub(super) fn episode_parts(stem: &OsStr) -> Option<(&[u8], u32, u32, &[u8])> {
+    let bytes = stem.as_encoded_bytes();
     let number = |digits: &[u8]| -> Option<u32> { std::str::from_utf8(digits).ok()?.parse().ok() };
     for start in 0..bytes.len() {
         if start > 0 && bytes[start - 1].is_ascii_alphanumeric() { continue; }
@@ -18,7 +22,7 @@ pub(super) fn episode(name: &OsStr) -> Option<(&[u8], u32, u32)> {
         let m = tail.iter().take_while(|byte| byte.is_ascii_digit()).count();
         if m == 0 || tail.get(m).is_some_and(u8::is_ascii_alphanumeric) { continue; }
         let (Some(season), Some(episode)) = (number(&season[..n]), number(&tail[..m])) else { continue };
-        return Some((bytes[..start].trim_ascii_end(), season, episode));
+        return Some((bytes[..start].trim_ascii_end(), season, episode, &tail[m..]));
     }
     None
 }

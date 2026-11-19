@@ -5,9 +5,10 @@ Biblioteca USB para LG webOS, con la interfaz nativa de
 instalación es `com.seergi893.cineusb`. La compilación para webOS abre el
 explorador local directamente, sin iniciar la sesión de Plex.
 
-La cuadrícula usa las tarjetas y animaciones de PlxNative. Con las flechas
-eliges un disco, carpeta o vídeo, con OK lo abres y con Atrás vuelves al nivel
-anterior. Los archivos conservan sus nombres y la estructura de carpetas del disco.
+La cuadrícula distingue películas, series y documentales por color e icono.
+Cada tarjeta muestra un título limpio y, cuando se conocen, los formatos del
+archivo. Con las flechas eliges un disco, carpeta o vídeo, con OK lo abres y con
+Atrás vuelves al nivel anterior. Los nombres y las rutas del disco se conservan.
 Los vídeos MKV, MP4, M4V, MOV, WebM, TS, M2TS y MTS se abren en el motor Feed con el
 HUD clásico integrado. La compatibilidad de cada pista depende del códec y el
 decodificador de la televisión.

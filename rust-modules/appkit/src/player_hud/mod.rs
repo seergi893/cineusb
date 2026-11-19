@@ -27,6 +27,7 @@
 pub mod caption_rise;
 pub mod classic;
 pub mod command;
+pub mod format_logos;
 pub mod geometry;
 pub mod loaded;
 pub mod model;

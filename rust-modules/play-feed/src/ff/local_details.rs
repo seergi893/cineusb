@@ -5,11 +5,18 @@ pub enum VideoRange {
     Sdr,
     Hdr10,
     Hdr10Plus,
+    Hdr,
     DolbyVision,
     DolbyVisionHdr10,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalAudioFormat {
+    pub label: &'static str,
+    pub channels: Option<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct LocalVideoDetails {
     pub bytes: Option<u64>,
     pub resolution: Option<(u32, u32)>,
@@ -17,6 +24,9 @@ pub struct LocalVideoDetails {
     pub range: Option<VideoRange>,
     pub hdr10_plus: bool,
     pub hdr10_base: bool,
+    pub title: Option<String>,
+    /// Container formats of the tracks selected by each existing audio preference.
+    pub audio: [Option<LocalAudioFormat>; 2],
 }
 
 /// Inspect a separate read-only descriptor. File size survives an unreadable container header.
@@ -27,6 +37,7 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
     };
     let _ = read_local_format(file, true, |fmt| {
         unsafe {
+            details.title = local_title_tag(fmt);
             let duration = fmt_duration(fmt);
             if duration > 0 {
                 details.duration_secs = Some(duration as u64 / 1_000_000);
@@ -49,10 +60,61 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
                     _ => false,
                 };
             }
+            let best = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, std::ptr::null_mut(), 0);
+            let tracks: Vec<_> = (0..(*fmt).nb_streams).filter_map(|index| {
+                let stream = *(*fmt).streams.add(index as usize);
+                let params = stream_codecpar(stream);
+                ((*params).codec_type == AVMEDIA_TYPE_AUDIO)
+                    .then(|| local_audio_track(index as i32, stream, params))
+            }).collect();
+            details.audio = [false, true].map(|spanish| {
+                let track = pick_local_audio(&tracks, best, spanish)
+                    .or_else(|| tracks.iter().find(|track| track.index == best))?;
+                let params = stream_codecpar(*(*fmt).streams.add(track.index as usize));
+                Some(LocalAudioFormat {
+                    label: audio_label(&track.codec, (*params).profile)?,
+                    channels: u8::try_from(track.channels).ok().filter(|channels| *channels > 0),
+                })
+            });
         }
         Ok(())
     });
     details
+}
+
+fn audio_label(codec: &str, profile: c_int) -> Option<&'static str> {
+    // AV_PROFILE_* values in libavcodec/defs.h. Container tags and filenames
+    // are insufficient evidence for the immersive extensions.
+    Some(match (codec, profile) {
+        ("ac3", _) => "Dolby Digital",
+        ("eac3" | "truehd", 30) => "Dolby Atmos",
+        ("eac3", _) => "Dolby Digital Plus",
+        ("truehd", _) => "Dolby TrueHD",
+        ("dts", 61 | 62) => "DTS:X",
+        ("dts", 60) => "DTS-HD MA",
+        ("dts", 50) => "DTS-HD HRA",
+        ("dts", _) => "DTS",
+        ("aac" | "aac_latm", _) => "AAC",
+        ("flac", _) => "FLAC",
+        ("mp3", _) => "MP3",
+        ("mp2", _) => "MP2",
+        ("opus", _) => "Opus",
+        ("vorbis", _) => "Vorbis",
+        ("alac", _) => "ALAC",
+        (codec, _) if codec.starts_with("pcm_") => "PCM",
+        _ => return None,
+    })
+}
+
+#[test]
+fn cineusb_audio_formats_follow_codec_and_profile() {
+    for (codec, profile, label) in [
+        ("eac3", 30, "Dolby Atmos"), ("truehd", 30, "Dolby Atmos"), ("truehd", -99, "Dolby TrueHD"),
+        ("eac3", -99, "Dolby Digital Plus"), ("ac3", -99, "Dolby Digital"), ("dts", 61, "DTS:X"),
+        ("dts", 60, "DTS-HD MA"), ("dts", -99, "DTS"), ("aac", 1, "AAC"), ("pcm_s24le", 0, "PCM"),
+    ] {
+        assert_eq!(audio_label(codec, profile), Some(label));
+    }
 }
 
 #[test]
@@ -78,7 +140,8 @@ fn video_range(dovi: Option<AVDOVIDecoderConfigurationRecord>, transfer: c_int, 
     if plus { return Some(VideoRange::Hdr10Plus); }
     match (transfer, primaries) {
         (16, 9) => Some(VideoRange::Hdr10),
-        // Explicit SDR transfer characteristics from H.273. HLG and unspecified values stay hidden.
+        (16 | 18, _) => Some(VideoRange::Hdr),
+        // Explicit SDR transfer characteristics from H.273. Unspecified values stay hidden.
         (1 | 4..=7 | 11..=15, _) => Some(VideoRange::Sdr),
         _ => None,
     }
@@ -148,7 +211,7 @@ fn hevc_hdr10plus(data: &[u8], length_size: Option<usize>) -> bool {
 #[test]
 fn cineusb_video_range_requires_a_signal_and_preserves_the_dolby_base_layer() {
     assert_eq!(video_range(None, 2, 2, false), None);
-    assert_eq!(video_range(None, 18, 9, false), None);
+    assert_eq!(video_range(None, 18, 9, false), Some(VideoRange::Hdr));
     assert_eq!(video_range(None, 1, 1, false), Some(VideoRange::Sdr));
     assert_eq!(video_range(None, 16, 9, false), Some(VideoRange::Hdr10));
     assert_eq!(video_range(None, 16, 9, true), Some(VideoRange::Hdr10Plus));
