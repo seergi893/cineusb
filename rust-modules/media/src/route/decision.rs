@@ -7350,6 +7350,8 @@ pub fn stream_pcm(ps: &PlaybackSession) -> Option<Result<PcmFormat, String>> {
     }
     // A lossy codec the attempt's value lets the app decode: its output has one shape, whatever
     // the source is, so no track fact is needed (and none can contradict it).
+    // DTS remains stereo until the native PCM Load and its downstream output have both been
+    // verified for discrete surround on the target firmware and sink.
     stream_pcm_is_lossy(ps).then_some(Ok(PcmFormat::STEREO_48K))
 }
 

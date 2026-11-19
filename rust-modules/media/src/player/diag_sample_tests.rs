@@ -6,7 +6,7 @@
 //! sample gives that one.
 
 use plx_play_feed::shared::FEED_SHARED;
-use plx_playback_contract::feed::{FeedDiag, FeedFacts};
+use plx_playback_contract::feed::{DtsPcmDiag, FeedDiag, FeedFacts, PcmFormat};
 use std::sync::atomic::Ordering::Relaxed;
 
 use super::attempt_view::Backend;
@@ -21,6 +21,11 @@ pub(super) fn scripted() -> FeedDiag {
         place_rv: -3, placed_w: 3840, placed_h: 2160, load_completed: true, cb_count: 41,
         aq_video: 9_000_001, aq_audio: 9_000_002, fed_v_pts: 10_400_000_000,
         fed_a_pts: 10_300_000_000, load_v: 2, load_a: 5, feed_state: 4, cb_err: 18, cb_err_at: 7,
+        dts_pcm: Some(DtsPcmDiag {
+            source_channels: 6, source_rate: 44_100, source_bits: 24,
+            decoded_channels: 6, decoded_rate: 44_100, core_only: true,
+            output: PcmFormat { sample_rate: 48_000, bits: 16, channels: 2, source_rate: 44_100 },
+        }),
         net_rx: 13_000_000, load_at: 4_200, frame_at: 5_300, video_fps_milli: 23_976,
         fed_v: 5_000, fed_a: 4_800, pushed_any: true,
     }
@@ -39,6 +44,7 @@ pub(super) fn store_mailboxes(diag: &FeedDiag) {
     FEED_SHARED.dg_fed_a_pts.store(diag.fed_a_pts, Relaxed);
     FEED_SHARED.dg_load_v.store(diag.load_v, Relaxed);
     FEED_SHARED.dg_load_a.store(diag.load_a, Relaxed);
+    *FEED_SHARED.dg_dts_pcm.lock().unwrap() = diag.dts_pcm;
     FEED_SHARED.dg_feed_state.store(diag.feed_state, Relaxed);
     FEED_SHARED.dg_cb_err.store(diag.cb_err, Relaxed);
     FEED_SHARED.dg_cb_err_at.store(diag.cb_err_at, Relaxed);
@@ -55,7 +61,7 @@ pub(super) fn rows(d: &Diag) -> FeedDiag {
         place_rv: d.place_rv, placed_w: d.placed_w, placed_h: d.placed_h,
         load_completed: d.load_completed, cb_count: d.cb_count, aq_video: d.aq_video,
         aq_audio: d.aq_audio, fed_v_pts: d.fed_v_pts, fed_a_pts: d.fed_a_pts, load_v: d.load_v,
-        load_a: d.load_a, feed_state: d.feed_state, cb_err: d.cb_err, cb_err_at: d.cb_err_at,
+        load_a: d.load_a, dts_pcm: d.dts_pcm, feed_state: d.feed_state, cb_err: d.cb_err, cb_err_at: d.cb_err_at,
         net_rx: d.net_rx, load_at: d.load_at, frame_at: d.frame_at,
         video_fps_milli: d.video_fps_milli, fed_v: d.fed_v, fed_a: d.fed_a, pushed_any: d.pushed_any,
     }
