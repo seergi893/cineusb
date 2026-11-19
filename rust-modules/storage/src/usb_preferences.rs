@@ -54,7 +54,7 @@ fn load(path: &Path) -> io::Result<Option<String>> {
     if !file.metadata()?.is_file() { return Err(invalid()); }
     let mut text = String::new();
     file.take(64).read_to_string(&mut text)?;
-    if matches!(text.split(' ').count(), 7 | 8 | 10 | 11) { return validate_extended(&text).map(|()| Some(text)); }
+    if text.split(' ').count() > 3 { return validate_extended(&text).map(|()| Some(text)); }
     let (lang, options) = text.split_once(' ').ok_or_else(invalid)?;
     let (forced, audio) = options.split_once(' ').unwrap_or((options, "0"));
     record(lang, forced, audio).map(Some)
@@ -79,7 +79,14 @@ fn validate_extended(text: &str) -> io::Result<()> {
     let fields: Vec<_> = text.split(' ').collect();
     let [language, forced, audio, next, accent, cards, sort, tail @ ..] = fields.as_slice() else { return Err(invalid()) };
     record(language, forced, audio)?;
-    if !matches!(tail, [] | ["0" | "1"] | ["0" | "1", "0" | "1", "0" | "1" | "2"] | ["0" | "1", "0" | "1", "0" | "1" | "2", "0" | "1" | "2"]) { return Err(invalid()); }
+    // The current record ends with the DTS toggle. Older records end at the
+    // clock size or omit earlier optional settings.
+    if !matches!(tail,
+        [] | ["0" | "1"]
+        | ["0" | "1", "0" | "1", "0" | "1" | "2"]
+        | ["0" | "1", "0" | "1", "0" | "1" | "2", "0" | "1" | "2"]
+        | ["0" | "1", "0" | "1", "0" | "1" | "2", "0" | "1" | "2", "0" | "1"]
+    ) { return Err(invalid()); }
     if !matches!(*next, "0" | "1") || ![accent, cards, sort].into_iter().all(|value| matches!(*value, "0" | "1" | "2")) {
         return Err(invalid());
     }
@@ -234,6 +241,22 @@ mod tests {
         clear_history_in(&root, "app.resume-", "610041").unwrap();
         assert!(!favorite.exists() && !nested.exists());
         assert!(sibling.exists() && other_partition.exists() && other_install.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usb_preferences_round_trip_preserves_the_experimental_dts_toggle() {
+        let root = std::env::temp_dir().join(format!("cineusb-dts-preferences-{}", std::process::id()));
+        let path = root.join("settings");
+        let legacy = "ca 1 0 1 2 1 2 0 1 2 1";
+        for enabled in ["1", "0"] {
+            let updated = format!("{legacy} {enabled}");
+            assert!(validate_extended(&updated).is_ok(), "the app sends twelve fields");
+            save(&path, &updated).unwrap();
+            assert_eq!(load(&path).unwrap().as_deref(), Some(updated.as_str()));
+        }
+        assert!(validate_extended(&format!("{legacy} 2")).is_err());
+        assert!(validate_extended(&format!("{legacy} 1 0")).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
