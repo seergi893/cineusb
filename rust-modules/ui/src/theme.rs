@@ -1519,6 +1519,10 @@ pub const USB_DIALOG_TOP: [f32; 4] = with_a(USB_HOME_BOTTOM, 0.98);
 pub const USB_DIALOG_BOTTOM: [f32; 4] = with_a(USB_HOME_TOP, 0.98);
 pub const USB_DRIVE_TOP: [f32; 4] = rgb8(0x34, 0x56, 0x73);
 pub const USB_DRIVE_BOTTOM: [f32; 4] = rgb8(0x1b, 0x34, 0x50);
+/// USB media surfaces and their category markers, from the same local palette as the illustrations.
+pub const USB_MOVIE_CARD: [[f32; 4]; 3] = [rgb8(0x37, 0x21, 0x55), rgb8(0x17, 0x10, 0x2b), rgb8(0xbd, 0x85, 0xf5)];
+pub const USB_SERIES_CARD: [[f32; 4]; 3] = [rgb8(0x17, 0x3d, 0x64), rgb8(0x0b, 0x1b, 0x34), rgb8(0x70, 0xc7, 0xff)];
+pub const USB_DOCUMENTARY_CARD: [[f32; 4]; 3] = [rgb8(0x13, 0x46, 0x41), rgb8(0x0a, 0x23, 0x24), rgb8(0x62, 0xe5, 0xc7)];
 
 /// Watched USB cards use green independently of the chosen accent.
 pub const USB_WATCHED_TOP: [f32; 4] = rgb8(0x16, 0x3b, 0x2c);

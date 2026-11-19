@@ -16,7 +16,9 @@ Container metadata, track selection, the Load and the pipeline report are separa
 
 ## Brand assets
 
-The HUD embeds local PNG textures and falls back to text if artwork is missing for a format or fails to load. Monochrome variants below are transparent raster exports of the retained SVGs. The HDR10+ artwork uses the official site's colors with transparent margins trimmed.
+The HUD and the USB cards use the same bundled PNG textures and fall back to text if artwork is missing for a format or fails to load. Monochrome variants below are transparent raster exports of the retained SVGs. The HDR10+ artwork uses the official site's colors with transparent margins trimmed.
+
+The library describes the source file. The offline metadata probe reads its video dimensions and range, and the selected audio track's codec, profile and channel count. Explicit Atmos and DTS:X profiles can therefore appear on a card even when the HUD reports a different format during playback. A series shows shared formats after its episodes have been inspected, and indicates mixed formats when the inspected files disagree. Unknown metadata leaves the corresponding mark empty.
 
 | Indicator | Artwork |
 | --- | --- |

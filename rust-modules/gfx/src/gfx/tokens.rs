@@ -159,6 +159,12 @@ pub mod size {
     /// and read as an instrument, not as ordinary couch copy.  It must never migrate into product
     /// chrome or prose; `app::diagnostics` is its sole owner.
     pub const DIAGNOSTIC: c_int = 20;
+    /// Dense technical marks in CineUSB's compact 10-column card grid.
+    pub const USB_CARD_META: c_int = 16;
+    /// Last fitting rung for complete counts in a compact USB card footer.
+    pub const USB_CARD_META_TIGHT: c_int = 14;
+    /// Reserved for three-digit episode counts in the narrowest USB footer.
+    pub const USB_CARD_COUNT_TIGHT: c_int = 12;
 }
 
 // ---- the popover menu's glass rim (DS6) ---------------------------------------------------------

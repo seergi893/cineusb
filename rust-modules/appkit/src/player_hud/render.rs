@@ -729,33 +729,6 @@ impl TitleLine {
 
 type FittedRun = (std::rc::Rc<std::ffi::CStr>, f32);
 
-pub(super) const FORMAT_LOGOS: [(&str, &[u8]); 5] = [
-    ("Dolby Vision", include_bytes!("art/dolby-vision.png")),
-    ("HDR10+", include_bytes!("art/hdr10-plus.png")),
-    ("Dolby Digital", include_bytes!("art/dolby-digital.png")),
-    ("Dolby Digital Plus", include_bytes!("art/dolby-digital-plus.png")),
-    ("DTS", include_bytes!("art/dts.png")),
-];
-
-pub(super) struct FormatLogo {
-    texture: u32,
-    aspect: f32,
-}
-
-impl FormatLogo {
-    fn load(data: &[u8]) -> Option<Self> {
-        let (width, height, pixels) = plx_gfx::img::img_decode_owned(data)?;
-        let texture = plx_gfx::gfx::upload_rgba(0, width as i32, height as i32, pixels.as_ptr());
-        (texture != 0).then_some(Self { texture, aspect: width as f32 / height as f32 })
-    }
-}
-
-impl Drop for FormatLogo {
-    fn drop(&mut self) {
-        plx_gfx::gfx::delete_tex(self.texture);
-    }
-}
-
 /// Measure a single title row within the HUD compiler's title cell.
 fn fit_local_title(line: TitleLine, title: &str, formats: super::model::LocalFormats,
     logo_widths: [Option<f32>; 2], measure: &dyn plx_machine::machine::Measure)
@@ -788,9 +761,9 @@ fn fit_local_title(line: TitleLine, title: &str, formats: super::model::LocalFor
 }
 
 fn local_title_line(q: Painter, line: TitleLine, title: &str, formats: super::model::LocalFormats,
-    logos: [Option<&FormatLogo>; 2], measure: &dyn plx_machine::machine::Measure) {
+    logos: [Option<&super::format_logos::FormatLogo>; 2], measure: &dyn plx_machine::machine::Measure) {
     let logo_height = (plx_ui::theme::size::CAPTION as f32 * 0.76).min(line.rect.h);
-    let logo_widths = logos.map(|logo| logo.map(|logo| logo_height * logo.aspect));
+    let logo_widths = logos.map(|logo| logo.map(|logo| logo.width(logo_height)));
     let (size, fitted, badges) = fit_local_title(line, title, formats, logo_widths, measure);
     let gap = plx_ui::theme::space::SM;
     let badge_size = plx_ui::theme::size::CAPTION;
@@ -805,8 +778,7 @@ fn local_title_line(q: Painter, line: TitleLine, title: &str, formats: super::mo
         x += gap;
         if let Some(logo) = logos.get(index).copied().flatten() {
             let y = line.rect.y + (line.rect.h - logo_height) * 0.5;
-            q.tex(logo.texture, Rect::new(x, y, *width, logo_height), 0.0,
-                [1.0, 1.0, 1.0, line.ink[3]]);
+            logo.draw(q, Rect::new(x, y, *width, logo_height), line.ink[3]);
             x += *width;
             continue;
         }
@@ -814,16 +786,6 @@ fn local_title_line(q: Painter, line: TitleLine, title: &str, formats: super::mo
         ink[3] *= line.ink[3];
         plx_ui::label::Label::new(run.as_ptr(), badge_size, ink).draw(q, frame(x, *width));
         x += *width;
-    }
-}
-
-#[test]
-fn cineusb_format_art_decodes_with_transparency() {
-    for (name, data) in FORMAT_LOGOS {
-        let (width, height, pixels) = plx_gfx::img::img_decode_owned(data).expect(name);
-        assert!(width > height && height >= 64, "{name}");
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 0), "{name}");
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 255), "{name}");
     }
 }
 
@@ -855,15 +817,13 @@ fn cineusb_title_fits_beside_format_labels_on_one_line() {
 /// `classic-title-right.golden.tsv`).
 fn draw_title(f: &Frame<'_>, row: &mut HudMotion, q: Painter, kicker: Option<TitleLine>, main: Option<TitleLine>) {
     if let Some(formats) = f.model.local_formats {
-        if let Some(line) = kicker { line.draw(q, "USB", f.measure); }
         if let Some(line) = main {
             let title = unsafe { std::ffi::CStr::from_ptr(plx_media::route::title_cptr(f.ps)) };
-            let indices = [formats.video, formats.audio].map(|label|
-                FORMAT_LOGOS.iter().position(|(name, _)| Some(*name) == label));
-            for index in indices.into_iter().flatten() {
-                row.format_logos[index].get_or_insert_with(|| FormatLogo::load(FORMAT_LOGOS[index].1));
+            let labels = [formats.video, formats.audio];
+            for label in labels.into_iter().flatten() {
+                row.format_logos.prepare(label);
             }
-            let logos = indices.map(|index| index.and_then(|i| row.format_logos[i].as_ref()?.as_ref()));
+            let logos = labels.map(|label| row.format_logos.get(label?));
             local_title_line(q, line, &title.to_string_lossy(), formats, logos, f.measure);
         }
         row.reset_title();

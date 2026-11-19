@@ -1,5 +1,5 @@
 //! Offline library inventory and recommendations. All filesystem work runs off-frame.
-use super::{continuity, directory_stamps, disk, entry_key, history_prefix, list_folder, matching_size_resume,
+use super::{DetailKey, continuity, directory_stamps, disk, entry_key, history_prefix, list_folder, matching_size_resume,
     media_folder_score, read_history, system_mount, unpack_progress, volume_facts, Kind, Volume, VolumeFacts,
     FAVORITE, WATCHED};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,8 @@ pub(super) struct Video {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Inventory {
+    #[serde(default)]
+    schema: u8,
     identity: String,
     checked: u64,
     videos: Vec<Video>,
@@ -57,8 +59,10 @@ pub(super) struct Item {
     pub path: PathBuf,
     pub title: String,
     pub episode: Option<(u32, u32)>,
+    pub show: bool,
     pub favorite: bool,
     pub progress: u64,
+    pub detail_key: DetailKey,
 }
 
 #[derive(Debug)]
@@ -87,7 +91,7 @@ fn cached(identity: &str) -> Option<Inventory> {
         let Ok(bytes) = std::fs::read(path) else { continue };
         if bytes.len() > 16 * 1024 * 1024 { continue; }
         let Ok(value) = serde_json::from_slice::<Inventory>(&bytes) else { continue };
-        if value.identity == identity && value.videos.iter().all(|video| {
+        if value.schema == 1 && value.identity == identity && value.videos.iter().all(|video| {
             !video.path.as_os_str().is_empty() && video.path.components()
                 .all(|part| matches!(part, std::path::Component::Normal(_)))
                 && video.show.as_ref().is_none_or(|show| !show.as_os_str().is_empty()
@@ -112,6 +116,7 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
     let mut videos = Vec::new();
     let mut folders = vec![(volume.path.clone(), 0, None)];
     let mut shows = BTreeSet::new();
+    let mut documentaries = BTreeSet::new();
     let mut stats = Stats::default();
     let mut directories = Vec::new();
     while let Some((path, category, show)) = folders.pop() {
@@ -122,10 +127,11 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
             let child = path.join(&entry.name);
             if entry.kind == Kind::Folder {
                 let name = entry.name.to_string_lossy();
-                let next_category = [1, 2, super::DOCUMENTALS_TAB].into_iter()
-                    .find(|&kind| media_folder_score(&name, kind) > 0).unwrap_or(category);
-                let next_show = if show.is_none() && category != super::DOCUMENTALS_TAB
-                    && super::art::is_season(&name.to_lowercase()) {
+                let next_category = if category == super::DOCUMENTALS_TAB { category } else {
+                    [1, 2, super::DOCUMENTALS_TAB].into_iter()
+                        .find(|&kind| media_folder_score(&name, kind) > 0).unwrap_or(category)
+                };
+                let next_show = if show.is_none() && super::art::is_season(&name.to_lowercase()) {
                     Some(path.clone())
                 } else if next_category == 2 && next_category == category && show.is_none() {
                     Some(child.clone())
@@ -136,18 +142,25 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
             } else {
                 let relative = child.strip_prefix(&volume.path).map_err(io::Error::other)?.to_path_buf();
                 let detected_show = show.clone().or_else(|| favorites.iter().find(|root| child.starts_with(root)).cloned())
-                    .or_else(|| (category != super::DOCUMENTALS_TAB && continuity::episode(&entry.name).is_some())
-                        .then(|| if path.file_name().is_some_and(|name| super::art::is_season(&name.to_string_lossy().to_lowercase())) {
-                            path.parent().unwrap_or(&path).to_path_buf()
-                        } else { path.clone() }));
+                    .or_else(|| continuity::episode(&entry.name).and_then(|_| {
+                        let name = path.file_name()?.to_string_lossy();
+                        if super::art::is_season(&name.to_lowercase()) {
+                            path.parent().map(Path::to_path_buf)
+                        } else if category == 0 || media_folder_score(&name, category) == 0 {
+                            Some(path.clone())
+                        } else { None }
+                    }));
                 let relative_show = detected_show.and_then(|show| show.strip_prefix(&volume.path).ok().map(Path::to_path_buf))
                     .filter(|show| !show.as_os_str().is_empty());
-                if let Some(show) = &relative_show { shows.insert(show.clone()); }
+                if category == super::DOCUMENTALS_TAB {
+                    if let Some(show) = &relative_show { documentaries.insert(show.clone()); }
+                    else { stats.documentaries += 1; }
+                }
+                else if let Some(show) = &relative_show { shows.insert(show.clone()); }
                 else if category != super::DOCUMENTALS_TAB && continuity::episode(&entry.name).is_some() {
                     let (prefix, _, _) = continuity::episode(&entry.name).expect("episode already detected");
                     shows.insert(PathBuf::from(String::from_utf8_lossy(prefix).as_ref()));
                 }
-                else if category == super::DOCUMENTALS_TAB { stats.documentaries += 1; }
                 else { stats.movies += 1; }
                 videos.push(Video { path: relative, size: entry.size.unwrap_or(0), modified: entry.modified.unwrap_or(0),
                     show: relative_show, category });
@@ -156,9 +169,10 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
     }
     cancelled(stop)?;
     stats.series = shows.len();
+    stats.documentaries += documentaries.len();
     videos.sort_by(|a, b| episode_order(&a.path, &b.path));
     let favorite_series = favorites.iter().filter_map(|path| path.strip_prefix(&volume.path).ok().map(Path::to_path_buf)).collect();
-    Ok(Inventory { identity: identity.into(), checked: seconds(), videos, stats, used_bytes: None, directories, favorite_series })
+    Ok(Inventory { schema: 1, identity: identity.into(), checked: seconds(), videos, stats, used_bytes: None, directories, favorite_series })
 }
 
 fn inventory_changed(volume: &Volume, inventory: &Inventory, stop: &AtomicBool) -> io::Result<bool> {
@@ -171,17 +185,26 @@ fn inventory_changed(volume: &Volume, inventory: &Inventory, stop: &AtomicBool) 
     Ok(inventory.directories.is_empty())
 }
 
-fn episode_numbers(path: &Path) -> Option<(u32, u32)> {
+pub(super) fn first_number(text: &str) -> Option<u32> {
+    text.split(|ch: char| !ch.is_ascii_digit())
+        .find(|part| !part.is_empty()).and_then(|part| part.parse().ok())
+}
+
+pub(super) fn episode_numbers(path: &Path) -> Option<(u32, u32)> {
     if let Some((_, season, episode)) = path.file_name().and_then(continuity::episode) {
         return Some((season, episode));
     }
-    let number = |text: &str| text.split(|ch: char| !ch.is_ascii_digit())
-        .find(|part| !part.is_empty()).and_then(|part| part.parse::<u32>().ok());
     let season = path.parent()?.components().rev().find_map(|part| {
         let name = part.as_os_str().to_string_lossy().to_lowercase();
-        super::art::is_season(&name).then(|| number(&name)).flatten()
+        super::art::is_season(&name).then(|| first_number(&name)).flatten()
     })?;
-    Some((season, number(&path.file_stem()?.to_string_lossy())?))
+    let title = path.file_stem()?.to_string_lossy().to_lowercase();
+    let mut words = title.split(|ch: char| !ch.is_alphanumeric()).filter(|word| !word.is_empty());
+    let first = words.next()?;
+    let number = if matches!(first, "episode" | "episodio" | "episodi" | "capítulo" | "capítol" | "cap") {
+        words.next()?
+    } else { first };
+    Some((season, number.parse().ok()?))
 }
 
 fn episode_order(a: &Path, b: &Path) -> std::cmp::Ordering {
@@ -245,15 +268,23 @@ pub(super) fn recommendations(drive: &Drive) -> Vec<Item> {
 
 pub(super) fn next_episode(drive: &Drive, current: &Path) -> Option<PathBuf> {
     let current = current.strip_prefix(&drive.volume.path).ok()?;
-    let show = drive.videos.iter().find(|video| video.path == current)?.show.as_ref()?;
+    let video = drive.videos.iter().find(|video| video.path == current)?;
+    let Some(show) = &video.show else {
+        let names = drive.videos.iter().filter(|video| video.path.parent() == current.parent())
+            .filter_map(|video| video.path.file_name());
+        let next = continuity::next_named_episode(current.file_name()?, names)?;
+        return Some(drive.volume.path.join(current.with_file_name(next)));
+    };
     drive.videos.iter().filter(|video| video.show.as_ref() == Some(show) && episode_order(&video.path, current).is_gt())
         .min_by(|a, b| episode_order(&a.path, &b.path)).map(|video| drive.volume.path.join(&video.path))
 }
 
 fn item(drive: &Drive, video: &Video, show: Option<&Path>, favorite: bool, progress: u64) -> Item {
     let title = show.and_then(Path::file_name).or_else(|| video.path.file_stem()).unwrap_or_default().to_string_lossy().into_owned();
-    Item { volume: drive.volume.clone(), path: drive.volume.path.join(&video.path), title, favorite, progress,
-        episode: episode_numbers(&video.path) }
+    let path = drive.volume.path.join(&video.path);
+    let detail_key = (path.clone(), Some(video.size), Some(video.modified));
+    Item { volume: drive.volume.clone(), path, title, favorite, progress, detail_key,
+        episode: episode_numbers(&video.path), show: show.is_some() }
 }
 
 pub(super) fn load(volumes: Vec<Volume>, refresh: bool, stop: &AtomicBool) -> io::Result<Dashboard> {
@@ -395,7 +426,7 @@ mod usb_browser_tests {
         drive.volume.path = "/tmp/usb/sdb/sdb1".into();
         assert_eq!(recommendations(&drive)[0].episode, original);
         assert!(recommendations(&drive)[0].path.starts_with("/tmp/usb/sdb/sdb1"));
-        let inventory = Inventory { identity: "uuid:test".into(), checked: seconds(), stats: drive.stats.unwrap(),
+        let inventory = Inventory { schema: 1, identity: "uuid:test".into(), checked: seconds(), stats: drive.stats.unwrap(),
             videos: drive.videos.clone(), used_bytes: Some(200), directories: vec![], favorite_series: vec![] };
         let cache = root.join("offline-inventory.json");
         plx_plex::plex::session::write_atomic(&cache, &serde_json::to_vec(&inventory).unwrap()).unwrap();
@@ -403,6 +434,54 @@ mod usb_browser_tests {
         assert_eq!(restored.videos.len(), drive.videos.len());
         assert_eq!(restored.stats.series, 1);
         plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn documentary_series_keeps_episode_identity_and_cross_season_order() {
+        let (root, volume) = fixture("cineusb-home-documentary-series");
+        let show = root.join("Documentals/Nuestro.Planeta.2019.1080p");
+        let first = show.join("Season 1/1x01.mkv");
+        let second = show.join("Season 2/El mundo 2x01.mkv");
+        for episode in [&first, &second] {
+            std::fs::create_dir_all(episode.parent().unwrap()).unwrap();
+            std::fs::write(episode, []).unwrap();
+        }
+        let mut drive = drive(volume, BTreeMap::new());
+        let first_entry = drive.videos.iter().find(|video| root.join(&video.path) == first).unwrap();
+        assert_eq!(first_entry.category, super::super::DOCUMENTALS_TAB);
+        assert_eq!(next_episode(&drive, &first), Some(second));
+        let key = entry_key("uuid:test", &drive.volume, &first, first_entry.size, first_entry.modified).unwrap();
+        drive.history.as_mut().unwrap().insert(key, pack_progress(60_000_000_000, Some(600_000_000_000)));
+        let items = recommendations(&drive);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].episode, Some((1, 1)));
+        assert!(items[0].show);
+        assert_eq!(items[0].path, first);
+        assert_eq!(drive.stats.unwrap().documentaries, 2);
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn flat_episodes_from_home_advance_to_the_same_title() {
+        let (root, volume) = fixture("cineusb-home-flat-episodes");
+        let category = root.join("Sèries");
+        let current = category.join("Una S01E01.mkv");
+        let next = category.join("Una S01E02.mkv");
+        for path in [&current, &next, &category.join("Otra S01E02.mkv")] {
+            std::fs::write(path, []).unwrap();
+        }
+        assert_eq!(next_episode(&drive(volume, BTreeMap::new()), &current), Some(next));
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn season_folder_inference_ignores_release_resolution_and_year() {
+        for file in ["Season 1/Pilot 1080p.mkv", "Season 1/Pilot 2026.mkv"] {
+            assert_eq!(episode_numbers(Path::new(file)), None);
+        }
+        for file in ["Season 1/01 - Pilot.mkv", "Season 1/Capítulo 01.mkv", "Season 1/Pilot 1x01.mkv"] {
+            assert_eq!(episode_numbers(Path::new(file)), Some((1, 1)));
+        }
     }
 
     #[test]
@@ -445,7 +524,7 @@ mod usb_browser_tests {
         assert!(refreshed.videos.iter().any(|video| video.path.ends_with("Nou nom.mp4")));
         assert!(!refreshed.videos.iter().any(|video| video.path.ends_with("Un documental.mp4")));
         let counts = super::super::series::count_cancellable(&show, None, true, &AtomicBool::new(false)).unwrap().unwrap();
-        assert_eq!(counts.episodes, 4);
+        assert_eq!(counts.counts.episodes, 4);
         before.videos = refreshed.videos;
         assert_eq!(recommendations(&before)[0].episode, Some((2, 1)));
         assert_eq!(before.history.as_ref().unwrap()[&watched], WATCHED);

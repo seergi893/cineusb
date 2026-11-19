@@ -4,7 +4,11 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 pub(super) fn episode(name: &OsStr) -> Option<(&[u8], u32, u32)> {
-    let bytes = Path::new(name).file_stem()?.as_encoded_bytes();
+    episode_parts(Path::new(name).file_stem()?).map(|(prefix, season, episode, _)| (prefix, season, episode))
+}
+
+pub(super) fn episode_parts(stem: &OsStr) -> Option<(&[u8], u32, u32, &[u8])> {
+    let bytes = stem.as_encoded_bytes();
     let number = |digits: &[u8]| -> Option<u32> { std::str::from_utf8(digits).ok()?.parse().ok() };
     for start in 0..bytes.len() {
         if start > 0 && bytes[start - 1].is_ascii_alphanumeric() { continue; }
@@ -18,19 +22,22 @@ pub(super) fn episode(name: &OsStr) -> Option<(&[u8], u32, u32)> {
         let m = tail.iter().take_while(|byte| byte.is_ascii_digit()).count();
         if m == 0 || tail.get(m).is_some_and(u8::is_ascii_alphanumeric) { continue; }
         let (Some(season), Some(episode)) = (number(&season[..n]), number(&tail[..m])) else { continue };
-        return Some((bytes[..start].trim_ascii_end(), season, episode));
+        return Some((bytes[..start].trim_ascii_end(), season, episode, &tail[m..]));
     }
     None
 }
 
 pub(super) fn next_episode<'a>(current: &OsStr, entries: &'a [Entry]) -> Option<&'a OsStr> {
-    let (prefix, season, episode_number) = episode(current)?;
-    let next = episode_number.checked_add(1)?;
-    let mut candidates = entries.iter().filter(|entry| entry.kind == Kind::Video).filter(|entry| {
-        episode(&entry.name).is_some_and(|(title, s, e)| s == season && e == next && title.eq_ignore_ascii_case(prefix))
-    });
-    let entry = candidates.next()?;
-    candidates.next().is_none().then_some(entry.name.as_os_str())
+    next_named_episode(current, entries.iter().filter(|entry| entry.kind == Kind::Video).map(|entry| entry.name.as_os_str()))
+}
+
+pub(super) fn next_named_episode<T: AsRef<OsStr>>(current: &OsStr, names: impl IntoIterator<Item = T>) -> Option<T> {
+    let (prefix, season, number) = episode(current)?;
+    let next = number.checked_add(1)?;
+    let mut candidates = names.into_iter().filter(|name| episode(name.as_ref())
+        .is_some_and(|(title, s, e)| s == season && e == next && title.eq_ignore_ascii_case(prefix)));
+    let item = candidates.next()?;
+    candidates.next().is_none().then_some(item)
 }
 
 #[cfg(test)]

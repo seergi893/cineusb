@@ -562,7 +562,7 @@ pub fn probe_local_with_audio(file: &File, spanish: bool) -> Result<LocalMedia, 
 }
 
 mod local_details;
-pub use local_details::{probe_local_details, LocalVideoDetails, VideoRange};
+pub use local_details::{probe_local_details, LocalAudioFormat, LocalVideoDetails, VideoRange};
 
 fn read_local_format<T>(file: &File, details: bool, read: impl FnOnce(*mut AVFormatContext) -> Result<T, String>) -> Result<T, String> {
     if !abi_ok() { return Err("El lector de vídeo no está disponible.".into()); }
@@ -610,12 +610,7 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext, spanish: bool) -> Result
         let stream = *(*fmt).streams.add(i as usize);
         let params = stream_codecpar(stream);
         if (*params).codec_type == AVMEDIA_TYPE_AUDIO {
-            audio_tracks.push(LocalAudio {
-                index: i as i32, codec: codec(params), language: stream_language(stream),
-                title: stream_name(stream), channels: i64::from((*params).ch_layout.nb_channels),
-                rate: i64::from((*params).sample_rate), depth: i64::from((*params).bits_per_raw_sample),
-                default: stream_disposition(stream) & AV_DISPOSITION_DEFAULT != 0,
-            });
+            audio_tracks.push(local_audio_track(i as i32, stream, params));
             continue;
         }
         if (*params).codec_type != AVMEDIA_TYPE_SUBTITLE { continue; }
@@ -639,14 +634,8 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext, spanish: bool) -> Result
             (track.index, track.codec.clone(), track.channels, track.rate, track.depth, track.language.clone(), track.title.clone())
         });
     let rate = (*video).framerate;
-    // Offsets are pinned against the bundled AVFormatContext in ci/ffabi-assert.c.
-    #[cfg(target_pointer_width = "32")]
-    const METADATA_OFFSET: usize = 144;
-    #[cfg(target_pointer_width = "64")]
-    const METADATA_OFFSET: usize = 192;
-    let dict = *fmt.cast::<u8>().add(METADATA_OFFSET).cast::<*const AVDictionary>();
     Ok(LocalMedia {
-        title: dictionary_tag(dict, c"title"),
+        title: local_title_tag(fmt),
         duration_secs: u64::try_from(fmt_duration(fmt)).ok().filter(|value| *value > 0).map(|value| value / 1_000_000),
         video: codec(video), audio, audio_channels, audio_rate, audio_depth,
         audio_stream_index: ai, audio_language, audio_title, audio_tracks,
@@ -655,6 +644,27 @@ unsafe fn local_stream_facts(fmt: *mut AVFormatContext, spanish: bool) -> Result
         fps: if rate.den > 0 { f64::from(rate.num) / f64::from(rate.den) } else { 0.0 },
         dovi: dovi_conf(video), subtitles,
     })
+}
+
+unsafe fn local_audio_track(index: i32, stream: *mut AVStream, params: *const AVCodecParameters) -> LocalAudio {
+    LocalAudio {
+        index,
+        codec: std::ffi::CStr::from_ptr(avcodec_get_name((*params).codec_id)).to_string_lossy().into_owned(),
+        language: stream_language(stream),
+        title: stream_name(stream), channels: i64::from((*params).ch_layout.nb_channels),
+        rate: i64::from((*params).sample_rate), depth: i64::from((*params).bits_per_raw_sample),
+        default: stream_disposition(stream) & AV_DISPOSITION_DEFAULT != 0,
+    }
+}
+
+unsafe fn local_title_tag(fmt: *mut AVFormatContext) -> Option<String> {
+    // Offsets are pinned against the bundled AVFormatContext in ci/ffabi-assert.c.
+    #[cfg(target_pointer_width = "32")]
+    const METADATA_OFFSET: usize = 144;
+    #[cfg(target_pointer_width = "64")]
+    const METADATA_OFFSET: usize = 192;
+    let dict = *fmt.cast::<u8>().add(METADATA_OFFSET).cast::<*const AVDictionary>();
+    dictionary_tag(dict, c"title")
 }
 
 /// **Which transport is under the AVIO.** The two are not interchangeable and the choice is made
@@ -7464,6 +7474,7 @@ mod cineusb_descriptor_tests {
             assert_eq!(details.duration_secs, Some(1));
             assert_eq!(details.range, Some(VideoRange::Sdr));
             assert_eq!(details.resolution, Some((160, 90)));
+            assert_eq!(details.audio, [Some(LocalAudioFormat { label: "AAC", channels: Some(2) }); 2]);
             unsafe {
                 let mut fmt = std::ptr::null_mut();
                 assert_eq!(open_local_format(&file, &mut fmt), 0, "reopen {name}");
