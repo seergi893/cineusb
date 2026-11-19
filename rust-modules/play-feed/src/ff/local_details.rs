@@ -51,7 +51,7 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
                 let hdr = container_hdr(params);
                 let pq = hdr.trc == 16 && hdr.pri == 9;
                 let stream_plus = has_dynamic_side_data((*params).coded_side_data, (*params).nb_coded_side_data);
-                let stream_static = hdr.mastering.is_some() || hdr.cll.is_some();
+                let stream_static = meaningful_mastering(hdr.mastering) || meaningful_cll(hdr.cll);
                 let (packet_plus, packet_static) = if dovi.is_none() && !stream_plus {
                     sample_hdr_metadata(fmt, index, params)
                 } else { (false, false) };
@@ -159,6 +159,24 @@ unsafe fn has_dynamic_side_data(list: *const AVPacketSideData, count: c_int) -> 
     })
 }
 
+fn meaningful_mastering(mastering: Option<crate::vp9_hdr::Mastering>) -> bool {
+    mastering.is_some_and(|data| {
+        let (value, scale) = data.max_luminance;
+        data.has_luminance && value > 0 && scale > 0
+    })
+}
+
+fn meaningful_cll(cll: Option<(u32, u32)>) -> bool {
+    cll.is_some_and(|(peak, average)| peak > 0 || average > 0)
+}
+
+#[test]
+fn cineusb_empty_static_hdr_side_data_is_not_evidence() {
+    assert!(!meaningful_mastering(crate::vp9_hdr::parse_mastering(&[0; 88])));
+    assert!(!meaningful_cll(crate::vp9_hdr::parse_cll(&[0; 8])));
+    assert!(meaningful_cll(Some((1000, 400))));
+}
+
 /// Dynamic metadata often lives in video packets only. Sample a small prefix so opening options
 /// stays cheap even on large files. Playback will open a different descriptor.
 unsafe fn sample_hdr_metadata(fmt: *mut AVFormatContext, index: c_int, params: *const AVCodecParameters) -> (bool, bool) {
@@ -188,8 +206,8 @@ unsafe fn sample_hdr_metadata(fmt: *mut AVFormatContext, index: c_int, params: *
                     if data.data.is_null() { return false; }
                     let bytes = std::slice::from_raw_parts(data.data, data.size);
                     match data.type_ {
-                        AV_PKT_DATA_MASTERING_DISPLAY_METADATA => crate::vp9_hdr::parse_mastering(bytes).is_some(),
-                        AV_PKT_DATA_CONTENT_LIGHT_LEVEL => crate::vp9_hdr::parse_cll(bytes).is_some(),
+                        AV_PKT_DATA_MASTERING_DISPLAY_METADATA => meaningful_mastering(crate::vp9_hdr::parse_mastering(bytes)),
+                        AV_PKT_DATA_CONTENT_LIGHT_LEVEL => meaningful_cll(crate::vp9_hdr::parse_cll(bytes)),
                         _ => false,
                     }
                 });
