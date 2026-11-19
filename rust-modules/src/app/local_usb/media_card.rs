@@ -212,7 +212,7 @@ impl Layout {
         let inset = if wide { 22.0 } else { (rect.w * 0.057).round() };
         let x = rect.x + inset;
         let width = rect.w - inset * 2.0;
-        let footer_y = rect.y + rect.h - if series { 78.0 } else if wide { 48.0 } else { 42.0 };
+        let footer_y = rect.y + rect.h - if series { 66.0 } else if wide { 48.0 } else { 42.0 };
         let title_size = if wide { theme::size::HEADLINE } else if compact { theme::size::MICRO } else { theme::size::LABEL };
         let leading = title_size as f32 * 1.08;
         let title_y = rect.y + inset;
@@ -231,7 +231,7 @@ impl Layout {
             title_size, leading, formats_w, compact,
             art: Rect::new(art_x, (art_top + art_bottom - picture_h) / 2.0, picture_width, picture_h),
             progress: Rect::new(x, footer_y - 4.0, width, if wide { 5.0 } else { 4.0 }),
-            footer: Rect::new(x, footer_y + 6.0, width, if series { 69.0 } else { 27.0 }),
+            footer: Rect::new(x, footer_y + 6.0, width, if series { 57.0 } else { 27.0 }),
         }
     }
 }
@@ -367,8 +367,15 @@ impl Art {
     fn draw_footer(p: Painter, footer: Rect, card: &Card<'_>, color: [f32; 4], wide: bool) {
         let (full, short) = card.readout.labels(card.category, i18n::current().language());
         if matches!(card.readout, Readout::Series(_)) {
-            let text = series_footer_copy(&full, &TtfMeasure, footer.w);
-            series_footer(&text, &TtfMeasure).draw(p, footer);
+            let lines = series_footer_lines(&full, &TtfMeasure, footer.w);
+            for (index, line) in lines.into_iter().flatten().enumerate() {
+                let size = if TtfMeasure.width_str(line, theme::size::USB_CARD_META, false) <= footer.w {
+                    theme::size::USB_CARD_META
+                } else { theme::size::USB_CARD_META_TIGHT };
+                let run = TtfMeasure.fit_line(line, footer.w, size, false);
+                Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY)
+                    .draw(p, Rect::new(footer.x, footer.y + 19.0 * index as f32, footer.w, 19.0));
+            }
             if card.watched {
                 icons::draw(p, Icon::Check, Rect::new(footer.x + footer.w - 17.0, footer.y - 32.0, 17.0, 17.0),
                     theme::USB_WATCHED_EDGE);
@@ -394,16 +401,12 @@ impl Art {
     }
 }
 
-fn series_footer<'a>(text: &'a str, measure: &'a dyn Measure) -> TextView<'a> {
-    TextView::new(text, theme::size::USB_CARD_META, theme::TEXT_PRIMARY)
-        .with_measure(measure).leading(19.0)
-}
-
-fn series_footer_copy<'a>(text: &'a str, measure: &dyn Measure, width: f32) -> std::borrow::Cow<'a, str> {
+fn series_footer_lines<'a>(text: &'a str, measure: &dyn Measure, width: f32) -> [Option<&'a str>; 3] {
     if measure.width_str(text, theme::size::USB_CARD_META, false) <= width {
-        text.into()
+        [Some(text), None, None]
     } else {
-        text.replace(" · ", "\n").into()
+        let mut parts = text.splitn(3, " · ");
+        std::array::from_fn(|_| parts.next())
     }
 }
 
@@ -473,8 +476,10 @@ mod usb_browser_tests {
         ] {
             let (full, _) = Readout::Series(counts).labels(Category::Documentary, language);
             assert_eq!(full, expected);
-            let text = series_footer_copy(&full, &measure, layout.footer.w);
-            assert!(series_footer(&text, &measure).measure_h(layout.footer.w) <= layout.footer.h);
+            let lines = series_footer_lines(&full, &measure, layout.footer.w);
+            assert_eq!(lines.into_iter().flatten().collect::<Vec<_>>().join(" · "), expected);
+            assert_eq!(lines.into_iter().flatten().count() as f32 * 19.0, layout.footer.h);
+            assert!(lines.into_iter().flatten().all(|line| measure.width_str(line, theme::size::USB_CARD_META_TIGHT, false) <= layout.footer.w));
         }
     }
 
