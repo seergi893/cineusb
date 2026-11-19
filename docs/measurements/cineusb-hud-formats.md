@@ -16,7 +16,17 @@ Container metadata, track selection, the Load and the pipeline report are separa
 
 ## Brand assets
 
-The HUD uses neutral typesetting in the app's regular font. The implementation ships no third-party logos. Dolby supplies a logo-use agreement process, DTS reserves rights in its site terms, and HDR10+ publishes its own logo license agreement. No redistribution permission was established for this build. AAC, PCM, HDR and SDR appear as format names in the same typography. [Dolby licensing](https://professional.dolby.com/licensing/) · [DTS terms](https://dts.com/terms-conditions/) · [HDR10+ logo agreement](https://hdr10plus.org/wp-content/uploads/2025/08/HDR10-Logo-License-Agreement.pdf)
+The HUD embeds local PNG textures and falls back to text if artwork is missing for a format or fails to load. Monochrome variants below are transparent raster exports of the retained SVGs. The HDR10+ artwork uses the official site's colors with transparent margins trimmed.
+
+| Indicator | Artwork |
+| --- | --- |
+| Dolby Vision | [Wikimedia Commons SVG supplied for this change](https://commons.wikimedia.org/wiki/File:Dolby_Vision_(logo).svg), sourced from an LG PDF. |
+| Dolby Digital | [Wikimedia Commons SVG](https://commons.wikimedia.org/wiki/File:Dolby-Digital.svg), which credits Dolby Laboratories and cites Dolby's product materials. |
+| Dolby Digital Plus | [Wikimedia Commons SVG](https://commons.wikimedia.org/wiki/File:Dolby-Digital-Plus.svg), which credits Dolby Laboratories and cites Dolby's product materials. |
+| DTS | [Wikimedia Commons SVG](https://commons.wikimedia.org/wiki/File:DTS_(2020).svg), sourced from DTS's website. |
+| HDR10+ | [HDR10+ Technologies PNG](https://hdr10plus.org/wp-content/uploads/2023/11/hdr_logo-1.png). |
+
+Commons identifies its listed SVGs as public-domain text logos for copyright purposes. The corresponding trademarks belong to their respective owners. The HUD uses the marks to identify session formats. [Dolby brand guidelines](https://games.dolby.com/globalassets/games-2.0/logos-and-guidelines-downloads/vision/dolby-vision-brand-guidelines_v01_200507.pdf) · [DTS terms](https://dts.com/terms-conditions/) · [HDR10+ logo agreement](https://hdr10plus.org/wp-content/uploads/2025/08/HDR10-Logo-License-Agreement.pdf)
 
 ## Validation on LG C1 and B1
 

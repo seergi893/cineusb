@@ -127,6 +127,7 @@ fn row_pops(slot: ControlSlot) -> usize {
 /// edge is a per-SESSION clock — so they live on `PlayerScreen` and are stepped from its `Tick`,
 /// exactly where [`step`](Self::step)'s doc says they must be.
 pub struct HudMotion {
+    pub(super) format_logos: [Option<Option<super::render::FormatLogo>>; super::render::FORMAT_LOGOS.len()],
     pub(super) pop: RowPop,
     /// An open section's own buttons' focus pop ([`super::geometry::GROUP_SECTION`]), one spring per button
     /// (the pop the Info card's buttons have always had). It is stepped while the screen focuses `GROUP_SECTION`
@@ -208,6 +209,7 @@ fn faded(spring: &PopoverMotion) -> bool {
 impl HudMotion {
     pub fn new() -> Self {
         Self {
+            format_logos: Default::default(),
             pop: RowPop::new(),
             section_pop: RowPop::new(),
             title_clock: plx_ui::marquee::Clock::new(),
