@@ -36,7 +36,7 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
         ..LocalVideoDetails::default()
     };
     let retry = read_local_format(file, true, |fmt| {
-        let mut retry = false;
+        let mut retry = None;
         unsafe {
             details.title = local_title_tag(fmt);
             let duration = fmt_duration(fmt);
@@ -49,7 +49,7 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
                 let (width, height) = ((*params).width, (*params).height);
                 if width > 0 && height > 0 { details.resolution = Some((width as u32, height as u32)); }
                 read_video_range(fmt, index, params, &mut details);
-                retry = retry_video_range((*params).codec_id, details.range);
+                retry = retry_video_range((*params).codec_id, (*params).color_trc, details.range).then_some(index);
             }
             let best = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, std::ptr::null_mut(), 0);
             let tracks: Vec<_> = (0..(*fmt).nb_streams).filter_map(|index| {
@@ -69,20 +69,19 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
             });
         }
         Ok(retry)
-    }).unwrap_or(false);
-    if retry {
+    }).ok().flatten();
+    if let Some(index) = retry {
         // The compact library probe can run out of bytes before FFmpeg's
         // HEVC parser has recovered the signal from a large access unit.
         // Retry off-frame at the same probe budget used to open playback.
         let _ = read_local_format(file, false, |fmt| {
             unsafe {
-                let index = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, std::ptr::null_mut(), 0);
-                if index >= 0 {
+                if av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, index, -1, std::ptr::null_mut(), 0) == index {
                     let params = stream_codecpar(*(*fmt).streams.add(index as usize));
+                    if (*params).codec_id != AV_CODEC_ID_HEVC { return Ok(()); }
                     let mut observed = LocalVideoDetails::default();
                     read_video_range(fmt, index, params, &mut observed);
-                    if observed.range.is_some()
-                        && !(details.range == Some(VideoRange::Hdr) && observed.range == Some(VideoRange::Sdr)) {
+                    if observed.range.is_some() {
                         details.range = observed.range;
                         details.hdr10_base = observed.hdr10_base;
                         details.hdr10_plus = observed.hdr10_plus;
@@ -95,17 +94,18 @@ pub fn probe_local_details(file: &File) -> LocalVideoDetails {
     details
 }
 
-fn retry_video_range(codec: c_int, range: Option<VideoRange>) -> bool {
-    codec == AV_CODEC_ID_HEVC && matches!(range, None | Some(VideoRange::Hdr))
+fn retry_video_range(codec: c_int, transfer: c_int, range: Option<VideoRange>) -> bool {
+    codec == AV_CODEC_ID_HEVC && transfer != 18 && matches!(range, None | Some(VideoRange::Hdr))
 }
 
 #[test]
 fn cineusb_retries_inconclusive_hevc_without_reprobing_confirmed_formats() {
-    assert!(retry_video_range(AV_CODEC_ID_HEVC, None));
-    assert!(retry_video_range(AV_CODEC_ID_HEVC, Some(VideoRange::Hdr)));
-    assert!(!retry_video_range(AV_CODEC_ID_HEVC, Some(VideoRange::Hdr10)));
-    assert!(!retry_video_range(AV_CODEC_ID_HEVC, Some(VideoRange::Sdr)));
-    assert!(!retry_video_range(AV_CODEC_ID_AV1, None));
+    assert!(retry_video_range(AV_CODEC_ID_HEVC, 2, None));
+    assert!(retry_video_range(AV_CODEC_ID_HEVC, 16, Some(VideoRange::Hdr)));
+    assert!(!retry_video_range(AV_CODEC_ID_HEVC, 18, Some(VideoRange::Hdr)));
+    assert!(!retry_video_range(AV_CODEC_ID_HEVC, 16, Some(VideoRange::Hdr10)));
+    assert!(!retry_video_range(AV_CODEC_ID_HEVC, 1, Some(VideoRange::Sdr)));
+    assert!(!retry_video_range(AV_CODEC_ID_AV1, 2, None));
 }
 
 unsafe fn read_video_range(fmt: *mut AVFormatContext, index: c_int,
