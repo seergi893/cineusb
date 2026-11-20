@@ -246,7 +246,7 @@ impl SeriesKey {
     }
 }
 
-fn normalized_prefix(prefix: &[u8]) -> Option<String> {
+pub(super) fn normalized_prefix(prefix: &[u8]) -> Option<String> {
     let prefix = std::str::from_utf8(prefix).ok()?;
     let title = prefix.split(['.', '_', '-', ' ']).filter(|part| !part.is_empty())
         .collect::<Vec<_>>().join(" ").to_lowercase();
@@ -389,7 +389,12 @@ pub(super) fn next_episode(drive: &Drive, current: &Path, current_history: Optio
 }
 
 fn item(drive: &Drive, video: &Video, show: Option<&str>, favorite: bool, progress: u64) -> Item {
-    let title = show.map(str::to_owned).unwrap_or_else(|| video.path.file_stem().unwrap_or_default().to_string_lossy().into_owned());
+    let title = show.or_else(|| video.show.as_ref()?.file_name()?.to_str())
+        .or_else(|| {
+            let (prefix, _, _) = continuity::episode(video.path.file_name()?)?;
+            (!prefix.is_empty()).then(|| std::str::from_utf8(prefix).ok()).flatten()
+        }).map(str::to_owned)
+        .unwrap_or_else(|| video.path.file_stem().unwrap_or_default().to_string_lossy().into_owned());
     let path = drive.volume.path.join(&video.path);
     let detail_key = (path.clone(), Some(video.size), Some(video.modified));
     Item { volume: drive.volume.clone(), path, title, favorite, progress, detail_key,

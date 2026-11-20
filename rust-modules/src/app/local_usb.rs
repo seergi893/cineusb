@@ -3588,14 +3588,24 @@ impl Browser {
 
     fn episode_show(&self, volume: &Volume, path: &std::path::Path) -> Option<PathBuf> {
         if self.is_library_movie(volume, path) { return None; }
-        if self.folders.last().is_some_and(|folder| &folder.volume == volume) {
-            if let Some(show) = self.series_root().filter(|show| path.starts_with(show)) {
-                return Some(show);
-            }
-        }
         let relative = path.strip_prefix(&volume.path).ok()?;
-        self.dashboard.drives.iter().find(|drive| &drive.volume == volume)?
-            .videos.iter().find(|video| video.path == relative)?.show.as_ref().map(|show| volume.path.join(show))
+        if let Some(video) = self.dashboard.drives.iter().find(|drive| &drive.volume == volume)
+            .and_then(|drive| drive.videos.iter().find(|video| video.path == relative)) {
+            return video.show.as_ref().map(|show| volume.path.join(show));
+        }
+        let folder = self.folders.last().filter(|folder| &folder.volume == volume)?;
+        let show = self.series_root().filter(|show| path.starts_with(show))?;
+        let categorized = show.strip_prefix(&volume.path).ok()?.parent()?.iter()
+            .any(|part| media_folder_score(&part.to_string_lossy(), 2) > 0);
+        let season = path.strip_prefix(&show).ok()?.parent()?.iter()
+            .any(|part| continuity::season_number(&part.to_string_lossy()).is_some());
+        let prefix_matches = path.file_name().and_then(continuity::episode).is_some_and(|(prefix, _, _)| {
+            show.file_name().and_then(|name| home::normalized_prefix(clean_series_name(&name.to_string_lossy()).as_bytes()))
+                .is_some_and(|name| home::normalized_prefix(prefix).as_ref() == Some(&name))
+        });
+        (categorized || season || prefix_matches || self.series_cache.get(&show).is_some_and(|entry| entry.summary.is_some())
+            || folder.entries.iter().any(|entry| entry.kind == Kind::Folder && season_folder(&entry.name.to_string_lossy())))
+            .then_some(show)
     }
 
     fn favorite_marked(&self, volume: &Volume, path: &std::path::Path) -> bool {
