@@ -195,6 +195,19 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn counts_unique_episode_ranges_and_seasons() {
+        let root = plx_base::testscratch::process_dir("cineusb-series-unique");
+        for file in ["01.mkv", "S01E01-E02.mkv", "Season 2/Archive/Capítol 03.mkv", "Specials/E01.mkv"] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, []).unwrap();
+        }
+        std::fs::create_dir_all(root.join("Season 4")).unwrap();
+        assert_eq!(count(&root, None, true).unwrap(), Some(Counts { seasons: 3, episodes: 4 }));
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
     fn formats_only_claim_agreement_across_inspected_episodes() {
         use plx_play_feed::{LocalAudioFormat, VideoRange};
         let a = ("Show S01E01.mkv".into(), None, None);

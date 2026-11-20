@@ -142,11 +142,13 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
             } else {
                 let relative = child.strip_prefix(&volume.path).map_err(io::Error::other)?.to_path_buf();
                 let detected_show = show.clone().or_else(|| favorites.iter().find(|root| child.starts_with(root)).cloned())
-                    .or_else(|| continuity::episode(&entry.name).and_then(|_| {
+                    .or_else(|| continuity::episode(&entry.name).and_then(|(prefix, _, _)| {
                         let name = path.file_name()?.to_string_lossy();
                         if super::art::is_season(&name.to_lowercase()) {
                             path.parent().map(Path::to_path_buf)
-                        } else if category == 0 || media_folder_score(&name, category) == 0 {
+                        } else if (category == 0 || media_folder_score(&name, category) == 0)
+                            && (prefix.is_empty() || normalized_prefix(prefix)
+                                == normalized_prefix(super::clean_series_name(&name).as_bytes())) {
                             Some(path.clone())
                         } else { None }
                     }));
@@ -159,7 +161,7 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
                 else if let Some(show) = &relative_show { shows.insert(show.clone()); }
                 else if category != 1 && category != super::DOCUMENTALS_TAB && continuity::episode(&entry.name).is_some() {
                     let (prefix, _, _) = continuity::episode(&entry.name).expect("episode already detected");
-                    shows.insert(PathBuf::from(String::from_utf8_lossy(prefix).as_ref()));
+                    if let Some(prefix) = normalized_prefix(prefix) { shows.insert(path.join(prefix)); }
                 }
                 else { stats.movies += 1; }
                 videos.push(Video { path: relative, size: entry.size.unwrap_or(0), modified: entry.modified.unwrap_or(0),
@@ -575,6 +577,20 @@ mod usb_browser_tests {
         let current = category.join("Una S01E01.mkv");
         let next = category.join("Una S01E02.mkv");
         for path in [&current, &next, &category.join("Otra S01E02.mkv")] {
+            std::fs::write(path, []).unwrap();
+        }
+        assert_eq!(next_episode(&drive(volume, BTreeMap::new()), &current, None), Some(next));
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn similarly_named_files_in_a_shared_folder_do_not_cross_series() {
+        let (root, volume) = fixture("cineusb-shared-folder");
+        let folder = root.join("Downloads");
+        std::fs::create_dir(&folder).unwrap();
+        let current = folder.join("One.Show S01E01.mkv");
+        let next = folder.join("One Show 1x03.mkv");
+        for path in [&current, &next, &folder.join("Other Show S01E02.mkv")] {
             std::fs::write(path, []).unwrap();
         }
         assert_eq!(next_episode(&drive(volume, BTreeMap::new()), &current, None), Some(next));

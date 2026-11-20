@@ -4170,7 +4170,7 @@ fn file_title(stem: &str, metadata: Option<&str>) -> String {
 
 fn video_title(path: &std::path::Path, metadata: Option<&str>) -> String {
     let name = path.file_stem().or_else(|| path.file_name()).unwrap_or_default().to_string_lossy();
-    let tagged = metadata.filter(|title| !placeholder_title(title));
+    let tagged = metadata.filter(|title| !placeholder_title(title) && title.len() <= 512 && !title.chars().any(char::is_control));
     if placeholder_title(&name) && tagged.is_none_or(|title| title.trim().is_empty()) {
         if let Some(parent) = path.parent().and_then(std::path::Path::file_name).and_then(|name| name.to_str())
             .filter(|name| !placeholder_title(name) && !name.bytes().all(|b| b.is_ascii_digit())
@@ -4179,7 +4179,12 @@ fn video_title(path: &std::path::Path, metadata: Option<&str>) -> String {
             return clean_series_name(parent);
         }
     }
-    file_title(&name, tagged)
+    let title = file_title(&name, tagged);
+    if tagged.is_none() && continuity::episode_parts(std::ffi::OsStr::new(name.as_ref())).is_none() {
+        clean_series_name(&title)
+    } else {
+        title
+    }
 }
 
 fn placeholder_title(title: &str) -> bool {
@@ -4911,6 +4916,17 @@ mod usb_browser_tests {
         assert_eq!(display_name(&entry, false), "Serie");
         let movie = disk::media_entry("Película.mp4".into(), false).unwrap();
         assert_eq!(display_name(&movie, false), "Película");
+        for name in ["03 La sangre helada", "03. La sangre helada", "03 - La sangre helada", "03_La sangre helada"] {
+            assert_eq!(clean_series_name(name), "La sangre helada");
+        }
+        for title in ["1917", "2012", "101 Dálmatas", "24", "3 Body Problem"] {
+            assert_eq!(clean_series_name(title), title);
+        }
+        let path = std::path::Path::new("Películas/La vida es bella/title_t00 (1).mkv");
+        assert_eq!(video_title(path, Some("track_01")), "La vida es bella");
+        assert_eq!(video_title(path, Some("La vita è bella")), "La vita è bella");
+        assert_eq!(video_title(std::path::Path::new("Películas/1917.mkv"), Some("title_t01")), "1917");
+        assert_eq!(video_title(std::path::Path::new("Películas/03 - La sangre helada.mkv"), None), "La sangre helada");
         assert_eq!(file_title("Breaking.Bad.S01E01.Pilot.1080p.WEB-DL", None), "Pilot");
         assert_eq!(file_title("Película.2025", None), "Película 2025");
     }
