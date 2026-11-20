@@ -235,11 +235,13 @@ unsafe fn sample_hdr_metadata(fmt: *mut AVFormatContext, index: c_int, params: *
     let mut remaining = 4 * 1024 * 1024;
     let mut found = false;
     let mut static_metadata = false;
-    for _ in 0..48 {
+    let mut video_packets = 0;
+    for _ in 0..128 {
         if remaining == 0 || std::time::Instant::now() >= deadline || av_read_frame(fmt, packet) < 0 { break; }
         let size = ((*packet).size.max(0) as usize).min(remaining);
-        remaining -= size;
         if (*packet).stream_index == index {
+            remaining -= size;
+            video_packets += 1;
             found = has_dynamic_side_data((*packet).side_data, (*packet).side_data_elems);
             let (list, count) = ((*packet).side_data, (*packet).side_data_elems);
             if !static_metadata && !list.is_null() && count > 0 {
@@ -254,25 +256,36 @@ unsafe fn sample_hdr_metadata(fmt: *mut AVFormatContext, index: c_int, params: *
                 });
             }
             if !found && hevc && size > 0 && !(*packet).data.is_null() {
-                found = hevc_hdr10plus(std::slice::from_raw_parts((*packet).data, size), length_size);
+                let (dynamic, mastering) = hevc_packet_hdr(std::slice::from_raw_parts((*packet).data, size), length_size);
+                found = dynamic;
+                static_metadata |= mastering;
             }
         }
         av_packet_unref(packet);
-        if found { break; }
+        if found || video_packets >= 24 { break; }
     }
     av_packet_free(&mut packet);
     (found, static_metadata)
 }
 
+#[cfg(test)]
 fn hevc_hdr10plus(data: &[u8], length_size: Option<usize>) -> bool {
-    let has_hdr10plus = |nal| strip_hdr10plus_sei_with(nal, true) != SeiStrip::Keep;
+    hevc_packet_hdr(data, length_size).0
+}
+
+fn hevc_packet_hdr(data: &[u8], length_size: Option<usize>) -> (bool, bool) {
+    let mut static_metadata = false;
+    let mut has_hdr10plus = |nal: &[u8]| {
+        static_metadata |= hevc_static_sei(nal);
+        strip_hdr10plus_sei_with(nal, true) != SeiStrip::Keep
+    };
     if let Some(length_size) = length_size {
         let mut position = 0;
         while let Some(prefix) = data.get(position..position + length_size) {
             let size = prefix.iter().fold(0usize, |size, byte| (size << 8) | usize::from(*byte));
             position += length_size;
             let Some(end) = nal_end(position, size, data.len()) else { break };
-            if has_hdr10plus(&data[position..end]) { return true; }
+            if has_hdr10plus(&data[position..end]) { return (true, static_metadata); }
             position = end;
         }
     } else {
@@ -280,10 +293,47 @@ fn hevc_hdr10plus(data: &[u8], length_size: Option<usize>) -> bool {
         while let Some((start, prefix)) = next {
             next = annexb_start(data, start + prefix);
             let end = next.map_or(data.len(), |(offset, _)| offset);
-            if has_hdr10plus(&data[start + prefix..end]) { return true; }
+            if has_hdr10plus(&data[start + prefix..end]) { return (true, static_metadata); }
         }
     }
+    (false, static_metadata)
+}
+
+fn hevc_static_sei(nal: &[u8]) -> bool {
+    if nal.len() < 2 || !matches!((nal[0] >> 1) & 0x3f, 39 | 40) {
+        return false;
+    }
+    fn read_value(bytes: &mut &[u8]) -> Option<usize> {
+        let mut value: usize = 0;
+        while let Some((&byte, rest)) = bytes.split_first() {
+            *bytes = rest;
+            value = value.checked_add(usize::from(byte))?;
+            if byte != 255 { return Some(value); }
+        }
+        None
+    }
+    let rbsp = super::sei_rbsp(&nal[2..]);
+    let mut bytes = rbsp.as_slice();
+    while bytes.first().is_some_and(|&byte| byte != 0x80) {
+        let (Some(kind), Some(size)) = (read_value(&mut bytes), read_value(&mut bytes)) else { break };
+        let Some((payload, rest)) = bytes.split_at_checked(size) else { break };
+        match (kind, payload) {
+            (137, payload) if payload.len() == 24 && payload[16..20].iter().any(|&byte| byte != 0) => return true,
+            (144, [a, b, c, d]) if *a | *b | *c | *d != 0 => return true,
+            _ => {}
+        }
+        bytes = rest;
+    }
     false
+}
+
+#[test]
+fn cineusb_hevc_reads_static_sei_without_container_side_data() {
+    let annexb = [0, 0, 1, 78, 1, 144, 4, 0, 97, 0, 55, 0x80];
+    assert_eq!(hevc_packet_hdr(&annexb, None), (false, true));
+    let empty = [0, 0, 0, 9, 78, 1, 144, 4, 0, 0, 0, 0, 0x80];
+    assert_eq!(hevc_packet_hdr(&empty, Some(4)), (false, false));
+    assert_eq!(hevc_packet_hdr(&annexb[..9], None), (false, false));
 }
 
 #[test]

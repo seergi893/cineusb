@@ -234,8 +234,13 @@ impl SeriesKey {
         continuity::identify(path, self.flat_title.is_none())
     }
 
-    fn title(&self) -> Option<&str> {
-        self.flat_title.as_deref().or_else(|| self.folder.file_name()?.to_str())
+    fn title<'a>(&'a self, video: &'a Video) -> Option<&'a str> {
+        if self.flat_title.is_some() {
+            let (prefix, _, _) = continuity::episode(video.path.file_name()?)?;
+            std::str::from_utf8(prefix).ok()
+        } else {
+            self.folder.file_name()?.to_str()
+        }
     }
 }
 
@@ -280,10 +285,19 @@ fn next_in_series<'a>(drive: &Drive, series: &SeriesKey, candidates: &[&'a Video
         }
     }
     let (key, saved, video) = best?;
+    if completed.is_some_and(|path| series.identify(path)
+        .is_some_and(|episode| key <= (episode.season, episode.last))) { return None; }
     // A removed but unfinished earlier episode cannot be treated as complete.
     if paused.iter().any(|episode| (episode.season, episode.first) < key
         && (episode.first..=episode.last).any(|number| !watched.contains(&(episode.season, number)))) { return None; }
-    (has_resume(saved) || !watched.is_empty() || favorite && key == (1, 1)).then_some((video, saved))
+    if has_resume(saved) || !watched.is_empty() || favorite && key == (1, 1) {
+        return Some((video, saved));
+    }
+    // With no completed history, allow resuming a file the viewer explicitly started.
+    candidates.iter().filter_map(|&candidate| {
+        let saved = progress(candidate, &drive.volume, identity, records);
+        has_resume(saved).then_some((candidate, saved))
+    }).next()
 }
 
 fn grouped_history<'a>(drive: &Drive, identity: &str, groups: impl Iterator<Item = &'a SeriesKey>,
@@ -337,11 +351,24 @@ pub(super) fn recommendations(drive: &Drive) -> Vec<Item> {
         let favorite = series.flat_title.is_none() && favorites.contains(&series.folder);
         if let Some((video, saved)) = next_in_series(drive, &series, &videos, identity, history,
             histories.get(&series).unwrap_or(&empty), None, favorite) {
-            items.push(item(drive, video, series.title(), favorite, saved));
+            items.push(item(drive, video, series.title(video), favorite, saved));
         }
     }
     items.sort_by(|a, b| (!a.favorite, &a.path).cmp(&(!b.favorite, &b.path)));
     items
+}
+
+pub(super) fn next_listed_episode(folder: &super::Folder, current: &Path, show: Option<&Path>,
+    identity: &str, records: &BTreeMap<String, u64>) -> Option<PathBuf> {
+    let relative_folder = folder.path.strip_prefix(&folder.volume.path).ok()?;
+    let show = show.and_then(|path| path.strip_prefix(&folder.volume.path).ok()).map(Path::to_path_buf);
+    let videos = folder.entries.iter().filter(|entry| entry.kind == Kind::Video).map(|entry| Video {
+        path: relative_folder.join(&entry.name), size: entry.size.unwrap_or_default(),
+        modified: entry.modified.unwrap_or_default(), show: show.clone(), category: 0,
+    }).collect();
+    let drive = Drive { volume: folder.volume.clone(), facts: (None, Some(identity.into())),
+        stats: None, videos, history: None };
+    next_episode(&drive, current, Some(records))
 }
 
 pub(super) fn next_episode(drive: &Drive, current: &Path, current_history: Option<&BTreeMap<String, u64>>) -> Option<PathBuf> {
@@ -609,6 +636,26 @@ mod usb_browser_tests {
         assert_eq!(recommendations(&before)[0].episode, Some((2, 1)));
         assert_eq!(before.history.as_ref().unwrap()[&watched], WATCHED);
         plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn deleted_watched_season_survives_a_new_mount_and_agrees_with_autoplay() {
+        let (root, volume) = fixture("cineusb-deleted-season");
+        let show = root.join("Sèries/Una sèrie");
+        let first = show.join("Season 1/Show S01E01.mkv");
+        let second = show.join("Season 2/Show S02E01.mkv");
+        let before = drive(volume.clone(), BTreeMap::new());
+        let entry = before.videos.iter().find(|item| volume.path.join(&item.path) == first).unwrap();
+        let key = entry_key("uuid:test", &volume, &first, entry.size, entry.modified).unwrap();
+        let history = BTreeMap::from([(key, WATCHED)]);
+        let original_next = next_episode(&before, &first, Some(&history)).unwrap();
+        assert_eq!(original_next, second);
+        std::fs::remove_dir_all(show.join("Season 1")).unwrap();
+        let new_mount = root.with_extension("reconnected");
+        std::fs::rename(&root, &new_mount).unwrap();
+        let reconnected = drive(Volume { path: new_mount.clone(), ..volume }, history);
+        assert_eq!(recommendations(&reconnected)[0].path, new_mount.join(second.strip_prefix(&root).unwrap()));
+        plx_base::testscratch::remove_tree(&new_mount);
     }
 
     #[test]

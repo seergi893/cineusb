@@ -1238,9 +1238,18 @@ impl Browser {
         self.estimate_anchor = None;
         let Some(playing) = self.playing.take() else { return };
         if !completed || !self.settings.auto_next { return; }
-        let history = self.identity(&playing.volume).and_then(|identity| self.history.get(&history_prefix(identity)));
-        let next = self.dashboard.drives.iter().find(|drive| drive.volume == playing.volume)
-            .and_then(|drive| home::next_episode(drive, &playing.path, history));
+        let identity = self.identity(&playing.volume);
+        let history = identity.and_then(|identity| self.history.get(&history_prefix(identity)));
+        let next = match self.dashboard.drives.iter().find(|drive| drive.volume == playing.volume && drive.stats.is_some()) {
+            Some(drive) => home::next_episode(drive, &playing.path, history),
+            None if !self.is_library_movie(&playing.volume, &playing.path) => {
+                let show = self.episode_show(&playing.volume, &playing.path);
+                self.folders.last().filter(|folder| folder.volume == playing.volume
+                    && playing.path.parent() == Some(folder.path.as_path()))
+                    .and_then(|folder| home::next_listed_episode(folder, &playing.path, show.as_deref(), identity?, history?))
+            }
+            None => None,
+        };
         let Some(next) = next else { return };
         self.countdown_display = 10;
         self.dialog = Some(Dialog::Next { volume: playing.volume, path: next,
