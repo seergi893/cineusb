@@ -1,4 +1,4 @@
-use super::{DetailKey, art, continuity, disk::Kind, list_folder, media_card::Formats};
+use super::{DetailKey, continuity, disk::Kind, list_folder, media_card::Formats};
 use plx_play_feed::LocalVideoDetails;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -15,6 +15,20 @@ pub(super) struct Counts {
 pub(super) struct Listing {
     pub counts: Counts,
     pub episodes: Vec<DetailKey>,
+    pub identities: BTreeMap<std::path::PathBuf, continuity::Episode>,
+}
+
+impl Listing {
+    pub(super) fn watched(&self, completed: impl Fn(&DetailKey) -> bool) -> usize {
+        let mut identified = BTreeSet::new();
+        let mut anonymous = 0;
+        for key in self.episodes.iter().filter(|key| completed(key)) {
+            if let Some(episode) = self.identities.get(&key.0) {
+                identified.extend((episode.first..=episode.last).map(|number| (episode.season, number)));
+            } else { anonymous += 1; }
+        }
+        identified.len() + anonymous
+    }
 }
 
 pub(super) struct Summary {
@@ -93,6 +107,10 @@ pub(super) fn count_cancellable(path: &Path, mount: Option<u64>, known_series: b
     let mut episodic = false;
     let mut seasons = BTreeSet::new();
     let mut unnumbered = 0;
+    let mut root_unnumbered = false;
+    let mut identified = BTreeSet::new();
+    let mut identities = BTreeMap::new();
+    let mut anonymous = 0;
     let mut episodes = Vec::new();
     while let Some((folder, season, covered, is_root)) = folders.pop() {
         if cancelled.load(Ordering::Relaxed) { return Err(io::ErrorKind::Interrupted.into()); }
@@ -106,12 +124,21 @@ pub(super) fn count_cancellable(path: &Path, mount: Option<u64>, known_series: b
                     if ["sample", "trailer", "muestra", "tráiler"].iter().any(|name| stem.eq_ignore_ascii_case(name)) {
                         continue;
                     }
-                    let tagged = continuity::episode(&entry.name).map(|(_, s, _)| s);
-                    episodic |= tagged.is_some();
-                    if let Some(number) = season.or(tagged) {
+                    let relative = child.strip_prefix(path).unwrap_or(&child);
+                    // Only numbered folders and the show root provide a default season.
+                    // Arbitrary nested folders can contain separate, unnamed seasons.
+                    let episode = continuity::identify(relative, known_series && is_root);
+                    episodic |= episode.is_some();
+                    if let Some(episode) = episode {
+                        seasons.insert(episode.season);
+                        identified.extend((episode.first..=episode.last).map(|number| (episode.season, number)));
+                        identities.insert(child.clone(), episode);
+                    } else if let Some(number) = season {
                         seasons.insert(number);
+                        anonymous += 1;
                     } else {
                         unnumbered_episode = true;
+                        anonymous += 1;
                     }
                     episodes.push((child, entry.size, entry.modified));
                 }
@@ -120,8 +147,8 @@ pub(super) fn count_cancellable(path: &Path, mount: Option<u64>, known_series: b
                     if matches!(name.as_str(), "sample" | "samples" | "extras" | "trailers" | "featurettes") {
                         continue;
                     }
-                    let named = art::is_season(&name).then(|| super::home::first_number(&name)).flatten();
-                    children.push((child, season.or(named), covered, false));
+                    let named = continuity::season_number(&name);
+                    children.push((child, named.or(season), covered, false));
                 }
             }
         }
@@ -130,13 +157,15 @@ pub(super) fn count_cancellable(path: &Path, mount: Option<u64>, known_series: b
             unnumbered += 1;
             for child in &mut children { child.2 = true; }
         }
+        root_unnumbered |= is_root && unnumbered_episode;
         folders.extend(children);
     }
     if cancelled.load(Ordering::Relaxed) { return Err(io::ErrorKind::Interrupted.into()); }
     if !known_series && !episodic && seasons.is_empty() { return Ok(None); }
     episodes.sort_unstable();
-    let counts = Counts { seasons: seasons.len() + unnumbered, episodes: episodes.len() };
-    Ok(Some(Listing { counts, episodes }))
+    if known_series && root_unnumbered { seasons.insert(1); }
+    let counts = Counts { seasons: seasons.len() + unnumbered, episodes: identified.len() + anonymous };
+    Ok(Some(Listing { counts, episodes, identities }))
 }
 
 #[cfg(test)]
@@ -159,9 +188,22 @@ mod usb_browser_tests {
         }
         std::fs::create_dir_all(root.join("Mixed/Season 4")).unwrap();
         assert_eq!(count(&root.join("Mixed"), None, false).unwrap(), Some(Counts { seasons: 3, episodes: 7 }));
-        assert_eq!(count(&root.join("Direct"), None, true).unwrap(), Some(Counts { seasons: 0, episodes: 2 }));
+        assert_eq!(count(&root.join("Direct"), None, true).unwrap(), Some(Counts { seasons: 1, episodes: 2 }));
         assert_eq!(count(&root.join("Direct"), None, false).unwrap(), None);
         assert_eq!(count(&root.join("Episodes"), None, false).unwrap(), Some(Counts { seasons: 1, episodes: 1 }));
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn counts_unique_episode_ranges_and_seasons() {
+        let root = plx_base::testscratch::process_dir("cineusb-series-unique");
+        for file in ["01.mkv", "S01E01-E02.mkv", "Season 2/Archive/Capítol 03.mkv", "Specials/E01.mkv"] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, []).unwrap();
+        }
+        std::fs::create_dir_all(root.join("Season 4")).unwrap();
+        assert_eq!(count(&root, None, true).unwrap(), Some(Counts { seasons: 3, episodes: 4 }));
         plx_base::testscratch::remove_tree(&root);
     }
 
@@ -172,7 +214,7 @@ mod usb_browser_tests {
         let b = ("Show 1x02.mkv".into(), None, None);
         let c = ("Show S01E03.mkv".into(), None, None);
         let mut summary = Summary::new(Listing { counts: Counts { seasons: 1, episodes: 3 },
-            episodes: vec![a.clone(), b.clone(), c.clone()] });
+            episodes: vec![a.clone(), b.clone(), c.clone()], identities: BTreeMap::new() });
         let stereo = |label| Some(LocalAudioFormat { label, channels: Some(2) });
         let mut cache = BTreeMap::from([(a, LocalVideoDetails {
             resolution: Some((3840, 1608)), range: Some(VideoRange::DolbyVision),

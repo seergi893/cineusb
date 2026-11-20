@@ -1,5 +1,5 @@
 //! Offline library inventory and recommendations. All filesystem work runs off-frame.
-use super::{DetailKey, continuity, directory_stamps, disk, entry_key, history_prefix, list_folder, matching_size_resume,
+use super::{DetailKey, continuity, directory_stamps, disk, history_prefix, list_folder,
     media_folder_score, read_history, system_mount, unpack_progress, volume_facts, Kind, Volume, VolumeFacts,
     FAVORITE, WATCHED};
 use serde::{Deserialize, Serialize};
@@ -91,7 +91,7 @@ fn cached(identity: &str) -> Option<Inventory> {
         let Ok(bytes) = std::fs::read(path) else { continue };
         if bytes.len() > 16 * 1024 * 1024 { continue; }
         let Ok(value) = serde_json::from_slice::<Inventory>(&bytes) else { continue };
-        if value.schema == 1 && value.identity == identity && value.videos.iter().all(|video| {
+        if value.schema == 2 && value.identity == identity && value.videos.iter().all(|video| {
             !video.path.as_os_str().is_empty() && video.path.components()
                 .all(|part| matches!(part, std::path::Component::Normal(_)))
                 && video.show.as_ref().is_none_or(|show| !show.as_os_str().is_empty()
@@ -131,7 +131,7 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
                     [1, 2, super::DOCUMENTALS_TAB].into_iter()
                         .find(|&kind| media_folder_score(&name, kind) > 0).unwrap_or(category)
                 };
-                let next_show = if show.is_none() && super::art::is_season(&name.to_lowercase()) {
+                let next_show = if show.is_none() && next_category != 1 && continuity::season_number(&name).is_some() {
                     Some(path.clone())
                 } else if next_category == 2 && next_category == category && show.is_none() {
                     Some(child.clone())
@@ -142,24 +142,26 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
             } else {
                 let relative = child.strip_prefix(&volume.path).map_err(io::Error::other)?.to_path_buf();
                 let detected_show = show.clone().or_else(|| favorites.iter().find(|root| child.starts_with(root)).cloned())
-                    .or_else(|| continuity::episode(&entry.name).and_then(|_| {
+                    .or_else(|| continuity::episode(&entry.name).and_then(|(prefix, _, _)| {
                         let name = path.file_name()?.to_string_lossy();
                         if super::art::is_season(&name.to_lowercase()) {
                             path.parent().map(Path::to_path_buf)
-                        } else if category == 0 || media_folder_score(&name, category) == 0 {
+                        } else if (category == 0 || media_folder_score(&name, category) == 0)
+                            && (prefix.is_empty() || normalized_prefix(prefix)
+                                == normalized_prefix(super::clean_series_name(&name).as_bytes())) {
                             Some(path.clone())
                         } else { None }
                     }));
-                let relative_show = detected_show.and_then(|show| show.strip_prefix(&volume.path).ok().map(Path::to_path_buf))
+                let relative_show = detected_show.filter(|_| category != 1).and_then(|show| show.strip_prefix(&volume.path).ok().map(Path::to_path_buf))
                     .filter(|show| !show.as_os_str().is_empty());
                 if category == super::DOCUMENTALS_TAB {
                     if let Some(show) = &relative_show { documentaries.insert(show.clone()); }
                     else { stats.documentaries += 1; }
                 }
                 else if let Some(show) = &relative_show { shows.insert(show.clone()); }
-                else if category != super::DOCUMENTALS_TAB && continuity::episode(&entry.name).is_some() {
+                else if category != 1 && category != super::DOCUMENTALS_TAB && continuity::episode(&entry.name).is_some() {
                     let (prefix, _, _) = continuity::episode(&entry.name).expect("episode already detected");
-                    shows.insert(PathBuf::from(String::from_utf8_lossy(prefix).as_ref()));
+                    if let Some(prefix) = normalized_prefix(prefix) { shows.insert(path.join(prefix)); }
                 }
                 else { stats.movies += 1; }
                 videos.push(Video { path: relative, size: entry.size.unwrap_or(0), modified: entry.modified.unwrap_or(0),
@@ -170,9 +172,9 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
     cancelled(stop)?;
     stats.series = shows.len();
     stats.documentaries += documentaries.len();
-    videos.sort_by(|a, b| episode_order(&a.path, &b.path));
+    videos.sort_by(episode_order);
     let favorite_series = favorites.iter().filter_map(|path| path.strip_prefix(&volume.path).ok().map(Path::to_path_buf)).collect();
-    Ok(Inventory { schema: 1, identity: identity.into(), checked: seconds(), videos, stats, used_bytes: None, directories, favorite_series })
+    Ok(Inventory { schema: 2, identity: identity.into(), checked: seconds(), videos, stats, used_bytes: None, directories, favorite_series })
 }
 
 fn inventory_changed(volume: &Volume, inventory: &Inventory, stop: &AtomicBool) -> io::Result<bool> {
@@ -185,31 +187,19 @@ fn inventory_changed(volume: &Volume, inventory: &Inventory, stop: &AtomicBool) 
     Ok(inventory.directories.is_empty())
 }
 
-pub(super) fn first_number(text: &str) -> Option<u32> {
-    text.split(|ch: char| !ch.is_ascii_digit())
-        .find(|part| !part.is_empty()).and_then(|part| part.parse().ok())
+pub(super) fn episode_numbers(path: &Path, known: bool) -> Option<(u32, u32)> {
+    continuity::identify(path, known).map(|episode| (episode.season, episode.first))
 }
 
-pub(super) fn episode_numbers(path: &Path) -> Option<(u32, u32)> {
-    if let Some((_, season, episode)) = path.file_name().and_then(continuity::episode) {
-        return Some((season, episode));
-    }
-    let season = path.parent()?.components().rev().find_map(|part| {
-        let name = part.as_os_str().to_string_lossy().to_lowercase();
-        super::art::is_season(&name).then(|| first_number(&name)).flatten()
-    })?;
-    let title = path.file_stem()?.to_string_lossy().to_lowercase();
-    let mut words = title.split(|ch: char| !ch.is_alphanumeric()).filter(|word| !word.is_empty());
-    let first = words.next()?;
-    let number = if matches!(first, "episode" | "episodio" | "episodi" | "capítulo" | "capítol" | "cap") {
-        words.next()?
-    } else { first };
-    Some((season, number.parse().ok()?))
+fn episode_order(a: &Video, b: &Video) -> std::cmp::Ordering {
+    numbers(a).cmp(&numbers(b))
+        .then_with(|| disk::natural(a.path.as_os_str().as_encoded_bytes(), b.path.as_os_str().as_encoded_bytes()))
+        .then_with(|| a.path.cmp(&b.path))
 }
 
-fn episode_order(a: &Path, b: &Path) -> std::cmp::Ordering {
-    episode_numbers(a).unwrap_or((0, 0)).cmp(&episode_numbers(b).unwrap_or((0, 0)))
-        .then_with(|| disk::natural(a.as_os_str().as_encoded_bytes(), b.as_os_str().as_encoded_bytes()))
+fn numbers(video: &Video) -> Option<continuity::Episode> {
+    let path = video.show.as_ref().and_then(|show| video.path.strip_prefix(show).ok()).unwrap_or(&video.path);
+    (video.category != 1).then(|| continuity::identify(path, video.show.is_some())).flatten()
 }
 
 fn record_path(key: &str, identity: &str) -> Option<PathBuf> {
@@ -219,72 +209,196 @@ fn record_path(key: &str, identity: &str) -> Option<PathBuf> {
 }
 
 fn progress(video: &Video, volume: &Volume, identity: &str, history: &BTreeMap<String, u64>) -> u64 {
-    let Some(key) = entry_key(identity, volume, &volume.path.join(&video.path), video.size, video.modified) else { return 0 };
-    history.get(&key).copied().or_else(|| matching_size_resume(history, &key).map(|(_, value)| value))
-        .or_else(|| history.iter().find_map(|(key, value)| {
-            (*value == WATCHED && record_path(key, identity).as_ref() == Some(&video.path)).then_some(WATCHED)
-        })).unwrap_or(0)
+    let key = (volume.path.join(&video.path), Some(video.size), Some(video.modified));
+    super::file_record(history, identity, volume, &key)
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct SeriesKey { folder: PathBuf, flat_title: Option<String> }
+
+impl SeriesKey {
+    fn for_video(video: &Video) -> Option<Self> {
+        numbers(video)?;
+        if let Some(show) = &video.show {
+            return Some(Self { folder: show.clone(), flat_title: None });
+        }
+        let (prefix, _, _) = continuity::episode(video.path.file_name()?)?;
+        Some(Self { folder: video.path.parent()?.into(), flat_title: Some(normalized_prefix(prefix)?) })
+    }
+
+    fn identify(&self, path: &Path) -> Option<continuity::Episode> {
+        if let Some(title) = &self.flat_title {
+            if path.parent()? != self.folder { return None; }
+            let (prefix, _, _) = continuity::episode(path.file_name()?)?;
+            if normalized_prefix(prefix).as_ref() != Some(title) { return None; }
+        } else if !path.starts_with(&self.folder) { return None; }
+        let path = if self.flat_title.is_none() { path.strip_prefix(&self.folder).ok()? } else { path };
+        continuity::identify(path, self.flat_title.is_none())
+    }
+
+    fn title<'a>(&'a self, video: &'a Video) -> Option<&'a str> {
+        if self.flat_title.is_some() {
+            let (prefix, _, _) = continuity::episode(video.path.file_name()?)?;
+            std::str::from_utf8(prefix).ok()
+        } else {
+            self.folder.file_name()?.to_str()
+        }
+    }
+}
+
+pub(super) fn normalized_prefix(prefix: &[u8]) -> Option<String> {
+    let prefix = std::str::from_utf8(prefix).ok()?;
+    let title = prefix.split(['.', '_', '-', ' ']).filter(|part| !part.is_empty())
+        .collect::<Vec<_>>().join(" ").to_lowercase();
+    (!title.is_empty()).then_some(title)
+}
+
+fn has_resume(saved: u64) -> bool {
+    let (position, duration) = unpack_progress(saved);
+    position > 0 && (duration == 0 || position < duration)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn next_in_series<'a>(drive: &Drive, series: &SeriesKey, candidates: &[&'a Video],
+    identity: &str, records: &BTreeMap<String, u64>, history: &BTreeMap<PathBuf, u64>,
+    completed: Option<&Path>, favorite: bool)
+    -> Option<(&'a Video, u64)> {
+    let mut watched = BTreeSet::new();
+    let mut paused = Vec::new();
+    let mut record = |path: &Path, saved: u64| {
+        let Some(episode) = series.identify(path).filter(|episode| episode.season > 0) else { return; };
+        if saved == WATCHED {
+            watched.extend((episode.first..=episode.last).map(|number| (episode.season, number)));
+        } else if has_resume(saved) { paused.push(episode); }
+    };
+    for (path, &saved) in history { record(path.as_path(), saved); }
+    if let Some(path) = completed { record(path, WATCHED); }
+    let mut best: Option<((u32, u32), u64, &Video)> = None;
+    for &video in candidates {
+        let Some(episode) = series.identify(&video.path).filter(|episode| episode.season > 0) else { continue; };
+        let saved = progress(video, &drive.volume, identity, records);
+        if saved == WATCHED { continue; }
+        let Some(first_unwatched) = (episode.first..=episode.last).find(|number| !watched.contains(&(episode.season, *number))) else { continue; };
+        let key = (episode.season, first_unwatched);
+        if best.as_ref().is_none_or(|(old_key, old_saved, old_video)| {
+            (key, !has_resume(saved), &video.path) < (*old_key, !has_resume(*old_saved), &old_video.path)
+        }) {
+            best = Some((key, saved, video));
+        }
+    }
+    let (key, saved, video) = best?;
+    if completed.is_some_and(|path| series.identify(path)
+        .is_some_and(|episode| key <= (episode.season, episode.last))) { return None; }
+    // A removed but unfinished earlier episode cannot be treated as complete.
+    if paused.iter().any(|episode| (episode.season, episode.first) < key
+        && (episode.first..=episode.last).any(|number| !watched.contains(&(episode.season, number)))) { return None; }
+    if has_resume(saved) || !watched.is_empty() || favorite && key == (1, 1) {
+        return Some((video, saved));
+    }
+    // With no completed history, allow resuming a file the viewer explicitly started.
+    candidates.iter().filter_map(|&candidate| {
+        let saved = progress(candidate, &drive.volume, identity, records);
+        has_resume(saved).then_some((candidate, saved))
+    }).next()
+}
+
+fn grouped_history<'a>(drive: &Drive, identity: &str, groups: impl Iterator<Item = &'a SeriesKey>,
+    records: &BTreeMap<String, u64>) -> BTreeMap<SeriesKey, BTreeMap<PathBuf, u64>> {
+    let groups: BTreeSet<_> = groups.cloned().collect();
+    let mut partitioned = BTreeMap::<SeriesKey, BTreeMap<PathBuf, u64>>::new();
+    for (key, &saved) in records {
+        if saved != WATCHED && !has_resume(saved) { continue; }
+        let Some(path) = record_path(key, identity) else { continue; };
+        let flat = path.file_name().and_then(continuity::episode).and_then(|(prefix, _, _)| Some(SeriesKey {
+            folder: path.parent()?.into(), flat_title: Some(normalized_prefix(prefix)?),
+        }));
+        let group = path.ancestors().skip(1).find_map(|folder|
+            groups.get(&SeriesKey { folder: folder.into(), flat_title: None }))
+            .or_else(|| groups.get(&flat?));
+        if let Some(group) = group {
+            let value = partitioned.entry(group.clone()).or_default().entry(path).or_default();
+            *value = (*value).max(saved);
+        }
+    }
+    // The exact current record wins over stale copies of the same path.
+    for video in &drive.videos {
+        if let Some(group) = SeriesKey::for_video(video).filter(|group| groups.contains(group)) {
+            let saved = progress(video, &drive.volume, identity, records);
+            let group = partitioned.entry(group).or_default();
+            if saved == WATCHED || has_resume(saved) { group.insert(video.path.clone(), saved); }
+            else { group.remove(&video.path); }
+        }
+    }
+    partitioned
 }
 
 pub(super) fn recommendations(drive: &Drive) -> Vec<Item> {
     let Some(identity) = drive.facts.1.as_deref() else { return vec![] };
     let Some(history) = &drive.history else { return vec![] };
+    let favorites: BTreeSet<_> = history.iter().filter(|(_, value)| **value == FAVORITE)
+        .filter_map(|(key, _)| record_path(key, identity)).collect();
+    let mut groups = BTreeMap::<SeriesKey, Vec<&Video>>::new();
     let mut items = Vec::new();
-    let mut represented = BTreeSet::new();
-    let favorites: Vec<_> = history.iter().filter(|(_, value)| **value == FAVORITE)
-        .filter_map(|(key, _)| record_path(key, identity)).filter(|path| !super::is_video_path(path)).collect();
-    for show in favorites {
-        let candidates: Vec<_> = drive.videos.iter().filter(|video| video.path.starts_with(&show)).collect();
-        if candidates.is_empty() { continue; }
-        let last = history.iter().filter(|(_, value)| **value == WATCHED)
-            .filter_map(|(key, _)| record_path(key, identity)).filter(|path| path.starts_with(&show))
-            .max_by(|a, b| episode_order(a, b));
-        let next = candidates.into_iter().filter(|video| progress(video, &drive.volume, identity, history) != WATCHED)
-            .filter(|video| last.as_ref().is_none_or(|last| episode_order(&video.path, last).is_gt()))
-            .min_by(|a, b| episode_order(&a.path, &b.path));
-        if let Some(video) = next {
-            represented.insert(show.clone());
-            let candidate = item(drive, video, Some(&show), true, progress(video, &drive.volume, identity, history));
-            if !items.iter().any(|existing: &Item| existing.path == candidate.path) {
-                items.push(candidate);
-            }
-        }
-    }
     for video in &drive.videos {
-        if items.iter().any(|item| item.path == drive.volume.path.join(&video.path))
-            || video.show.as_ref().is_some_and(|show| represented.contains(show)) { continue; }
-        let saved = progress(video, &drive.volume, identity, history);
-        let (position, duration) = unpack_progress(saved);
-        if saved == WATCHED || saved == FAVORITE || position == 0 || (duration > 0 && position >= duration) { continue; }
-        let group = video.show.clone().or_else(|| video.path.file_name().and_then(continuity::episode)
-            .filter(|(prefix, _, _)| !prefix.is_empty()).map(|(prefix, _, _)| PathBuf::from(String::from_utf8_lossy(prefix).as_ref())));
-        if let Some(show) = &group {
-            if !represented.insert(show.clone()) { continue; }
+        if let Some(key) = SeriesKey::for_video(video).filter(|_| numbers(video).is_some_and(|e| e.season > 0)) {
+            groups.entry(key).or_default().push(video);
+        } else {
+            let saved = progress(video, &drive.volume, identity, history);
+            if has_resume(saved) { items.push(item(drive, video, None, false, saved)); }
         }
-        items.push(item(drive, video, group.as_deref(), false, saved));
     }
+    let empty = BTreeMap::new();
+    let histories = grouped_history(drive, identity, groups.keys(), history);
+    for (series, videos) in groups {
+        let favorite = series.flat_title.is_none() && favorites.contains(&series.folder);
+        if let Some((video, saved)) = next_in_series(drive, &series, &videos, identity, history,
+            histories.get(&series).unwrap_or(&empty), None, favorite) {
+            items.push(item(drive, video, series.title(video), favorite, saved));
+        }
+    }
+    items.sort_by(|a, b| (!a.favorite, &a.path).cmp(&(!b.favorite, &b.path)));
     items
 }
 
-pub(super) fn next_episode(drive: &Drive, current: &Path) -> Option<PathBuf> {
-    let current = current.strip_prefix(&drive.volume.path).ok()?;
-    let video = drive.videos.iter().find(|video| video.path == current)?;
-    let Some(show) = &video.show else {
-        let names = drive.videos.iter().filter(|video| video.path.parent() == current.parent())
-            .filter_map(|video| video.path.file_name());
-        let next = continuity::next_named_episode(current.file_name()?, names)?;
-        return Some(drive.volume.path.join(current.with_file_name(next)));
-    };
-    drive.videos.iter().filter(|video| video.show.as_ref() == Some(show) && episode_order(&video.path, current).is_gt())
-        .min_by(|a, b| episode_order(&a.path, &b.path)).map(|video| drive.volume.path.join(&video.path))
+pub(super) fn next_listed_episode(folder: &super::Folder, current: &Path, show: Option<&Path>,
+    identity: &str, records: &BTreeMap<String, u64>) -> Option<PathBuf> {
+    let relative_folder = folder.path.strip_prefix(&folder.volume.path).ok()?;
+    let show = show.and_then(|path| path.strip_prefix(&folder.volume.path).ok()).map(Path::to_path_buf);
+    let videos = folder.entries.iter().filter(|entry| entry.kind == Kind::Video).map(|entry| Video {
+        path: relative_folder.join(&entry.name), size: entry.size.unwrap_or_default(),
+        modified: entry.modified.unwrap_or_default(), show: show.clone(), category: 0,
+    }).collect();
+    let drive = Drive { volume: folder.volume.clone(), facts: (None, Some(identity.into())),
+        stats: None, videos, history: None };
+    next_episode(&drive, current, Some(records))
 }
 
-fn item(drive: &Drive, video: &Video, show: Option<&Path>, favorite: bool, progress: u64) -> Item {
-    let title = show.and_then(Path::file_name).or_else(|| video.path.file_stem()).unwrap_or_default().to_string_lossy().into_owned();
+pub(super) fn next_episode(drive: &Drive, current: &Path, current_history: Option<&BTreeMap<String, u64>>) -> Option<PathBuf> {
+    let current = current.strip_prefix(&drive.volume.path).ok()?;
+    let video = drive.videos.iter().find(|video| video.path == current)?;
+    let series = SeriesKey::for_video(video)?;
+    series.identify(current).filter(|episode| episode.season > 0)?;
+    let candidates: Vec<_> = drive.videos.iter().filter(|video| SeriesKey::for_video(video).as_ref() == Some(&series)).collect();
+    let identity = drive.facts.1.as_deref()?;
+    let records = current_history.or(drive.history.as_ref())?;
+    let history = grouped_history(drive, identity, std::iter::once(&series), records);
+    let empty = BTreeMap::new();
+    let (next, _) = next_in_series(drive, &series, &candidates, identity, records,
+        history.get(&series).unwrap_or(&empty), Some(current), false)?;
+    Some(drive.volume.path.join(&next.path))
+}
+
+fn item(drive: &Drive, video: &Video, show: Option<&str>, favorite: bool, progress: u64) -> Item {
+    let title = show.or_else(|| video.show.as_ref()?.file_name()?.to_str())
+        .or_else(|| {
+            let (prefix, _, _) = continuity::episode(video.path.file_name()?)?;
+            (!prefix.is_empty()).then(|| std::str::from_utf8(prefix).ok()).flatten()
+        }).map(str::to_owned)
+        .unwrap_or_else(|| video.path.file_stem().unwrap_or_default().to_string_lossy().into_owned());
     let path = drive.volume.path.join(&video.path);
     let detail_key = (path.clone(), Some(video.size), Some(video.modified));
     Item { volume: drive.volume.clone(), path, title, favorite, progress, detail_key,
-        episode: episode_numbers(&video.path), show: show.is_some() }
+        episode: numbers(video).map(|e| (e.season, e.first)), show: show.is_some() }
 }
 
 pub(super) fn load(volumes: Vec<Volume>, refresh: bool, stop: &AtomicBool) -> io::Result<Dashboard> {
@@ -352,7 +466,7 @@ pub(super) fn load(volumes: Vec<Volume>, refresh: bool, stop: &AtomicBool) -> io
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
-    use crate::app::local_usb::{favorite_key, pack_progress};
+    use crate::app::local_usb::{entry_key, favorite_key, pack_progress};
     use std::ffi::OsString;
 
     fn fixture(label: &str) -> (PathBuf, Volume) {
@@ -426,7 +540,7 @@ mod usb_browser_tests {
         drive.volume.path = "/tmp/usb/sdb/sdb1".into();
         assert_eq!(recommendations(&drive)[0].episode, original);
         assert!(recommendations(&drive)[0].path.starts_with("/tmp/usb/sdb/sdb1"));
-        let inventory = Inventory { schema: 1, identity: "uuid:test".into(), checked: seconds(), stats: drive.stats.unwrap(),
+        let inventory = Inventory { schema: 2, identity: "uuid:test".into(), checked: seconds(), stats: drive.stats.unwrap(),
             videos: drive.videos.clone(), used_bytes: Some(200), directories: vec![], favorite_series: vec![] };
         let cache = root.join("offline-inventory.json");
         plx_plex::plex::session::write_atomic(&cache, &serde_json::to_vec(&inventory).unwrap()).unwrap();
@@ -449,7 +563,7 @@ mod usb_browser_tests {
         let mut drive = drive(volume, BTreeMap::new());
         let first_entry = drive.videos.iter().find(|video| root.join(&video.path) == first).unwrap();
         assert_eq!(first_entry.category, super::super::DOCUMENTALS_TAB);
-        assert_eq!(next_episode(&drive, &first), Some(second));
+        assert_eq!(next_episode(&drive, &first, None), Some(second));
         let key = entry_key("uuid:test", &drive.volume, &first, first_entry.size, first_entry.modified).unwrap();
         drive.history.as_mut().unwrap().insert(key, pack_progress(60_000_000_000, Some(600_000_000_000)));
         let items = recommendations(&drive);
@@ -470,17 +584,31 @@ mod usb_browser_tests {
         for path in [&current, &next, &category.join("Otra S01E02.mkv")] {
             std::fs::write(path, []).unwrap();
         }
-        assert_eq!(next_episode(&drive(volume, BTreeMap::new()), &current), Some(next));
+        assert_eq!(next_episode(&drive(volume, BTreeMap::new()), &current, None), Some(next));
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn similarly_named_files_in_a_shared_folder_do_not_cross_series() {
+        let (root, volume) = fixture("cineusb-shared-folder");
+        let folder = root.join("Downloads");
+        std::fs::create_dir(&folder).unwrap();
+        let current = folder.join("One.Show S01E01.mkv");
+        let next = folder.join("One Show 1x03.mkv");
+        for path in [&current, &next, &folder.join("Other Show S01E02.mkv")] {
+            std::fs::write(path, []).unwrap();
+        }
+        assert_eq!(next_episode(&drive(volume, BTreeMap::new()), &current, None), Some(next));
         plx_base::testscratch::remove_tree(&root);
     }
 
     #[test]
     fn season_folder_inference_ignores_release_resolution_and_year() {
         for file in ["Season 1/Pilot 1080p.mkv", "Season 1/Pilot 2026.mkv"] {
-            assert_eq!(episode_numbers(Path::new(file)), None);
+            assert_eq!(episode_numbers(Path::new(file), false), None);
         }
         for file in ["Season 1/01 - Pilot.mkv", "Season 1/Capítulo 01.mkv", "Season 1/Pilot 1x01.mkv"] {
-            assert_eq!(episode_numbers(Path::new(file)), Some((1, 1)));
+            assert_eq!(episode_numbers(Path::new(file), false), Some((1, 1)));
         }
     }
 
@@ -532,10 +660,29 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn deleted_watched_season_survives_a_new_mount_and_agrees_with_autoplay() {
+        let (root, volume) = fixture("cineusb-deleted-season");
+        let show = root.join("Sèries/Una sèrie");
+        let first = show.join("Season 1/Show S01E01.mkv");
+        let second = show.join("Season 2/Show S02E01.mkv");
+        let before = drive(volume.clone(), BTreeMap::new());
+        let entry = before.videos.iter().find(|item| volume.path.join(&item.path) == first).unwrap();
+        let key = entry_key("uuid:test", &volume, &first, entry.size, entry.modified).unwrap();
+        let history = BTreeMap::from([(key, WATCHED)]);
+        let original_next = next_episode(&before, &first, Some(&history)).unwrap();
+        assert_eq!(original_next, second);
+        std::fs::remove_dir_all(show.join("Season 1")).unwrap();
+        let new_mount = root.with_extension("reconnected");
+        std::fs::rename(&root, &new_mount).unwrap();
+        let reconnected = drive(Volume { path: new_mount.clone(), ..volume }, history);
+        assert_eq!(recommendations(&reconnected)[0].path, new_mount.join(second.strip_prefix(&root).unwrap()));
+        plx_base::testscratch::remove_tree(&new_mount);
+    }
+
+    #[test]
     fn loose_episodes_are_not_counted_as_movies_and_natural_order_crosses_seasons() {
-        assert_eq!(episode_numbers(Path::new("Temporada 2/Capítol 01.mkv")), Some((2, 1)));
-        assert!(episode_order(Path::new("Primera entrega/Capítol 2.mkv"),
-            Path::new("Segona entrega/Capítol 1.mkv")).is_lt());
+        assert_eq!(episode_numbers(Path::new("Temporada 2/Capítol 01.mkv"), false), Some((2, 1)));
+        assert!(disk::natural(b"Episode 2", b"Episode 10").is_lt());
         let root = plx_base::testscratch::process_dir("cineusb-home-loose-episodes");
         for name in ["Show S02E10.mkv", "Show S02E02.mkv", "Show S03E01.mkv"] {
             std::fs::write(root.join(name), []).unwrap();
