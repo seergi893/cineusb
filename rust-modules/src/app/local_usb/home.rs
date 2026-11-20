@@ -251,13 +251,14 @@ fn has_resume(saved: u64) -> bool {
     position > 0 && (duration == 0 || position < duration)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn next_in_series<'a>(drive: &Drive, series: &SeriesKey, candidates: &[&'a Video],
     identity: &str, records: &BTreeMap<String, u64>, history: &BTreeMap<PathBuf, u64>,
     completed: Option<&Path>, favorite: bool)
     -> Option<(&'a Video, u64)> {
     let mut watched = BTreeSet::new();
     let mut paused = Vec::new();
-    let mut record = |path, saved| {
+    let mut record = |path: &Path, saved: u64| {
         let Some(episode) = series.identify(path).filter(|episode| episode.season > 0) else { return; };
         if saved == WATCHED {
             watched.extend((episode.first..=episode.last).map(|number| (episode.season, number)));
