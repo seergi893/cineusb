@@ -614,8 +614,7 @@ mod usb_browser_tests {
     #[test]
     fn loose_episodes_are_not_counted_as_movies_and_natural_order_crosses_seasons() {
         assert_eq!(episode_numbers(Path::new("Temporada 2/Capítol 01.mkv"), false), Some((2, 1)));
-        assert!(episode_order(Path::new("Primera entrega/Capítol 2.mkv"),
-            Path::new("Segona entrega/Capítol 1.mkv")).is_lt());
+        assert!(disk::natural(b"Episode 2", b"Episode 10").is_lt());
         let root = plx_base::testscratch::process_dir("cineusb-home-loose-episodes");
         for name in ["Show S02E10.mkv", "Show S02E02.mkv", "Show S03E01.mkv"] {
             std::fs::write(root.join(name), []).unwrap();

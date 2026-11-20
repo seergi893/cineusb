@@ -185,10 +185,12 @@ pub(super) fn sort_entries_by(entries: &mut [Entry], order: usize) {
 pub(super) fn sort_entries_in(entries: &mut [Entry], order: usize, folder: &Path) {
     sort_entries_by(entries, order);
     if order != 0 || folder.iter().any(|part| super::media_folder_score(&part.to_string_lossy(), 1) > 0) { return; }
-    let known = folder.parent().is_some_and(|parent| parent.iter()
-        .any(|part| super::media_folder_score(&part.to_string_lossy(), 2) > 0));
+    let show = folder.ancestors().find(|ancestor| ancestor.parent().and_then(Path::file_name)
+        .is_some_and(|name| super::media_folder_score(&name.to_string_lossy(), 2) > 0));
+    let relative = show.and_then(|show| folder.strip_prefix(show).ok()).unwrap_or(folder);
+    let known = show.is_some();
     entries.sort_by_cached_key(|entry| {
-        let episode = (entry.kind == Kind::Video).then(|| super::continuity::identify(&folder.join(&entry.name), known)).flatten();
+        let episode = (entry.kind == Kind::Video).then(|| super::continuity::identify(&relative.join(&entry.name), known)).flatten();
         let group = (!known).then(|| super::continuity::episode(&entry.name)
             .map(|(prefix, _, _)| String::from_utf8_lossy(prefix).to_lowercase())).flatten();
         (entry.kind, group, episode.is_none(), episode)
