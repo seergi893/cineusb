@@ -182,9 +182,22 @@ pub(super) fn sort_entries_by(entries: &mut [Entry], order: usize) {
       .then_with(|| a.name.cmp(&b.name)));
 }
 
-pub(super) fn resort(entries: &mut [Entry], selected: usize, order: usize) -> usize {
-    let name = entries.get(selected).map(|entry| entry.name.clone());
+pub(super) fn sort_entries_in(entries: &mut [Entry], order: usize, folder: &Path) {
     sort_entries_by(entries, order);
+    if order != 0 || folder.iter().any(|part| super::media_folder_score(&part.to_string_lossy(), 1) > 0) { return; }
+    let known = folder.parent().is_some_and(|parent| parent.iter()
+        .any(|part| super::media_folder_score(&part.to_string_lossy(), 2) > 0));
+    entries.sort_by_cached_key(|entry| {
+        let episode = (entry.kind == Kind::Video).then(|| super::continuity::identify(&folder.join(&entry.name), known)).flatten();
+        let group = (!known).then(|| super::continuity::episode(&entry.name)
+            .map(|(prefix, _, _)| String::from_utf8_lossy(prefix).to_lowercase())).flatten();
+        (entry.kind, group, episode.is_none(), episode)
+    });
+}
+
+pub(super) fn resort(entries: &mut [Entry], selected: usize, order: usize, folder: &Path) -> usize {
+    let name = entries.get(selected).map(|entry| entry.name.clone());
+    sort_entries_in(entries, order, folder);
     name.and_then(|name| entries.iter().position(|entry| entry.name == name)).unwrap_or_default()
 }
 
@@ -271,7 +284,7 @@ mod usb_browser_tests {
         assert_eq!(entries[1].name, "Episodio 2.mkv");
         sort_entries_by(&mut entries, 1);
         assert_eq!(entries[1].name, "Episodio 2.mkv");
-        assert_eq!(resort(&mut entries, 1, 2), 2);
+        assert_eq!(resort(&mut entries, 1, 2, Path::new("")), 2);
         assert_eq!(entries[1].name, "Episodio 10.mkv");
     }
 

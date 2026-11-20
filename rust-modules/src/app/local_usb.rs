@@ -742,7 +742,7 @@ impl Browser {
                 changed = true;
                 match result {
                     DiskResult::Folder(volume, path, Ok(mut entries)) => {
-                        disk::sort_entries_by(&mut entries, self.settings.sort);
+                        disk::sort_entries_in(&mut entries, self.settings.sort, path.strip_prefix(&volume.path).unwrap_or(&path));
                         let collection = path.strip_prefix(&volume.path).ok().and_then(art::collection);
                         self.folders.push(Folder { volume, path, entries, collection, selected: 0, scroll: 0.0 });
                         self.rebuild_movie_grid();
@@ -801,7 +801,8 @@ impl Browser {
                         if let Some(folder) = self.folders.last_mut() {
                             match entries {
                                 Ok(mut entries) => {
-                                    disk::sort_entries_by(&mut entries, self.settings.sort);
+                                    disk::sort_entries_in(&mut entries, self.settings.sort,
+                                        folder.path.strip_prefix(&folder.volume.path).unwrap_or(&folder.path));
                                     folder.entries = entries;
                                 }
                                 Err(_) => folder.entries.retain(|entry| !removed.contains(&entry.name)),
@@ -1237,12 +1238,9 @@ impl Browser {
         self.estimate_anchor = None;
         let Some(playing) = self.playing.take() else { return };
         if !completed || !self.settings.auto_next { return; }
-        let next = self.folders.last().filter(|folder|
-            folder.volume == playing.volume && playing.path.parent() == Some(folder.path.as_path()))
-            .and_then(|folder| playing.path.file_name().and_then(|name| continuity::next_episode(name, &folder.entries))
-                .map(|name| folder.path.join(name)))
-            .or_else(|| self.dashboard.drives.iter().find(|drive| drive.volume == playing.volume)
-                .and_then(|drive| home::next_episode(drive, &playing.path)));
+        let history = self.identity(&playing.volume).and_then(|identity| self.history.get(&history_prefix(identity)));
+        let next = self.dashboard.drives.iter().find(|drive| drive.volume == playing.volume)
+            .and_then(|drive| home::next_episode(drive, &playing.path, history));
         let Some(next) = next else { return };
         self.countdown_display = 10;
         self.dialog = Some(Dialog::Next { volume: playing.volume, path: next,
@@ -1310,7 +1308,7 @@ impl Browser {
     fn watched_episodes(&self, volume: &Volume, listing: &series::Listing) -> usize {
         let Some(identity) = self.identity(volume) else { return 0; };
         let Some(records) = self.history.get(&history_prefix(identity)) else { return 0; };
-        listing.episodes.iter().filter(|key| file_record(records, identity, volume, key) == WATCHED).count()
+        listing.watched(|key| file_record(records, identity, volume, key) == WATCHED)
     }
 
     fn refresh_series_watched(&mut self, changed: Option<&str>) {
@@ -1326,8 +1324,7 @@ impl Browser {
                     let Some(base) = path_key(&identity, &volume, path) else { continue; };
                     if !key.strip_prefix(&base).is_some_and(|tail| tail.starts_with("2f")) { continue; }
                 }
-                summary.watched = summary.listing.episodes.iter()
-                    .filter(|key| file_record(records, &identity, &volume, key) == WATCHED).count();
+                summary.watched = summary.listing.watched(|key| file_record(records, &identity, &volume, key) == WATCHED);
             }
         }
     }
@@ -1671,9 +1668,8 @@ impl Browser {
     fn video_is_episode(&self, volume: &Volume, path: &std::path::Path) -> bool {
         // Keep episode menus episode-only even when an old standalone favorite
         // is opened from the Favorites tab without a parent folder on the stack.
-        path.file_name().is_some_and(|name| continuity::episode(name).is_some())
-            || (self.folders.last().is_some_and(|folder| &folder.volume == volume)
-                && self.series_root().is_some_and(|root| path.starts_with(root)))
+        !self.is_library_movie(volume, path) && (self.episode_show(volume, path).is_some()
+            || home::episode_numbers(path.strip_prefix(&volume.path).unwrap_or(path), false).is_some())
     }
 
     fn video_favorite_target(&self, volume: &Volume, path: &std::path::Path) -> PathBuf {
@@ -1932,7 +1928,7 @@ impl Browser {
                                 }
                             }
                             if let Some((volume, path, mut entries)) = dashboard.refreshed_folder.take() {
-                                disk::sort_entries_by(&mut entries, self.settings.sort);
+                                disk::sort_entries_in(&mut entries, self.settings.sort, path.strip_prefix(&volume.path).unwrap_or(&path));
                                 let selected = self.folder_entry(self.selected).map(|entry| entry.name.clone());
                                 if let Some(folder) = self.folders.last_mut().filter(|folder| folder.volume == volume && folder.path == path) {
                                     folder.entries = entries;
@@ -2039,7 +2035,8 @@ impl Browser {
                     let last = self.folders.len().saturating_sub(1);
                     for (index, folder) in self.folders.iter_mut().enumerate() {
                         let old = if index == last { self.selected } else { folder.selected };
-                        folder.selected = disk::resort(&mut folder.entries, old, settings.sort);
+                        folder.selected = disk::resort(&mut folder.entries, old, settings.sort,
+                            folder.path.strip_prefix(&folder.volume.path).unwrap_or(&folder.path));
                         if index == last { self.selected = folder.selected; }
                     }
                 }
@@ -2364,7 +2361,6 @@ impl Browser {
 
     fn play_video_at(&mut self, volume: &Volume, path: PathBuf, offer_resume: bool) {
         let direct_resume = self.home_item().is_some();
-        let title = path.file_stem().or_else(|| path.file_name()).unwrap_or_default().to_string_lossy().into_owned();
         let mount_id = system_mount(volume);
         let spanish = self.settings.spanish_audio;
         let known_identity = self.identity(volume).map(str::to_owned);
@@ -2377,6 +2373,7 @@ impl Browser {
         self.status = tr("Abriendo vídeo…", "Obrint el vídeo…").into();
         self.request(move || {
             let result = inspect_video(&path, mount_id, spanish).map(|(file, info)| {
+                let title = video_title(&path, info.title.as_deref());
                 let identity = known_identity.or_else(|| volume_facts(&volume).1);
                 let mut key = identity.as_deref().and_then(|identity| progress_key(identity, &volume, &path, &file));
                 let mut saved = key.as_ref().and_then(|key| {
@@ -2857,7 +2854,7 @@ impl Browser {
         if self.movie_grid() { self.draw_movie_filter(p); }
         if self.media_library() {
             if let Some(name) = self.media_series_name() {
-                draw_line(p, &clean_media_title(&name, None), Rect::new(x, 122.0, 880.0, 42.0), theme::size::HEADLINE, true);
+                draw_line(p, &clean_series_name(&name), Rect::new(x, 122.0, 880.0, 42.0), theme::size::HEADLINE, true);
             }
             if let Some(marked) = &self.selection {
                 let count = format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"));
@@ -3517,7 +3514,7 @@ impl Browser {
         let details = self.details.get(&item.detail_key);
         let duration = details.and_then(|details| details.duration_secs);
         let title = if item.episode.is_some() || item.show {
-            clean_media_title(&item.title, None)
+            clean_series_name(&item.title)
         } else {
             video_title(&item.path, details.and_then(|details| details.title.as_deref()))
         };
@@ -3534,13 +3531,25 @@ impl Browser {
         if let Some((volume, key)) = self.card_file(index) {
             let path = &key.0;
             let details = self.details.get(&key);
-            let numbers = home::episode_numbers(path);
-            let episodic = numbers.is_some() || self.video_is_episode(volume, path);
+            let show = self.episode_show(volume, path);
+            let movie = self.is_library_movie(volume, path);
+            let episode_path = show.as_ref().and_then(|show| path.strip_prefix(show).ok())
+                .or_else(|| path.strip_prefix(&volume.path).ok()).unwrap_or(path);
+            let numbers = (!movie).then(|| home::episode_numbers(episode_path, show.is_some())).flatten();
+            let episodic = !movie && (numbers.is_some() || show.is_some());
             let category = Self::category(volume, path, episodic);
             let duration = details.and_then(|details| details.duration_secs);
             let record = self.file_record(volume, &key);
             let (fraction, _) = media_card::file_progress(record, duration);
-            let title = video_title(path, details.and_then(|details| details.title.as_deref()));
+            let title = if episodic {
+                show.as_deref().and_then(std::path::Path::file_name).and_then(|name| name.to_str())
+                    .map(clean_series_name)
+                    .or_else(|| {
+                        let (prefix, _, _) = continuity::episode(path.file_name()?)?;
+                        let prefix = std::str::from_utf8(prefix).ok()?;
+                        (!prefix.is_empty()).then(|| clean_series_name(prefix))
+                    }).unwrap_or_else(|| video_title(path, details.and_then(|details| details.title.as_deref())))
+            } else { video_title(path, details.and_then(|details| details.title.as_deref())) };
             let favorite = !episodic && self.favorite_marked(volume, path);
             self.media_art.draw(p, frame, media_card::Card {
                 title: &title, category, fraction, favorite, watched: record == WATCHED,
@@ -3553,7 +3562,7 @@ impl Browser {
         let summary = self.series_cache.get(&series.path).and_then(|entry| entry.summary.as_ref());
         if summary.is_none() && !series.known { return false; }
         let category = Self::category(series.volume, &series.path, true);
-        let title = clean_media_title(&series.path.file_name().unwrap_or_default().to_string_lossy(), None);
+        let title = clean_series_name(&series.path.file_name().unwrap_or_default().to_string_lossy());
         let counts = summary.map(|summary| summary.listing.counts);
         let watched = summary.map_or(0, |summary| summary.watched);
         let total = counts.map_or(0, |counts| counts.episodes);
@@ -3566,6 +3575,18 @@ impl Browser {
             favorite: self.favorite_marked(series.volume, &series.path),
         });
         true
+    }
+
+    fn episode_show(&self, volume: &Volume, path: &std::path::Path) -> Option<PathBuf> {
+        if self.is_library_movie(volume, path) { return None; }
+        if self.folders.last().is_some_and(|folder| &folder.volume == volume) {
+            if let Some(show) = self.series_root().filter(|show| path.starts_with(show)) {
+                return Some(show);
+            }
+        }
+        let relative = path.strip_prefix(&volume.path).ok()?;
+        self.dashboard.drives.iter().find(|drive| &drive.volume == volume)?
+            .videos.iter().find(|video| video.path == relative)?.show.as_ref().map(|show| volume.path.join(show))
     }
 
     fn favorite_marked(&self, volume: &Volume, path: &std::path::Path) -> bool {
@@ -4140,7 +4161,34 @@ fn file_title(stem: &str, metadata: Option<&str>) -> String {
 
 fn video_title(path: &std::path::Path, metadata: Option<&str>) -> String {
     let name = path.file_stem().or_else(|| path.file_name()).unwrap_or_default().to_string_lossy();
-    file_title(&name, metadata)
+    let tagged = metadata.filter(|title| !placeholder_title(title));
+    if placeholder_title(&name) && tagged.is_none_or(|title| title.trim().is_empty()) {
+        if let Some(parent) = path.parent().and_then(std::path::Path::file_name).and_then(|name| name.to_str())
+            .filter(|name| !placeholder_title(name) && !name.bytes().all(|b| b.is_ascii_digit())
+                && [1, 2, DOCUMENTALS_TAB].into_iter().all(|kind| media_folder_score(name, kind) == 0)
+                && continuity::season_number(name).is_none()) {
+            return clean_series_name(parent);
+        }
+    }
+    file_title(&name, tagged)
+}
+
+fn placeholder_title(title: &str) -> bool {
+    let title = title.trim().to_ascii_lowercase();
+    ["title_t", "title t", "track_", "track "].into_iter().any(|prefix| {
+        let Some(rest) = title.strip_prefix(prefix) else { return false; };
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0 && (rest[digits..].trim().is_empty() || rest[digits..].trim_start().starts_with('('))
+    })
+}
+
+fn clean_series_name(raw: &str) -> String {
+    let raw = raw.trim();
+    let bytes = raw.as_bytes();
+    let numbered = bytes.len() > 3 && bytes[0] == b'0' && bytes[1].is_ascii_digit()
+        && matches!(bytes[2], b' ' | b'.' | b'_' | b'-');
+    let title = if numbered { raw[2..].trim_start_matches([' ', '.', '_', '-']) } else { raw };
+    clean_media_title(title, None)
 }
 
 /// The player handoff is scoped to the current physical Feed snapshot.
@@ -4311,7 +4359,6 @@ pub(super) fn tick(app: &mut App) {
         can_normalize_loudness: false, immersive: false, sample_rate: info.audio_rate,
         bit_depth: info.audio_depth,
     });
-    let title = file_title(&title, info.title.as_deref());
     let item = local_playing_item(&info, dovi);
     let forced = initial_forced_subtitle(&item, app.usb.settings.forced_subtitles);
     let ok = plx_media::route::set_stream_declaration(ps, &info.video, &info.audio, info.fps, dovi, false)
@@ -4702,7 +4749,7 @@ mod usb_browser_tests {
         let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
         let path = volume.path.join("Sèries/Una sèrie");
         let now = Instant::now();
-        let listing = series::Listing { counts: series::Counts { seasons: 2, episodes: 13 }, episodes: vec![] };
+        let listing = series::Listing { counts: series::Counts { seasons: 2, episodes: 13 }, episodes: vec![], identities: BTreeMap::new() };
         let entry = SeriesCacheEntry { checked: now, modified: Some(1), known: true, summary: None };
         let mut card = SeriesCard { volume: &volume, path: path.clone(), modified: Some(1), known: true };
         assert!(entry.fresh(&card, now));

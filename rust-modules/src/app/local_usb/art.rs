@@ -106,11 +106,5 @@ pub(super) fn entry_cover(entry: &Entry, parent: Option<Cover>) -> (Cover, &'sta
 }
 
 pub(super) fn is_season(name: &str) -> bool {
-    const SEPARATORS: [char; 4] = [' ', '.', '_', '-'];
-    ["temporada", "season", "s"].into_iter().any(|prefix| {
-        let Some(suffix) = name.strip_prefix(prefix) else { return false };
-        let suffix = suffix.trim_start_matches(SEPARATORS);
-        let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
-        (1..=3).contains(&digits) && (digits == suffix.len() || suffix[digits..].starts_with(SEPARATORS))
-    })
+    super::continuity::season_number(name).is_some()
 }
