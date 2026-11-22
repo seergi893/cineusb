@@ -1930,18 +1930,21 @@ impl Browser {
             if job.volumes != self.scan.volumes {
                 job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            if !job.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                let incoming: Vec<_> = job.preview.iter().flat_map(|reply| reply.try_iter()).flatten().collect();
-                if !incoming.is_empty() {
-                    let selected_path = self.home_item().map(|item| item.path.clone());
-                    self.dashboard.items.extend(incoming);
-                    self.dashboard.items.sort_by_key(|item| !item.favorite);
-                    self.dashboard.items.truncate(12);
-                    self.restore_home_selection(selected_path);
-                    changed = true;
-                }
+            let incoming: Vec<_> = if job.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                Vec::new()
+            } else {
+                job.preview.iter().flat_map(|reply| reply.try_iter()).flatten().collect()
+            };
+            let result = job.reply.try_recv();
+            if !incoming.is_empty() {
+                let selected_path = self.home_item().map(|item| item.path.clone());
+                self.dashboard.items.extend(incoming);
+                self.dashboard.items.sort_by_key(|item| !item.favorite);
+                self.dashboard.items.truncate(12);
+                self.restore_home_selection(selected_path);
+                changed = true;
             }
-            match job.reply.try_recv() {
+            match result {
                 Err(TryRecvError::Empty) => return changed,
                 result => {
                     let job = self.home_job.take().expect("home request polled");
