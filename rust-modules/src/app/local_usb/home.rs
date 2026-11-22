@@ -401,7 +401,44 @@ fn item(drive: &Drive, video: &Video, show: Option<&str>, favorite: bool, progre
         episode: numbers(video).map(|e| (e.season, e.first)), show: show.is_some() }
 }
 
-pub(super) fn load(volumes: Vec<Volume>, refresh: bool, stop: &AtomicBool) -> io::Result<Dashboard> {
+fn verified_recommendations(drive: &mut Drive, stop: &AtomicBool) -> io::Result<Vec<Item>> {
+    // Recompute after pruning missing files so deleted seasons can expose
+    // a recommendation in another parent directory immediately.
+    let mut listings = BTreeMap::new();
+    loop {
+        let proposed = recommendations(drive);
+        for item in &proposed {
+            cancelled(stop)?;
+            if let Some(parent) = item.path.parent() {
+                listings.entry(parent.to_path_buf()).or_insert_with(|| {
+                    list_folder(parent, system_mount(&drive.volume)).map(|entries| {
+                        entries.into_iter().filter(|entry| entry.kind == Kind::Video)
+                            .map(|entry| entry.name).collect::<BTreeSet<_>>()
+                    })
+                });
+            }
+        }
+        let before = drive.videos.len();
+        drive.videos.retain(|video| {
+            let parent = video.path.parent().map(|parent| drive.volume.path.join(parent));
+            match parent.as_ref().and_then(|parent| listings.get(parent)) {
+                Some(Ok(names)) => video.path.file_name().is_some_and(|name| names.contains(name)),
+                Some(Err(_)) => false,
+                None => parent.is_some(),
+            }
+        });
+        if drive.videos.len() == before {
+            return Ok(proposed);
+        }
+    }
+}
+
+pub(super) fn load(
+    volumes: Vec<Volume>,
+    refresh: bool,
+    stop: &AtomicBool,
+    mut preview: Option<impl FnMut(Vec<Item>)>,
+) -> io::Result<Dashboard> {
     let mut drives = Vec::new();
     let mut items = Vec::new();
     for volume in volumes {
@@ -416,6 +453,17 @@ pub(super) fn load(volumes: Vec<Volume>, refresh: bool, stop: &AtomicBool) -> io
         let mut inventory = identity.as_deref().and_then(cached);
         let relative_favorites: Vec<_> = favorites.iter().filter_map(|path| path.strip_prefix(&volume.path).ok().map(Path::to_path_buf)).collect();
         let used_bytes = facts.0.map(|(_, used, _, _)| used);
+        let mut cached_preview = None;
+        if let Some(publish) = preview.as_mut().filter(|_| !refresh) {
+            if let Some(value) = inventory.as_mut().filter(|value| value.favorite_series == relative_favorites) {
+                // Publish usable cards before checking every directory stamp.
+                let mut cached_drive = Drive { volume: volume.clone(), facts: facts.clone(),
+                    stats: Some(value.stats), videos: std::mem::take(&mut value.videos), history: history.clone() };
+                let ready = verified_recommendations(&mut cached_drive, stop)?;
+                if !ready.is_empty() { publish(ready[..ready.len().min(12)].to_vec()); }
+                cached_preview = Some((cached_drive, ready));
+            }
+        }
         if refresh || inventory.as_ref().is_none_or(|value| value.used_bytes != used_bytes || value.favorite_series != relative_favorites
             || inventory_changed(&volume, value, stop).unwrap_or(true)) {
                 match scan(&volume, identity.as_deref().unwrap_or("volatile"), &favorites, stop) {
@@ -427,35 +475,14 @@ pub(super) fn load(volumes: Vec<Volume>, refresh: bool, stop: &AtomicBool) -> io
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
                     Err(error) => return Err(error),
                 }
+        } else if let Some((drive, ready)) = cached_preview {
+            items.extend(ready);
+            drives.push(drive);
+            continue;
         }
         let mut drive = Drive { volume, facts, stats: inventory.as_ref().map(|value| value.stats),
             videos: inventory.map(|value| value.videos).unwrap_or_default(), history };
-        // Recompute after pruning missing files so deleted seasons can expose
-        // a recommendation in another parent directory immediately.
-        let mut listings = BTreeMap::new();
-        loop {
-            let proposed = recommendations(&drive);
-            for item in &proposed {
-                cancelled(stop)?;
-                if let Some(parent) = item.path.parent() {
-                    listings.entry(parent.to_path_buf()).or_insert_with(|| list_folder(parent, system_mount(&drive.volume)));
-                }
-            }
-            let before = drive.videos.len();
-            drive.videos.retain(|video| {
-                let path = drive.volume.path.join(&video.path);
-                let Some(parent) = path.parent() else { return false };
-                match listings.get(parent) {
-                    Some(Ok(entries)) => entries.iter().any(|entry| entry.kind == Kind::Video && Some(entry.name.as_os_str()) == path.file_name()),
-                    Some(Err(_)) => false,
-                    None => true,
-                }
-            });
-            if drive.videos.len() == before {
-                items.extend(proposed);
-                break;
-            }
-        }
+        items.extend(verified_recommendations(&mut drive, stop)?);
         drives.push(drive);
     }
     items.sort_by_key(|item| !item.favorite);
