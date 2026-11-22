@@ -492,6 +492,7 @@ struct SeriesCacheEntry {
 }
 
 struct HomeRequest {
+    preview: Option<Receiver<Vec<home::Item>>>,
     reply: Receiver<io::Result<home::Dashboard>>,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     volumes: Vec<Volume>,
@@ -1905,6 +1906,15 @@ impl Browser {
         }
     }
 
+    fn restore_home_selection(&mut self, selected_path: Option<PathBuf>) {
+        if !self.drive_picker() { return; }
+        if let Some(path) = selected_path {
+            self.selected = self.dashboard.items.iter().position(|item| item.path == path)
+                .map(|index| index + self.scan.volumes.len()).unwrap_or(0);
+        }
+        self.selected = self.selected.min(self.len().saturating_sub(1));
+    }
+
     fn update_home(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if self.manual_refresh.as_ref().is_some_and(|volume| !self.scan.volumes.contains(volume)) {
@@ -1919,6 +1929,17 @@ impl Browser {
         if let Some(job) = &self.home_job {
             if job.volumes != self.scan.volumes {
                 job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if !job.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                let incoming: Vec<_> = job.preview.iter().flat_map(|reply| reply.try_iter()).flatten().collect();
+                if !incoming.is_empty() {
+                    let selected_path = self.home_item().map(|item| item.path.clone());
+                    self.dashboard.items.extend(incoming);
+                    self.dashboard.items.sort_by_key(|item| !item.favorite);
+                    self.dashboard.items.truncate(12);
+                    self.restore_home_selection(selected_path);
+                    changed = true;
+                }
             }
             match job.reply.try_recv() {
                 Err(TryRecvError::Empty) => return changed,
@@ -1964,13 +1985,7 @@ impl Browser {
                                 if self.favorite_cards().is_some() && self.pending.is_none() { self.show_favorites(); }
                                 self.refresh_notice = Some((tr("Biblioteca actualizada", "Biblioteca actualitzada").into(), now));
                             }
-                            if self.drive_picker() {
-                                if let Some(path) = selected_path {
-                                    self.selected = self.dashboard.items.iter().position(|item| item.path == path)
-                                        .map(|index| index + self.scan.volumes.len()).unwrap_or(0);
-                                }
-                                self.selected = self.selected.min(self.len().saturating_sub(1));
-                            }
+                            self.restore_home_selection(selected_path);
                             changed = true;
                         }
                         if job.manual && self.refresh_notice.is_none() {
@@ -1993,8 +2008,13 @@ impl Browser {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = cancelled.clone();
         let (send, reply) = mpsc::sync_channel(1);
+        let (preview_send, preview_reply) = if !manual && !refresh && self.dashboard.items.is_empty() {
+            let (send, reply) = mpsc::channel();
+            (Some(send), Some(reply))
+        } else { (None, None) };
         if plx_base::task::spawn_off_frame("cineusb-home-library", move |_| {
-            let result = home::load(worker_volumes, refresh, &stop).and_then(|mut dashboard| {
+            let preview = preview_send.map(|send| move |items| { let _ = send.send(items); });
+            let result = home::load(worker_volumes, refresh, &stop, preview).and_then(|mut dashboard| {
                 if let Some((volume, path)) = folder {
                     let entries = match list_folder(&path, system_mount(&volume)) {
                         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -2006,7 +2026,7 @@ impl Browser {
             });
             let _ = send.send(result);
         }) {
-            self.home_job = Some(HomeRequest { reply, cancelled, volumes, manual });
+            self.home_job = Some(HomeRequest { preview: preview_reply, reply, cancelled, volumes, manual });
             self.home_force_refresh = false;
         } else {
             self.home_refresh = now + Duration::from_secs(10);
@@ -4573,6 +4593,34 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn home_shows_cached_episode_before_full_inventory_and_discards_disconnected_preview() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/preview".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(volume.clone());
+        let path = volume.path.join("Season 1/Episode 2.mkv");
+        let item = home::Item { volume: volume.clone(), path: path.clone(), title: "Serie".into(),
+            episode: Some((1, 2)), show: true, favorite: true, progress: 0,
+            detail_key: (path.clone(), None, None) };
+        let (preview_send, preview) = mpsc::channel();
+        let (_send, reply) = mpsc::sync_channel(1);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        browser.home_job = Some(HomeRequest { preview: Some(preview), reply, cancelled: cancelled.clone(),
+            volumes: vec![volume], manual: false });
+
+        preview_send.send(vec![item.clone()]).unwrap();
+        assert!(browser.update_home(Instant::now()));
+        assert!(browser.home_job.is_some(), "the full inventory is still pending");
+        assert_eq!(browser.dashboard.items[0].path, path);
+        assert_eq!(browser.dashboard.items[0].episode, Some((1, 2)));
+
+        preview_send.send(vec![item]).unwrap();
+        browser.scan.volumes.clear();
+        browser.update_home(Instant::now());
+        assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(browser.dashboard.items.is_empty());
+    }
+
+    #[test]
     fn manual_refresh_is_single_and_cancellation_preserves_library_and_history() {
         let mut browser = Browser::new();
         let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
@@ -4583,7 +4631,7 @@ mod usb_browser_tests {
             episode: None, show: false, favorite: true, progress: 0, detail_key: (path, None, None) });
         let (send, reply) = mpsc::sync_channel(1);
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        browser.home_job = Some(HomeRequest { reply, cancelled: cancelled.clone(), volumes: vec![volume.clone()], manual: false });
+        browser.home_job = Some(HomeRequest { preview: None, reply, cancelled: cancelled.clone(), volumes: vec![volume.clone()], manual: false });
         browser.request_manual_refresh();
         browser.request_manual_refresh();
         assert_eq!(browser.manual_refresh, Some(volume.clone()));
@@ -4615,7 +4663,7 @@ mod usb_browser_tests {
         browser.folders.push(Folder { volume: volume.clone(), path: volume.path.clone(), entries: vec![entry("Keep.mkv"), entry("Deleted.mkv")], collection: None, selected: 0, scroll: 0.0 });
         browser.manual_refresh = Some(volume.clone());
         let (send, reply) = mpsc::sync_channel(1);
-        browser.home_job = Some(HomeRequest { reply, cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), volumes: vec![volume.clone()], manual: true });
+        browser.home_job = Some(HomeRequest { preview: None, reply, cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), volumes: vec![volume.clone()], manual: true });
         send.send(Ok(home::Dashboard {
             drives: vec![home::Drive { volume: volume.clone(), facts: (None, None), stats: Some(Default::default()), videos: vec![], history: None }],
             items: vec![], refreshed_folder: Some((volume.clone(), volume.path.clone(), vec![entry("New.mkv"), entry("Keep.mkv")])),
@@ -4682,7 +4730,7 @@ mod usb_browser_tests {
         browser.scan.volumes.push(volume.clone());
         let (send, reply) = mpsc::sync_channel(1);
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        browser.home_job = Some(HomeRequest { reply, cancelled: cancelled.clone(), volumes: vec![volume.clone()], manual: true });
+        browser.home_job = Some(HomeRequest { preview: None, reply, cancelled: cancelled.clone(), volumes: vec![volume.clone()], manual: true });
         browser.manual_refresh = Some(volume.clone());
         browser.dialog = Some(Dialog::Eject(volume));
         browser.option = 1;
