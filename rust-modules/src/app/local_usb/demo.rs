@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, File};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{entry_key, favorite_key, pack_progress, tr, Volume, VolumeFacts, FAVORITE, WATCHED};
