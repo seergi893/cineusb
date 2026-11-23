@@ -91,7 +91,7 @@ fn cached(identity: &str) -> Option<Inventory> {
         let Ok(bytes) = std::fs::read(path) else { continue };
         if bytes.len() > 16 * 1024 * 1024 { continue; }
         let Ok(value) = serde_json::from_slice::<Inventory>(&bytes) else { continue };
-        if value.schema == 2 && value.identity == identity && value.videos.iter().all(|video| {
+        if value.schema == 3 && value.identity == identity && value.videos.iter().all(|video| {
             !video.path.as_os_str().is_empty() && video.path.components()
                 .all(|part| matches!(part, std::path::Component::Normal(_)))
                 && video.show.as_ref().is_none_or(|show| !show.as_os_str().is_empty()
@@ -113,8 +113,12 @@ fn save(inventory: &Inventory) {
 }
 
 fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBool) -> io::Result<Inventory> {
+    scan_folders(volume, identity, favorites, vec![(volume.path.clone(), 0, None)], stop)
+}
+
+fn scan_folders(volume: &Volume, identity: &str, favorites: &[PathBuf],
+    mut folders: Vec<(PathBuf, usize, Option<PathBuf>)>, stop: &AtomicBool) -> io::Result<Inventory> {
     let mut videos = Vec::new();
-    let mut folders = vec![(volume.path.clone(), 0, None)];
     let mut shows = BTreeSet::new();
     let mut documentaries = BTreeSet::new();
     let mut stats = Stats::default();
@@ -131,7 +135,9 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
                     [1, 2, super::DOCUMENTALS_TAB].into_iter()
                         .find(|&kind| media_folder_score(&name, kind) > 0).unwrap_or(category)
                 };
-                let next_show = if show.is_none() && next_category != 1 && continuity::season_number(&name).is_some() {
+                let next_show = if favorites.contains(&child) {
+                    Some(child.clone())
+                } else if show.is_none() && next_category != 1 && continuity::season_number(&name).is_some() {
                     Some(path.clone())
                 } else if next_category == 2 && next_category == category && show.is_none() {
                     Some(child.clone())
@@ -174,7 +180,7 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
     stats.documentaries += documentaries.len();
     videos.sort_by(episode_order);
     let favorite_series = favorites.iter().filter_map(|path| path.strip_prefix(&volume.path).ok().map(Path::to_path_buf)).collect();
-    Ok(Inventory { schema: 2, identity: identity.into(), checked: seconds(), videos, stats, used_bytes: None, directories, favorite_series })
+    Ok(Inventory { schema: 3, identity: identity.into(), checked: seconds(), videos, stats, used_bytes: None, directories, favorite_series })
 }
 
 fn inventory_changed(volume: &Volume, inventory: &Inventory, stop: &AtomicBool) -> io::Result<bool> {
@@ -292,14 +298,14 @@ fn next_in_series<'a>(drive: &Drive, series: &SeriesKey, candidates: &[&'a Video
     // A removed but unfinished earlier episode cannot be treated as complete.
     if paused.iter().any(|episode| (episode.season, episode.first) < key
         && (episode.first..=episode.last).any(|number| !watched.contains(&(episode.season, number)))) { return None; }
-    if has_resume(saved) || !watched.is_empty() || favorite && key == (1, 1) {
+    if has_resume(saved) || !watched.is_empty() {
         return Some((video, saved));
     }
-    // With no completed history, allow resuming a file the viewer explicitly started.
-    candidates.iter().filter_map(|&candidate| {
+    // An episode the viewer started takes precedence over an unplayed favorite.
+    candidates.iter().find_map(|&candidate| {
         let saved = progress(candidate, &drive.volume, identity, records);
         has_resume(saved).then_some((candidate, saved))
-    }).next()
+    }).or_else(|| favorite.then_some((video, saved)))
 }
 
 fn grouped_history<'a>(drive: &Drive, identity: &str, groups: impl Iterator<Item = &'a SeriesKey>,
@@ -462,6 +468,27 @@ pub(super) fn load(
                 let ready = verified_recommendations(&mut cached_drive, stop)?;
                 if !ready.is_empty() { publish(ready[..ready.len().min(12)].to_vec()); }
                 cached_preview = Some((cached_drive, ready));
+            } else if let Some(identity) = identity.as_deref().filter(|_| !favorites.is_empty()) {
+                // On a cold start, read the favorite folders before scanning the rest of the disk.
+                let mut ready = Vec::new();
+                for favorite in &favorites {
+                    cancelled(stop)?;
+                    let roots = vec![(favorite.clone(), 0, Some(favorite.clone()))];
+                    match scan_folders(&volume, identity, &favorites, roots, stop) {
+                        Ok(value) => {
+                            let drive = Drive { volume: volume.clone(), facts: facts.clone(), stats: None,
+                                videos: value.videos, history: history.clone() };
+                            ready.extend(recommendations(&drive).into_iter().filter(|item| item.favorite));
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+                        Err(_) => {}
+                    }
+                    if ready.len() >= 12 { break; }
+                }
+                if !ready.is_empty() {
+                    ready.truncate(12);
+                    publish(ready);
+                }
             }
         }
         if refresh || inventory.as_ref().is_none_or(|value| value.used_bytes != used_bytes || value.favorite_series != relative_favorites
@@ -540,6 +567,35 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn favorite_nested_in_a_series_collection_keeps_its_next_episode() {
+        let root = plx_base::testscratch::process_dir("cineusb-home-nested-favorite");
+        let volume = Volume { path: root.clone(), label: None, mount_id: None, system: false };
+        let show = root.join("Sèries/Col·lecció/Una sèrie");
+        let first = show.join("01.mkv");
+        let second = show.join("02.mkv");
+        std::fs::create_dir_all(&show).unwrap();
+        std::fs::write(&first, []).unwrap();
+        std::fs::write(&second, []).unwrap();
+        let favorite = favorite_key("uuid:test", &volume, &show).unwrap();
+        let inventory = scan(&volume, "uuid:test", std::slice::from_ref(&show), &AtomicBool::new(false)).unwrap();
+        let first_video = inventory.videos.iter().find(|video| root.join(&video.path) == first).unwrap();
+        let completed = entry_key("uuid:test", &volume, &first, first_video.size, first_video.modified).unwrap();
+        let mut drive = Drive { volume, facts: (None, Some("uuid:test".into())), stats: Some(inventory.stats),
+            videos: inventory.videos, history: Some(BTreeMap::from([(favorite, FAVORITE), (completed, WATCHED)])) };
+        let items = recommendations(&drive);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].favorite);
+        assert_eq!(items[0].path, second);
+        assert_eq!(items[0].episode, Some((1, 2)));
+
+        // The earliest available episode is still offered after resetting history and removing E01.
+        drive.history.as_mut().unwrap().retain(|_, value| *value == FAVORITE);
+        drive.videos.retain(|video| root.join(&video.path) == second);
+        assert_eq!(recommendations(&drive)[0].path, second);
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
     fn statistics_deduplicate_shows_and_recommendations_prioritize_favorites() {
         let (root, volume) = fixture("cineusb-home-library-stats");
         let show = root.join("Sèries/Una sèrie");
@@ -567,7 +623,7 @@ mod usb_browser_tests {
         drive.volume.path = "/tmp/usb/sdb/sdb1".into();
         assert_eq!(recommendations(&drive)[0].episode, original);
         assert!(recommendations(&drive)[0].path.starts_with("/tmp/usb/sdb/sdb1"));
-        let inventory = Inventory { schema: 2, identity: "uuid:test".into(), checked: seconds(), stats: drive.stats.unwrap(),
+        let inventory = Inventory { schema: 3, identity: "uuid:test".into(), checked: seconds(), stats: drive.stats.unwrap(),
             videos: drive.videos.clone(), used_bytes: Some(200), directories: vec![], favorite_series: vec![] };
         let cache = root.join("offline-inventory.json");
         plx_plex::plex::session::write_atomic(&cache, &serde_json::to_vec(&inventory).unwrap()).unwrap();
