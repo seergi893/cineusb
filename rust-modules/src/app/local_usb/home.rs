@@ -780,7 +780,8 @@ mod usb_browser_tests {
         let before = drive(volume.clone(), BTreeMap::new());
         let entry = before.videos.iter().find(|item| volume.path.join(&item.path) == first).unwrap();
         let key = entry_key("uuid:test", &volume, &first, entry.size, entry.modified).unwrap();
-        let history = BTreeMap::from([(key, WATCHED)]);
+        let favorite = favorite_key("uuid:test", &volume, &show).unwrap();
+        let history = BTreeMap::from([(key, WATCHED), (favorite, FAVORITE)]);
         let original_next = next_episode(&before, &first, Some(&history)).unwrap();
         assert_eq!(original_next, second);
         std::fs::remove_dir_all(show.join("Season 1")).unwrap();
