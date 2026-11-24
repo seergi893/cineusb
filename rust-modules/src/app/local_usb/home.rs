@@ -439,6 +439,22 @@ fn verified_recommendations(drive: &mut Drive, stop: &AtomicBool) -> io::Result<
     }
 }
 
+pub(super) fn load_demo(volumes: Vec<Volume>, history: BTreeMap<String, u64>, stop: &AtomicBool) -> io::Result<Dashboard> {
+    let Some(volume) = volumes.into_iter().next() else {
+        return Ok(Dashboard { drives: vec![], items: vec![], refreshed_folder: None });
+    };
+    let identity = super::demo::IDENTITY;
+    let favorites: Vec<_> = history.iter().filter(|(_, value)| **value == FAVORITE)
+        .filter_map(|(key, _)| record_path(key, identity))
+        .filter(|path| !super::is_video_path(path)).map(|path| volume.path.join(path)).collect();
+    let inventory = scan(&volume, identity, &favorites, stop)?;
+    let drive = Drive { volume, facts: super::demo::facts(), stats: Some(inventory.stats),
+        videos: inventory.videos, history: Some(history) };
+    let mut items = recommendations(&drive);
+    items.truncate(12);
+    Ok(Dashboard { drives: vec![drive], items, refreshed_folder: None })
+}
+
 pub(super) fn load(
     volumes: Vec<Volume>,
     refresh: bool,

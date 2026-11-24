@@ -2,6 +2,7 @@
 mod art;
 mod continuity;
 mod disk;
+mod demo;
 mod series;
 mod home;
 mod media_card;
@@ -305,10 +306,11 @@ const ACTIONS: [(Action, Rect); 3] = [
     (Action::DeleteFolders, Rect::new(1625.0, 222.0, 185.0, 45.0)),
 ];
 
-const UNIFIED_SETTINGS_COUNT: usize = 13;
-const SETTINGS_ORDER: [usize; UNIFIED_SETTINGS_COUNT] = [0, 1, 8, 2, 3, 4, 12, 5, 6, 7, 9, 10, 11];
+const DEMO_SETTING: usize = 13;
+const UNIFIED_SETTINGS_COUNT: usize = 14;
+const SETTINGS_ORDER: [usize; UNIFIED_SETTINGS_COUNT] = [0, 1, 8, 2, 3, 4, 12, 5, 6, 7, 9, 10, 11, DEMO_SETTING];
 const SETTINGS_GROUPS: [(&[usize], f32); 4] = [
-    (&[0, 1, 8], 100.0), (&[2, 3, 4, 12], 305.0), (&[5], 560.0), (&[6, 7, 9, 10, 11], 667.0),
+    (&[0, 1, 8], 100.0), (&[2, 3, 4, 12], 305.0), (&[5], 560.0), (&[6, 7, 9, 10, 11, DEMO_SETTING], 667.0),
 ];
 const SETTING_ROW_PITCH: f32 = 54.0;
 fn unified_setting_rect(index: usize) -> Rect {
@@ -318,7 +320,7 @@ fn unified_setting_rect(index: usize) -> Rect {
     Rect::new(700.0, top + 38.0 + row as f32 * SETTING_ROW_PITCH, 1108.0, 50.0)
 }
 
-fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'static str, String) {
+fn unified_setting_text(index: usize, settings: &Settings, demo: bool) -> (&'static str, &'static str, String) {
     let on = |enabled: bool| if enabled { tr("Activado", "Activat") } else { tr("Desactivado", "Desactivat") };
     match index {
         0 => (tr("Ordenar biblioteca", "Ordena la biblioteca"),
@@ -361,6 +363,10 @@ fn unified_setting_text(index: usize, settings: &Settings) -> (&'static str, &'s
         12 => (tr("Convertir DTS (experimental)", "Converteix DTS (experimental)"),
             tr("Convierte DTS 5.1 de 48 kHz a Dolby Digital al abrir el vídeo.", "Converteix DTS 5.1 de 48 kHz a Dolby Digital en obrir el vídeo."),
             on(settings.convert_dts).into()),
+        DEMO_SETTING => (if demo { tr("Salir del modo demo", "Surt del mode demo") }
+            else { tr("Activar modo demo", "Activa el mode demo") },
+            tr("Explora una biblioteca USB ficticia. Cada sesión empieza de nuevo.",
+                "Explora una biblioteca USB fictícia. Cada sessió comença de nou."), String::new()),
         _ => unreachable!("valid setting"),
     }
 }
@@ -420,6 +426,7 @@ struct FavoriteView {
 }
 
 enum DiskResult {
+    Demo(io::Result<demo::Library>),
     Folder(Volume, PathBuf, io::Result<Vec<Entry>>),
     Video(Result<PreparedVideo, String>),
     Delete(PathBuf, Result<(), String>),
@@ -513,6 +520,8 @@ impl SeriesCacheEntry {
 }
 
 pub(super) struct Browser {
+    demo: Option<demo::Library>,
+    real_browser: Option<Box<Browser>>,
     scan: Scan,
     folders: Vec<Folder>,
     selected: usize,
@@ -597,6 +606,7 @@ impl Browser {
     pub(super) fn new() -> Self {
         let now = Instant::now();
         Self {
+            demo: None, real_browser: None,
             scan: Scan::default(), folders: Vec::new(), selected: 0,
             scroll: Spring::at(0.0), pop: GridPop::new(), status: String::new(),
             hour: None, clock_time: None, tv_clock: i18n::current().clock(), next_clock_tick: now,
@@ -742,6 +752,15 @@ impl Browser {
                 self.progress = None;
                 changed = true;
                 match result {
+                    DiskResult::Demo(Ok(library)) => {
+                        self.enter_demo(library);
+                        plx_machine::idle::invalidate();
+                        return None;
+                    }
+                    DiskResult::Demo(Err(error)) => {
+                        plx_base::eventlog::log(&format!("cineusb: demo setup failed: {error}"));
+                        self.status = tr("No se pudo abrir el modo demo.", "No s’ha pogut obrir el mode demo.").into();
+                    }
                     DiskResult::Folder(volume, path, Ok(mut entries)) => {
                         disk::sort_entries_in(&mut entries, self.settings.sort, path.strip_prefix(&volume.path).unwrap_or(&path));
                         let collection = path.strip_prefix(&volume.path).ok().and_then(art::collection);
@@ -919,7 +938,7 @@ impl Browser {
                 Some(Err(TryRecvError::Disconnected)) => self.scanning = None,
                 _ => {}
             }
-            if !self.mutating && self.scanning.is_none() && now >= self.next_scan {
+            if self.demo.is_none() && !self.mutating && self.scanning.is_none() && now >= self.next_scan {
                 self.next_scan = now + Duration::from_secs(5);
                 let hour = i18n::local_hour();
                 changed |= hour != self.hour;
@@ -1166,6 +1185,11 @@ impl Browser {
     }
 
     fn update_volume_facts(&mut self) -> bool {
+        if let Some(library) = &self.demo {
+            let changed = self.facts.is_none();
+            if changed { self.facts = Some((library.volume.clone(), demo::facts())); }
+            return changed;
+        }
         let mut changed = false;
         if let Some((volume, job)) = &self.facts_job {
             match job.try_recv() {
@@ -1191,6 +1215,7 @@ impl Browser {
     }
 
     fn flush_progress(&mut self, closing: bool) {
+        if self.demo.is_some() { return; }
         if self.progress_job.as_ref().is_some_and(|job| closing || job.is_finished()) {
             if let Some(job) = self.progress_job.take() { let _ = job.join(); }
         }
@@ -1349,8 +1374,10 @@ impl Browser {
             self.refresh_series_watched(Some(&key));
         }
         self.home_force_refresh |= value == FAVORITE || previous == Some(FAVORITE);
-        self.queued_progress.insert(key, value);
-        self.flush_progress(false);
+        if self.demo.is_none() {
+            self.queued_progress.insert(key, value);
+            self.flush_progress(false);
+        }
         self.home_refresh = Instant::now() + Duration::from_secs(1);
         if let Some(job) = &self.home_job {
             job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1729,6 +1756,7 @@ impl Browser {
     }
 
     fn update_video_details(&mut self) -> bool {
+        if self.demo.is_some() { return false; }
         let mut changed = false;
         if let Some(job) = &self.details_job {
             match job.reply.try_recv() {
@@ -2015,9 +2043,13 @@ impl Browser {
             let (send, reply) = mpsc::channel();
             (Some(send), Some(reply))
         } else { (None, None) };
+        let demo_history = self.demo.as_ref().map(|_| self.history.get(&history_prefix(demo::IDENTITY)).cloned().unwrap_or_default());
         if plx_base::task::spawn_off_frame("cineusb-home-library", move |_| {
             let preview = preview_send.map(|send| move |items| { let _ = send.send(items); });
-            let result = home::load(worker_volumes, refresh, &stop, preview).and_then(|mut dashboard| {
+            let result = match demo_history {
+                Some(history) => home::load_demo(worker_volumes, history, &stop),
+                None => home::load(worker_volumes, refresh, &stop, preview),
+            }.and_then(|mut dashboard| {
                 if let Some((volume, path)) = folder {
                     let entries = match list_folder(&path, system_mount(&volume)) {
                         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -2100,6 +2132,11 @@ impl Browser {
 
     fn change_settings(&mut self, settings: Settings) {
         let (reply, receive) = mpsc::sync_channel(1);
+        if self.demo.is_some() {
+            let _ = reply.send(Ok(settings));
+            self.settings_job = Some(SettingsJob::Save(receive));
+            return;
+        }
         if plx_base::task::spawn_off_frame("cineusb-settings", move |_| {
             let _ = reply.send(save_settings(settings).map(|()| settings));
         }) {
@@ -2121,7 +2158,7 @@ impl Browser {
         match action {
             Action::ToggleFavorite => self.selection.is_none() && self.series_favorite_key().is_some(),
             Action::Select => self.selection.is_some() || (self.favorite_cards().is_none() && self.folders.last().is_some_and(|folder| {
-                folder.path != folder.volume.path && system_mount(&folder.volume).is_some() && folder.entries.iter().any(|entry| entry.kind == Kind::Folder)
+                folder.path != folder.volume.path && (self.demo.is_some() || system_mount(&folder.volume).is_some()) && folder.entries.iter().any(|entry| entry.kind == Kind::Folder)
             })),
             Action::DeleteFolders => self.selection.as_ref().is_some_and(|marked| !marked.is_empty()),
         }
@@ -2143,8 +2180,52 @@ impl Browser {
         };
     }
 
+    fn toggle_demo(&mut self) {
+        if let Some(real) = self.real_browser.take() {
+            let mut demo_browser = std::mem::replace(self, *real);
+            if let Some(job) = &demo_browser.home_job {
+                job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(library) = demo_browser.demo.take() {
+                plx_base::task::spawn_off_frame("cineusb-demo-cleanup", move |_| drop(library));
+            }
+            self.retire_scan();
+            self.next_scan = Instant::now();
+            self.status.clear();
+            i18n::apply_usb_language(self.settings.language);
+        } else if self.pending.is_none() {
+            self.status = tr("Preparando el modo demo…", "Preparant el mode demo…").into();
+            self.request(|| DiskResult::Demo(demo::Library::create()));
+        }
+        plx_machine::idle::invalidate();
+    }
+
+    fn enter_demo(&mut self, mut library: demo::Library) {
+        let mut browser = Self::new();
+        browser.settings = self.settings;
+        browser.settings_started = true;
+        browser.hour = self.hour;
+        browser.tv_clock = self.tv_clock;
+        browser.scan.volumes.push(library.volume.clone());
+        browser.facts = Some((library.volume.clone(), demo::facts()));
+        let prefix = history_prefix(demo::IDENTITY);
+        browser.history.insert(prefix.clone(), std::mem::take(&mut library.history));
+        browser.history_loaded.insert(prefix);
+        browser.demo = Some(library);
+        self.dialog = None;
+        self.dialog_started = None;
+        self.nav_focus = Some(SETTINGS_TAB);
+        self.status.clear();
+        let real = std::mem::replace(self, browser);
+        self.real_browser = Some(Box::new(real));
+    }
+
     fn cycle_unified_setting(&mut self, direction: i32) {
         if self.settings_job.is_some() { return; }
+        if self.option == DEMO_SETTING {
+            self.toggle_demo();
+            return;
+        }
         if self.option == 8 {
             self.request_manual_refresh();
             return;
@@ -2237,7 +2318,7 @@ impl Browser {
                             self.select(self.selected, true);
                         }
                     }
-                } else if self.option == 1 && system_mount(&volume).is_some() {
+                } else if self.option == 1 && (self.demo.is_some() || system_mount(&volume).is_some()) {
                     self.dialog = Some(Dialog::Delete { volume, path });
                     self.option = 0;
                 }
@@ -2245,8 +2326,12 @@ impl Browser {
             Some(Dialog::Delete { volume, path }) if self.option == 1 => {
                 if !self.scan.volumes.contains(&volume) { return; }
                 self.status = tr("Eliminando archivo…", "Esborrant el fitxer…").into();
+                let demo = self.demo.as_ref().map(|library| library.volume.path.clone());
                 self.request(move || {
-                    let result = mutate_usb(Mutation::Delete, &volume, &path);
+                    let result = match demo {
+                        Some(root) => demo::delete(&root, &path, false),
+                        None => mutate_usb(Mutation::Delete, &volume, &path),
+                    };
                     DiskResult::Delete(path, result)
                 });
                 self.mutating = self.pending.is_some();
@@ -2284,7 +2369,9 @@ impl Browser {
     fn delete_marked_folders(&mut self) {
         let Some(folder) = self.folders.last() else { return };
         if folder.path == folder.volume.path { return; }
-        let Some(mount) = system_mount(&folder.volume) else { return };
+        let mount = system_mount(&folder.volume);
+        let demo = self.demo.as_ref().map(|library| library.volume.path.clone());
+        if mount.is_none() && demo.is_none() { return; }
         let Some(marked) = self.selection.take() else { return };
         let parent = folder.path.clone();
         let (progress, updates) = mpsc::channel();
@@ -2294,13 +2381,16 @@ impl Browser {
             let mut removed = Vec::new();
             let mut error = None;
             for (index, name) in marked.into_iter().enumerate() {
-                match delete_folder(&parent.join(&name), mount) {
+                let path = parent.join(&name);
+                let result = if let Some(root) = &demo { demo::delete(root, &path, true) }
+                    else { delete_folder(&path, mount.expect("live USB mount")) };
+                match result {
                     Ok(()) => removed.push(name),
                     Err(detail) => { error.get_or_insert(detail); }
                 }
                 let _ = progress.send((index + 1, total));
             }
-            let entries = list_folder(&parent, Some(mount));
+            let entries = list_folder(&parent, mount);
             DiskResult::DeleteFolders { removed, total, error, entries }
         });
         self.mutating = self.pending.is_some();
@@ -2392,6 +2482,10 @@ impl Browser {
     }
 
     fn play_video_at(&mut self, volume: &Volume, path: PathBuf, offer_resume: bool) {
+        if self.demo.is_some() {
+            self.status = tr("Modo demo · El archivo es ficticio.", "Mode demo · El fitxer és fictici.").into();
+            return;
+        }
         let direct_resume = self.home_item().is_some();
         let mount_id = system_mount(volume);
         let spanish = self.settings.spanish_audio;
@@ -2704,8 +2798,8 @@ impl Browser {
                 }
                 Key::Up if settings => self.option = self.option.saturating_sub(1),
                 Key::Down if settings => self.option = (self.option + 1).min(vertical - 1),
-                Key::Left { alt: false } if matches!(self.dialog, Some(Dialog::Settings)) => self.cycle_unified_setting(-1),
-                Key::Right { alt: false } if matches!(self.dialog, Some(Dialog::Settings)) => self.cycle_unified_setting(1),
+                Key::Left { alt: false } if matches!(self.dialog, Some(Dialog::Settings)) && self.option != DEMO_SETTING => self.cycle_unified_setting(-1),
+                Key::Right { alt: false } if matches!(self.dialog, Some(Dialog::Settings)) && self.option != DEMO_SETTING => self.cycle_unified_setting(1),
                 Key::Left { alt: false } if !settings => {
                     self.option = (0..self.option).rev().find(|index| self.option_available(*index)).unwrap_or(self.option);
                 }
@@ -2791,7 +2885,7 @@ impl Browser {
     fn option_available(&self, index: usize) -> bool {
         match self.dialog.as_ref() {
             Some(Dialog::Settings) if index == 8 => self.manual_refresh.is_none() && !self.mutating,
-            Some(Dialog::Video { volume, .. }) if index == 1 => system_mount(volume).is_some(),
+            Some(Dialog::Video { volume, .. }) if index == 1 => self.demo.is_some() || system_mount(volume).is_some(),
             Some(Dialog::Video { volume, path }) if index == 2 => {
                 self.identity(volume).is_some_and(|identity| self.history_loaded.contains(&history_prefix(identity)))
                     && self.video_history_key(volume, path).is_some()
@@ -2984,8 +3078,12 @@ impl Browser {
                 Some(_) => (tr("Buenas noches", "Bona nit"), Some(Glyph::Moon)),
                 None => (tr("Te damos la bienvenida", "Benvingut a CineUSB"), None),
             };
-            (greeting.0, tr("Tus películas, series y documentales en el USB",
-                "Les teves pel·lícules, sèries i documentals a l’USB"), greeting.1)
+            if self.demo.is_some() {
+                (tr("Modo demo", "Mode demo"), tr("Biblioteca USB ficticia", "Biblioteca USB fictícia"), None)
+            } else {
+                (greeting.0, tr("Tus películas, series y documentales en el USB",
+                    "Les teves pel·lícules, sèries i documentals a l’USB"), greeting.1)
+            }
         } else {
             focused.as_ref().map_or(("Biblioteca USB", "Carpeta", None), |(title, kind, _)| (title.as_str(), *kind, None))
         };
@@ -3203,7 +3301,7 @@ impl Browser {
         art::draw_brand(p, Rect::new(x, 58.0, 66.0, 66.0));
         draw_line(p, tr("Configuración", "Configuració"),
             Rect::new(x, 172.0, 530.0, 76.0), theme::size::DISPLAY, true);
-        let (name, description, _) = unified_setting_text(self.option, &self.settings);
+        let (name, description, _) = unified_setting_text(self.option, &self.settings, self.demo.is_some());
         draw_line(p, name, Rect::new(x, 297.0, 530.0, 40.0), theme::size::LABEL, true);
         plx_ui::text_view::TextView::new(description, theme::size::BODY, theme::TEXT_SECONDARY)
             .with_measure(&TtfMeasure).break_long_words().leading(38.0).max_lines(4)
@@ -3235,7 +3333,7 @@ impl Browser {
         p.rect(highlight, 15.0, fill, fill, 0.0);
         for i in 0..UNIFIED_SETTINGS_COUNT {
             let rect = unified_setting_rect(i);
-            let (name, _, value) = unified_setting_text(i, &self.settings);
+            let (name, _, value) = unified_setting_text(i, &self.settings, self.demo.is_some());
             draw_line(p, name, Rect::new(rect.x + 22.0, rect.y, 694.0, rect.h),
                 theme::size::LABEL, self.option == i);
             let (value_run, value_width) = TtfMeasure.fit_line_measured(&value, 315.0, theme::size::CAPTION, false);
@@ -4499,6 +4597,26 @@ pub(super) fn flush_playback(app: &mut App) {
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn demo_restores_the_real_browser_and_does_not_queue_history_writes() {
+        let mut browser = Browser::new();
+        let real = Volume { path: "/tmp/usb/test-real".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(real.clone());
+        browser.settings.cards = 2;
+        browser.enter_demo(demo::Library::create().unwrap());
+        let simulated = browser.scan.volumes[0].clone();
+        assert_ne!(simulated.path, real.path);
+        let key = favorite_key(demo::IDENTITY, &simulated, &simulated.path.join("Series/Prueba")).unwrap();
+        browser.change_history(key.clone(), FAVORITE);
+        assert_eq!(browser.history_value(&key), Some(FAVORITE));
+        assert!(browser.queued_progress.is_empty());
+        browser.settings.cards = 0;
+        browser.toggle_demo();
+        assert_eq!(browser.scan.volumes, vec![real]);
+        assert_eq!(browser.settings.cards, 2);
+        assert_eq!(browser.history_value(&key), None);
+    }
 
     #[test]
     fn clock_modes_follow_tv_preference_and_keep_midnight_and_noon_correct() {
