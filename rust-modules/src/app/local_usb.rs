@@ -1436,7 +1436,8 @@ impl Browser {
             self.queued_progress.insert(key, value);
             self.flush_progress(false);
         }
-        self.home_refresh = Instant::now() + Duration::from_secs(1);
+        let delay = if value == FAVORITE { Duration::ZERO } else { Duration::from_secs(1) };
+        self.home_refresh = Instant::now() + delay;
         if let Some(job) = &self.home_job {
             job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -2026,7 +2027,14 @@ impl Browser {
             let result = job.reply.try_recv();
             if !incoming.is_empty() {
                 let selected_path = self.home_item().map(|item| item.path.clone());
-                self.dashboard.items.extend(incoming);
+                for item in incoming {
+                    if let Some(existing) = self.dashboard.items.iter_mut().find(|existing|
+                        existing.volume == item.volume && existing.path == item.path) {
+                        *existing = item;
+                    } else {
+                        self.dashboard.items.push(item);
+                    }
+                }
                 self.dashboard.items.sort_by_key(|item| !item.favorite);
                 self.dashboard.items.truncate(12);
                 self.restore_home_selection(selected_path);
@@ -2099,7 +2107,7 @@ impl Browser {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = cancelled.clone();
         let (send, reply) = mpsc::sync_channel(1);
-        let (preview_send, preview_reply) = if !manual && !refresh && self.dashboard.items.is_empty() {
+        let (preview_send, preview_reply) = if !manual && (refresh || self.dashboard.items.is_empty()) {
             let (send, reply) = mpsc::channel();
             (Some(send), Some(reply))
         } else { (None, None) };
@@ -3040,8 +3048,11 @@ impl Browser {
                 let label = match action {
                     Action::ToggleFavorite => continue,
                     Action::Select if self.selection.is_some() => tr("Cancelar", "Cancel·la"),
-                    Action::Select | Action::DeleteFolders if self.nav_tab == SERIES_TAB => tr("Eliminar serie", "Esborra la sèrie"),
-                    Action::Select | Action::DeleteFolders => tr("Eliminar películas", "Esborra pel·lícules"),
+                    Action::Select if self.nav_tab == SERIES_TAB => tr("Seleccionar series", "Selecciona sèries"),
+                    Action::Select if self.nav_tab == DOCUMENTALS_TAB => tr("Seleccionar documentales", "Selecciona documentals"),
+                    Action::Select => tr("Seleccionar películas", "Selecciona pel·lícules"),
+                    Action::DeleteFolders if self.nav_tab == SERIES_TAB => tr("Eliminar serie", "Esborra la sèrie"),
+                    Action::DeleteFolders => tr("Eliminar películas", "Esborra pel·lícules"),
                 };
                 let glyph = match action {
                     Action::ToggleFavorite => None,
