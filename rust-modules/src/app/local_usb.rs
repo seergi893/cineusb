@@ -380,7 +380,7 @@ enum Dialog {
     Resume(u64),
     Next { volume: Volume, path: PathBuf, deadline: Instant },
     Video { volume: Volume, path: PathBuf },
-    Delete { volume: Volume, path: PathBuf },
+    Delete { volume: Volume, path: PathBuf, finished_episode: bool },
     DeleteFolders,
     Eject(Volume),
 }
@@ -555,6 +555,7 @@ pub(super) struct Browser {
     dashboard: home::Dashboard,
     home_job: Option<HomeRequest>,
     home_refresh: Instant,
+    home_first_open: Option<Instant>,
     home_force_refresh: bool,
     manual_refresh: Option<Volume>,
     refresh_notice: Option<(String, Instant)>,
@@ -621,7 +622,7 @@ impl Browser {
             series_job: None, series_cache: BTreeMap::new(),
             media_art: Default::default(),
             dashboard: home::Dashboard { drives: vec![], items: vec![], refreshed_folder: None }, home_job: None,
-            home_refresh: Instant::now(), home_force_refresh: false,
+            home_refresh: now, home_first_open: Some(now), home_force_refresh: false,
             manual_refresh: None, refresh_notice: None,
             facts: None, facts_job: None, prepared: None, ready: None, playing: None,
             progress_job: None, queued_progress: Default::default(), countdown_display: 0,
@@ -803,7 +804,7 @@ impl Browser {
                     }
                     DiskResult::Delete(path, result) => {
                         if result.is_ok() {
-                            if let Some(folder) = self.folders.last_mut() {
+                            if let Some(folder) = self.folders.last_mut().filter(|folder| path.parent() == Some(folder.path.as_path())) {
                                 folder.entries.retain(|entry| path.file_name() != Some(entry.name.as_os_str()));
                             }
                             self.rebuild_movie_grid();
@@ -995,6 +996,11 @@ impl Browser {
         changed |= self.update_video_details();
         changed |= self.update_series_counts(now);
         changed |= self.update_home(now);
+        if self.demo.is_none() && self.drive_picker() && !self.dashboard.items.is_empty() {
+            if let Some(opened) = self.home_first_open.take() {
+                plx_base::eventlog::log(&format!("cineusb: first Continue Watching cards ready after {} ms", opened.elapsed().as_millis()));
+            }
+        }
         if now >= self.next_clock_tick {
             self.next_clock_tick = now + Duration::from_secs(1);
             let time = i18n::local_clock_time();
@@ -1263,7 +1269,20 @@ impl Browser {
         self.next_estimate = None;
         self.estimate_anchor = None;
         let Some(playing) = self.playing.take() else { return };
-        if !completed || !self.settings.auto_next { return; }
+        if !completed { return; }
+        if self.scan.volumes.contains(&playing.volume)
+            && system_mount(&playing.volume).is_some()
+            && self.video_is_episode(&playing.volume, &playing.path)
+        {
+            self.dialog = Some(Dialog::Delete { volume: playing.volume, path: playing.path, finished_episode: true });
+            self.option = 0;
+            self.action = None;
+            self.nav_focus = None;
+            self.nav_hover = None;
+            plx_machine::idle::invalidate();
+            return;
+        }
+        if !self.settings.auto_next { return; }
         let identity = self.identity(&playing.volume);
         let history = identity.and_then(|identity| self.history.get(&history_prefix(identity)));
         let next = match self.dashboard.drives.iter().find(|drive| drive.volume == playing.volume && drive.stats.is_some()) {
@@ -2332,11 +2351,11 @@ impl Browser {
                         }
                     }
                 } else if self.option == 1 && (self.demo.is_some() || system_mount(&volume).is_some()) {
-                    self.dialog = Some(Dialog::Delete { volume, path });
+                    self.dialog = Some(Dialog::Delete { volume, path, finished_episode: false });
                     self.option = 0;
                 }
             }
-            Some(Dialog::Delete { volume, path }) if self.option == 1 => {
+            Some(Dialog::Delete { volume, path, .. }) if self.option == 1 => {
                 if !self.scan.volumes.contains(&volume) { return; }
                 self.status = tr("Eliminando archivo…", "Esborrant el fitxer…").into();
                 let demo = self.demo.as_ref().map(|library| library.volume.path.clone());
@@ -2349,7 +2368,7 @@ impl Browser {
                 });
                 self.mutating = self.pending.is_some();
             }
-            Some(Dialog::Delete { volume, path }) => {
+            Some(Dialog::Delete { volume, path, finished_episode: false }) => {
                 self.dialog = Some(Dialog::Video { volume, path });
                 self.option = 0;
             }
@@ -2570,7 +2589,7 @@ impl Browser {
             self.dialog = match dialog {
                 Dialog::Appearance => Some(Dialog::Settings),
                 Dialog::Accent | Dialog::Cards | Dialog::Extensions => Some(Dialog::Appearance),
-                Dialog::Delete { volume, path } => Some(Dialog::Video { volume, path }),
+                Dialog::Delete { volume, path, finished_episode: false } => Some(Dialog::Video { volume, path }),
                 _ => None,
             };
             self.option = 0;
@@ -3397,7 +3416,9 @@ impl Browser {
                 self.dialog_video_title(path),
                 "",
                 [tr("Reproducir", "Reprodueix"), tr("Eliminar archivo", "Esborra el fitxer")]),
-            Dialog::Delete { path, .. } => (tr("¿Eliminar este archivo?", "Vols esborrar aquest fitxer?"),
+            Dialog::Delete { path, finished_episode, .. } => (
+                if *finished_episode { tr("¿Borrar el episodio terminado?", "Vols esborrar l’episodi acabat?") }
+                else { tr("¿Eliminar este archivo?", "Vols esborrar aquest fitxer?") },
                 path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
                 tr("Se borrará del disco y no se podrá deshacer.", "S’esborrarà del disc i no el podràs recuperar."),
                 [cancel, tr("Eliminar archivo", "Esborra el fitxer")]),
@@ -5779,6 +5800,34 @@ mod usb_browser_tests {
             assert!(right.x + right.w <= 1920.0 - plx_ui::consts::MARGIN_X);
             assert_eq!(left.y, right.y);
         }
+    }
+
+    #[test]
+    fn episode_delete_prompt_requires_end_of_file_and_defaults_to_keep() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda/sda1".into(), label: None, mount_id: Some(42), system: true };
+        browser.scan.volumes.push(volume.clone());
+        let episode = volume.path.join("Series/Una serie/Una serie S01E02.mkv");
+        let play = |path| PlayingVideo {
+            volume: volume.clone(), path, key: None, position: 0, duration: None, saved: 0,
+            next_save: Instant::now(), seen_player: true, observed_playhead: true, paused: false,
+        };
+        browser.playing = Some(play(episode.clone()));
+        browser.finish_video(false);
+        assert!(browser.dialog.is_none());
+
+        browser.playing = Some(play(volume.path.join("Películas/Película.mkv")));
+        browser.finish_video(true);
+        assert!(browser.dialog.is_none());
+
+        browser.playing = Some(play(episode.clone()));
+        browser.finish_video(true);
+        assert!(matches!(browser.dialog.as_ref(),
+            Some(Dialog::Delete { path, finished_episode: true, .. }) if path == &episode));
+        assert_eq!(browser.option, 0);
+        browser.choose_option();
+        assert!(browser.dialog.is_none());
+        assert!(browser.pending.is_none());
     }
 
     #[test]
