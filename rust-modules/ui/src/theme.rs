@@ -952,6 +952,10 @@ pub const FAN_NAME_SHADOW: [f32; 4] = with_a(BLACK, 0.50);
 pub const DANGER: [f32; 4] = RED_400;
 /// Filled confirmation button with white text.
 pub const CONTROL_DELETE_FILL: [f32; 4] = rgb8(0xb9, 0x28, 0x38);
+/// Fill for an action that marks a video as watched.
+pub const CONTROL_WATCHED_FILL: [f32; 4] = GREEN_400;
+/// Fill for an action that clears a video's watched status.
+pub const CONTROL_UNWATCHED_FILL: [f32; 4] = AMBER_300;
 /// How much [`DANGER`] a destructive control's IDLE plate carries — the design's 16%.
 ///
 /// Named rather than written into [`CONTROL_DANGER_IDLE_FILL`] because it is the one number that
