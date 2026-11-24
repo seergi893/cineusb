@@ -6,6 +6,7 @@ mod demo;
 mod series;
 mod home;
 mod media_card;
+mod details_cache;
 
 use art::Cover;
 use super::{App, Key, playback};
@@ -1856,12 +1857,18 @@ impl Browser {
         };
         let Some((volume, key)) = target else { return changed };
         let mount = system_mount(&volume);
-        let file = key.0.clone();
+        let identity = self.identity(&volume).map(str::to_owned);
+        let source = volume.clone();
+        let detail = key.clone();
         let (send, reply) = mpsc::sync_channel(1);
         if plx_base::task::spawn_off_frame("cineusb-video-details", move |_| {
-            let details = open_for_details(&file, mount).map_or_else(|_| Default::default(), |file| {
-                plx_play_feed::probe_local_details(&file)
-            });
+            let cache = if detail.1.is_some() && detail.2.is_some() {
+                identity.or_else(|| volume_facts(&source).1)
+                    .and_then(|identity| details_cache::Key::new(&identity, &source, &detail))
+            } else {
+                None
+            };
+            let details = details_cache::probe(cache.as_ref(), || open_for_details(&detail.0, mount));
             let _ = send.send(details);
         }) {
             self.details_job = Some(DetailsRequest { volume, key, reply });
