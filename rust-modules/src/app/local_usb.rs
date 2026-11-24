@@ -213,6 +213,7 @@ fn discover_media_folders(volume: &Volume, kind: usize) -> Vec<PathBuf> {
 }
 
 const MOVIES_TAB: usize = 1;
+const SERIES_TAB: usize = 2;
 const DOCUMENTALS_TAB: usize = 3;
 const QUALITY_PILL: Rect = Rect::new(1430.0, 128.0, 394.0, 54.0);
 const QUALITY_TABS: [Rect; 3] = [
@@ -744,7 +745,7 @@ impl Browser {
         self.flush_progress(false);
         changed |= self.update_settings();
         if let Some((processed, total)) = self.progress.as_ref().and_then(|progress| progress.try_iter().last()) {
-            self.status = format!("{} {processed}/{total}", tr("Carpetas procesadas", "Carpetes processades"));
+            self.status = format!("{} {processed}/{total}", tr("Elementos procesados", "Elements processats"));
             changed = true;
         }
         match self.pending.as_ref().map(Receiver::try_recv) {
@@ -834,7 +835,7 @@ impl Browser {
                         self.action = None;
                         self.rebuild_movie_grid();
                         self.select(self.selected, true);
-                        self.status = format!("{}: {}/{total}", tr("Carpetas eliminadas", "Carpetes esborrades"), removed.len());
+                        self.status = format!("{}: {}/{total}", tr("Elementos eliminados", "Elements esborrats"), removed.len());
                         if let Some(error) = error {
                             self.status.push_str(" · ");
                             self.status.push_str(&error);
@@ -1531,6 +1532,8 @@ impl Browser {
         } else if self.pending.is_some() {
             return;
         }
+        self.selection = None;
+        if matches!(self.dialog, Some(Dialog::DeleteFolders)) { self.dialog = None; }
         let previous_focus = self.nav_hover.or(self.nav_focus);
         self.nav_focus = None;
         self.nav_hover = None;
@@ -1867,7 +1870,7 @@ impl Browser {
             let folder = self.folders.last()?;
             let entry = folder.entries.get(index)?;
             if entry.kind != Kind::Folder { return None; }
-            let parent_is_category = (self.nav_tab == 2 && self.media_view.as_ref().and_then(|view| view.paths.first()) == Some(&folder.path))
+            let parent_is_category = (self.nav_tab == SERIES_TAB && self.media_view.as_ref().and_then(|view| view.paths.first()) == Some(&folder.path))
                 || folder.path.file_name().is_some_and(|name| media_folder_score(&name.to_string_lossy(), 2) == 3);
             SeriesCard { volume: &folder.volume, path: folder.path.join(&entry.name),
                 modified: entry.modified, known: parent_is_category }
@@ -2187,13 +2190,25 @@ impl Browser {
             .or_else(|| self.scan.volumes.get(self.selected))
     }
 
+    fn selectable_delete_kind(&self) -> Option<Kind> {
+        match self.nav_tab {
+            SERIES_TAB => Some(Kind::Folder),
+            MOVIES_TAB if self.movie_grid() => Some(Kind::Video),
+            _ => None,
+        }
+    }
+
     fn action_available(&self, action: Action) -> bool {
         match action {
             Action::ToggleFavorite => self.selection.is_none() && self.series_favorite_key().is_some(),
-            Action::Select => self.selection.is_some() || (self.favorite_cards().is_none() && self.folders.last().is_some_and(|folder| {
-                folder.path != folder.volume.path && (self.demo.is_some() || system_mount(&folder.volume).is_some()) && folder.entries.iter().any(|entry| entry.kind == Kind::Folder)
-            })),
-            Action::DeleteFolders => self.selection.as_ref().is_some_and(|marked| !marked.is_empty()),
+            Action::Select => self.selectable_delete_kind().is_some_and(|kind| {
+                self.selection.is_some() || self.folders.last().is_some_and(|folder| {
+                    folder.path != folder.volume.path && (self.demo.is_some() || system_mount(&folder.volume).is_some())
+                        && folder.entries.iter().any(|entry| entry.kind == kind)
+                })
+            }),
+            Action::DeleteFolders => self.selectable_delete_kind().is_some()
+                && self.selection.as_ref().is_some_and(|marked| !marked.is_empty()),
         }
     }
 
@@ -2402,21 +2417,26 @@ impl Browser {
     fn delete_marked_folders(&mut self) {
         let Some(folder) = self.folders.last() else { return };
         if folder.path == folder.volume.path { return; }
-        let mount = system_mount(&folder.volume);
+        let Some(kind) = self.selectable_delete_kind() else { return };
+        let volume = folder.volume.clone();
+        let mount = system_mount(&volume);
         let demo = self.demo.as_ref().map(|library| library.volume.path.clone());
         if mount.is_none() && demo.is_none() { return; }
-        let Some(marked) = self.selection.take() else { return };
+        let Some(mut marked) = self.selection.take() else { return };
+        marked.retain(|name| folder.entries.iter().any(|entry| &entry.name == name && entry.kind == kind));
+        if marked.is_empty() { return; }
         let parent = folder.path.clone();
         let (progress, updates) = mpsc::channel();
         let total = marked.len();
-        self.status = format!("{} 0/{total}", tr("Carpetas procesadas", "Carpetes processades"));
+        self.status = format!("{} 0/{total}", tr("Elementos procesados", "Elements processats"));
         self.request(move || {
             let mut removed = Vec::new();
             let mut error = None;
             for (index, name) in marked.into_iter().enumerate() {
                 let path = parent.join(&name);
-                let result = if let Some(root) = &demo { demo::delete(root, &path, true) }
-                    else { delete_folder(&path, mount.expect("live USB mount")) };
+                let result = if let Some(root) = &demo { demo::delete(root, &path, kind == Kind::Folder) }
+                    else if kind == Kind::Folder { delete_folder(&path, mount.expect("live USB mount")) }
+                    else { mutate_usb(Mutation::Delete, &volume, &path) };
                 match result {
                     Ok(()) => removed.push(name),
                     Err(detail) => { error.get_or_insert(detail); }
@@ -2486,10 +2506,11 @@ impl Browser {
             }
             return;
         }
+        let delete_kind = self.selectable_delete_kind();
         if let Some(folder) = self.folders.last() {
             let Some(entry) = self.folder_index(self.selected).and_then(|index| folder.entries.get(index)) else { return };
             if let Some(marked) = &mut self.selection {
-                if entry.kind == Kind::Folder && !marked.remove(&entry.name) {
+                if Some(entry.kind) == delete_kind && !marked.remove(&entry.name) {
                     marked.insert(entry.name.clone());
                 }
                 return;
@@ -2995,8 +3016,8 @@ impl Browser {
                 let label = match action {
                     Action::ToggleFavorite => continue,
                     Action::Select if self.selection.is_some() => tr("Cancelar", "Cancel·la"),
-                    Action::Select | Action::DeleteFolders if self.nav_tab == 2 => tr("Eliminar serie", "Esborra la sèrie"),
-                    Action::Select | Action::DeleteFolders => tr("Eliminar carpetas", "Esborra carpetes"),
+                    Action::Select | Action::DeleteFolders if self.nav_tab == SERIES_TAB => tr("Eliminar serie", "Esborra la sèrie"),
+                    Action::Select | Action::DeleteFolders => tr("Eliminar películas", "Esborra pel·lícules"),
                 };
                 let glyph = match action {
                     Action::ToggleFavorite => None,
@@ -3015,7 +3036,12 @@ impl Browser {
                 draw_line(p, &clean_series_name(&name), Rect::new(x, 122.0, 880.0, 42.0), theme::size::HEADLINE, true);
             }
             if let Some(marked) = &self.selection {
-                let count = format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"));
+                let count = if self.nav_tab == MOVIES_TAB {
+                    if marked.is_empty() { tr("Selecciona las películas que quieres eliminar.", "Selecciona les pel·lícules que vols esborrar.").into() }
+                    else { format!("{} {}", marked.len(), tr("películas seleccionadas", "pel·lícules seleccionades")) }
+                } else if marked.is_empty() {
+                    tr("Selecciona la serie que quieres eliminar.", "Selecciona la sèrie que vols esborrar.").into()
+                } else { format!("{} {}", marked.len(), tr("series seleccionadas", "sèries seleccionades")) };
                 draw_line(p, &count, Rect::new(x, 161.0, 880.0, 28.0), theme::size::CAPTION, false);
             }
         } else {
@@ -3133,7 +3159,7 @@ impl Browser {
             draw_glyph(p, icon, Rect::new(after_title, title_y + 7.0, 48.0, 48.0), theme::USB_FAVORITES);
         }
         let count = self.selection.as_ref().map(|marked| {
-            if self.nav_tab == 2 {
+            if self.nav_tab == SERIES_TAB {
                 if marked.is_empty() { tr("Selecciona la serie que quieres eliminar.", "Selecciona la sèrie que vols esborrar.").into() }
                 else { format!("{} {}", marked.len(), tr("series seleccionadas", "sèries seleccionades")) }
             } else {
@@ -3427,12 +3453,17 @@ impl Browser {
                 path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
                 tr("Se borrará del disco y no se podrá deshacer.", "S’esborrarà del disc i no el podràs recuperar."),
                 [cancel, tr("Eliminar archivo", "Esborra el fitxer")]),
-            Dialog::DeleteFolders if self.nav_tab == 2 && self.selection.as_ref().is_some_and(|marked| marked.len() == 1) =>
+            Dialog::DeleteFolders if self.nav_tab == SERIES_TAB && self.selection.as_ref().is_some_and(|marked| marked.len() == 1) =>
                 (tr("¿Eliminar esta serie?", "Vols esborrar aquesta sèrie?"),
                     self.selection.as_ref().and_then(|marked| marked.first())
                         .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
                     tr("Se borrará la carpeta con todos sus episodios.", "S’esborrarà la carpeta amb tots els episodis."),
                     [cancel, tr("Eliminar serie", "Esborra la sèrie")]),
+            Dialog::DeleteFolders if self.nav_tab == MOVIES_TAB =>
+                (tr("¿Eliminar las películas seleccionadas?", "Vols esborrar les pel·lícules seleccionades?"),
+                    format!("{} {}", self.selection.as_ref().map_or(0, BTreeSet::len), tr("películas", "pel·lícules")),
+                    tr("Se borrarán del disco y no se podrá deshacer.", "S’esborraran del disc i no les podràs recuperar."),
+                    [cancel, tr("Eliminar películas", "Esborra pel·lícules")]),
             Dialog::DeleteFolders => (tr("¿Eliminar las carpetas seleccionadas?", "Vols esborrar les carpetes seleccionades?"),
                 format!("{} {}", self.selection.as_ref().map_or(0, BTreeSet::len), tr("carpetas", "carpetes")),
                 tr("Se borrará todo su contenido del disco de forma irreversible.",
@@ -5454,6 +5485,30 @@ mod usb_browser_tests {
 
     fn movie_names(browser: &Browser) -> Vec<String> {
         (0..browser.len()).map(|index| browser.folder_entry(index).unwrap().name.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn deletion_selection_is_scoped_to_the_current_library_tab() {
+        for tab in [MOVIES_TAB, SERIES_TAB] {
+            let mut browser = movie_quality_browser();
+            browser.nav_tab = tab;
+            let folder = browser.folders.last_mut().unwrap();
+            folder.volume.system = true;
+            folder.volume.mount_id = Some(42);
+            if tab == SERIES_TAB {
+                folder.entries = vec![disk::media_entry("Una sèrie".into(), true).unwrap()];
+            }
+            browser.open_action(Action::Select);
+            assert!(browser.selection.is_some());
+            assert!(!browser.action_available(Action::DeleteFolders));
+            browser.open();
+            assert_eq!(browser.selection.as_ref().unwrap().len(), 1);
+            assert!(browser.action_available(Action::DeleteFolders));
+            browser.open_nav_tab(0);
+            assert!(browser.selection.is_none());
+            assert!(!browser.action_available(Action::Select));
+            assert!(!browser.action_available(Action::DeleteFolders));
+        }
     }
 
     #[test]
