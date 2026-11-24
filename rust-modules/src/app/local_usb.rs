@@ -122,11 +122,12 @@ const OPTIONS: [Rect; 2] = [
     Rect::new(555.0, 676.0, 390.0, 66.0),
     Rect::new(975.0, 676.0, 390.0, 66.0),
 ];
+const VIDEO_PANEL: Rect = Rect::new(310.0, 292.0, 1300.0, 496.0);
 const VIDEO_OPTIONS: [Rect; 4] = [
-    Rect::new(530.0, 676.0, 190.0, 66.0),
-    Rect::new(731.0, 676.0, 190.0, 66.0),
-    Rect::new(932.0, 676.0, 206.0, 66.0),
-    Rect::new(1149.0, 676.0, 241.0, 66.0),
+    Rect::new(355.0, 676.0, 232.0, 66.0),
+    Rect::new(599.0, 676.0, 288.0, 66.0),
+    Rect::new(899.0, 676.0, 440.0, 66.0),
+    Rect::new(1351.0, 676.0, 214.0, 66.0),
 ];
 const SETTINGS_OPTIONS: [Rect; 6] = [
     Rect::new(550.0, 401.0, 820.0, 49.0),
@@ -301,9 +302,9 @@ fn clock_label(time: Option<(i32, i32)>, settings: &Settings, automatic: i18n::C
 
 // Folder-specific controls sit in the content header, not the navigation.
 const ACTIONS: [(Action, Rect); 3] = [
-    (Action::ToggleFavorite, Rect::new(1020.0, 218.0, 396.0, 55.0)),
-    (Action::Select, Rect::new(1430.0, 222.0, 185.0, 45.0)),
-    (Action::DeleteFolders, Rect::new(1625.0, 222.0, 185.0, 45.0)),
+    (Action::ToggleFavorite, Rect::new(850.0, 218.0, 396.0, 55.0)),
+    (Action::Select, Rect::new(1260.0, 218.0, 260.0, 55.0)),
+    (Action::DeleteFolders, Rect::new(1534.0, 218.0, 276.0, 55.0)),
 ];
 
 const DEMO_SETTING: usize = 13;
@@ -2994,19 +2995,18 @@ impl Browser {
                 let label = match action {
                     Action::ToggleFavorite => continue,
                     Action::Select if self.selection.is_some() => tr("Cancelar", "Cancel·la"),
-                    Action::Select => tr("Seleccionar", "Selecciona"),
-                    Action::DeleteFolders => tr("Eliminar", "Esborra"),
+                    Action::Select | Action::DeleteFolders if self.nav_tab == 2 => tr("Eliminar serie", "Esborra la sèrie"),
+                    Action::Select | Action::DeleteFolders => tr("Eliminar carpetas", "Esborra carpetes"),
                 };
                 let glyph = match action {
                     Action::ToggleFavorite => None,
-                    Action::Select => Some(Glyph::Shared(Icon::CheckCircleFill)),
-                    Action::DeleteFolders => Some(Glyph::Trash),
+                    Action::Select if self.selection.is_some() => None,
+                    Action::Select | Action::DeleteFolders => Some(Glyph::Trash),
                 };
-                if self.action != Some(action) && action != Action::DeleteFolders {
-                    draw_button_content(p, rect, label, glyph, theme::TEXT_PRIMARY);
-                } else {
-                    self.draw_button(p, rect, label, self.action == Some(action), action == Action::DeleteFolders, glyph);
-                }
+                let tone = if action == Action::DeleteFolders
+                    || action == Action::Select && self.selection.is_none() { ButtonTone::Delete }
+                    else { ButtonTone::Default };
+                self.draw_button(p, rect, label, self.action == Some(action), tone, glyph);
             }
         }
         if self.movie_grid() { self.draw_movie_filter(p); }
@@ -3133,7 +3133,12 @@ impl Browser {
             draw_glyph(p, icon, Rect::new(after_title, title_y + 7.0, 48.0, 48.0), theme::USB_FAVORITES);
         }
         let count = self.selection.as_ref().map(|marked| {
-            format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"))
+            if self.nav_tab == 2 {
+                if marked.is_empty() { tr("Selecciona la serie que quieres eliminar.", "Selecciona la sèrie que vols esborrar.").into() }
+                else { format!("{} {}", marked.len(), tr("series seleccionadas", "sèries seleccionades")) }
+            } else {
+                format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"))
+            }
         });
         let section = breadcrumb.as_deref().unwrap_or(if home { tr("Discos conectados", "Discos connectats") } else { "" });
         let section_y = if home { 220.0 } else { 191.0 };
@@ -3422,6 +3427,12 @@ impl Browser {
                 path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
                 tr("Se borrará del disco y no se podrá deshacer.", "S’esborrarà del disc i no el podràs recuperar."),
                 [cancel, tr("Eliminar archivo", "Esborra el fitxer")]),
+            Dialog::DeleteFolders if self.nav_tab == 2 && self.selection.as_ref().is_some_and(|marked| marked.len() == 1) =>
+                (tr("¿Eliminar esta serie?", "Vols esborrar aquesta sèrie?"),
+                    self.selection.as_ref().and_then(|marked| marked.first())
+                        .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+                    tr("Se borrará la carpeta con todos sus episodios.", "S’esborrarà la carpeta amb tots els episodis."),
+                    [cancel, tr("Eliminar serie", "Esborra la sèrie")]),
             Dialog::DeleteFolders => (tr("¿Eliminar las carpetas seleccionadas?", "Vols esborrar les carpetes seleccionades?"),
                 format!("{} {}", self.selection.as_ref().map_or(0, BTreeSet::len), tr("carpetas", "carpetes")),
                 tr("Se borrará todo su contenido del disco de forma irreversible.",
@@ -3433,11 +3444,12 @@ impl Browser {
         };
         let alpha = self.dialog_started.map_or(1.0, motion_alpha);
         let p = p.alpha(0.82 + alpha * 0.18);
-        let (x, w) = (PANEL.x + 45.0, PANEL.w - 90.0);
+        let panel = if matches!(dialog, Dialog::Video { .. }) { VIDEO_PANEL } else { PANEL };
+        let (x, w) = (panel.x + 45.0, panel.w - 90.0);
         p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.48), theme::scrim_black(0.48), 0.0);
-        p.shadow_outside(PANEL, theme::ALERT_PANEL_RAD, theme::MENU_SHADOW_BLUR, theme::MENU_SHADOW_DY, theme::MENU_SHADOW);
-        p.rect(PANEL, theme::ALERT_PANEL_RAD, theme::USB_DIALOG_TOP, theme::USB_DIALOG_BOTTOM, 0.0);
-        p.rring(PANEL, theme::ALERT_PANEL_RAD, 1.0, theme::HAIRLINE);
+        p.shadow_outside(panel, theme::ALERT_PANEL_RAD, theme::MENU_SHADOW_BLUR, theme::MENU_SHADOW_DY, theme::MENU_SHADOW);
+        p.rect(panel, theme::ALERT_PANEL_RAD, theme::USB_DIALOG_TOP, theme::USB_DIALOG_BOTTOM, 0.0);
+        p.rring(panel, theme::ALERT_PANEL_RAD, 1.0, theme::HAIRLINE);
         let destructive = matches!(dialog, Dialog::Delete { .. } | Dialog::DeleteFolders);
         let eject = matches!(dialog, Dialog::Eject(_));
         let glyph_rect = Rect::new(x, 326.0, 80.0, 80.0);
@@ -3457,7 +3469,7 @@ impl Browser {
         };
         if !labels.is_empty() {
             for (index, (rect, &label)) in SETTINGS_OPTIONS.into_iter().zip(labels).enumerate() {
-                self.draw_button(p, rect, label, self.option == index, false, None);
+                self.draw_button(p, rect, label, self.option == index, ButtonTone::Default, None);
             }
             if !self.status.is_empty() {
                 draw_line(p, &self.status, Rect::new(x, 737.0, w, 40.0), theme::size::MICRO, false);
@@ -3506,7 +3518,13 @@ impl Browser {
                 let marked = matches!(glyph, Some(Glyph::Star(true)));
                 self.draw_favorite_chip(p, rect, label, marked, self.option == index);
             } else {
-                self.draw_button(p, rect, label, self.option == index, destructive && index == 1, glyph);
+                let tone = match (dialog, index, glyph) {
+                    (_, 1, Some(Glyph::Trash)) => ButtonTone::Delete,
+                    (Dialog::Video { .. }, 2, Some(Glyph::Shared(Icon::Check))) => ButtonTone::Watched,
+                    (Dialog::Video { .. }, 2, _) => ButtonTone::Unwatched,
+                    _ => ButtonTone::Default,
+                };
+                self.draw_button(p, rect, label, self.option == index, tone, glyph);
             }
         }
     }
@@ -3591,10 +3609,10 @@ impl Browser {
         theme::usb_accent(self.settings.accent)
     }
 
-    fn draw_button(&self, p: Painter, rect: Rect, label: &str, focused: bool, danger: bool, glyph: Option<Glyph>) {
+    fn draw_button(&self, p: Painter, rect: Rect, label: &str, focused: bool, tone: ButtonTone, glyph: Option<Glyph>) {
         let scale = self.button_motion.filter(|(pressed, at)| *pressed == rect && at.elapsed() < MOTION)
             .map_or(1.0, |(_, at)| 0.975 + motion_alpha(at) * 0.025);
-        draw_button(p, rect.scaled(scale), label, focused, danger, glyph, self.accent());
+        draw_button(p, rect.scaled(scale), label, focused, tone, glyph, self.accent());
     }
 
     fn draw_home_card(&self, p: Painter, index: usize, card: Rect, radius: f32, lift: f32) {
@@ -3925,12 +3943,19 @@ fn draw_glyph(p: Painter, glyph: Glyph, rect: Rect, ink: [f32; 4]) {
     icons::draw_svg(p, icons::Svg::new(asset), rect, ink);
 }
 
-fn draw_button(p: Painter, rect: Rect, label: &str, focused: bool, danger: bool, glyph: Option<Glyph>, accent: [f32; 4]) {
-    let (fill, ink) = if danger { (theme::CONTROL_DELETE_FILL, theme::CONTROL_IDLE_INK) }
-        else if focused { (accent, theme::ACCENT_INK) }
-        else { (theme::CONTROL_IDLE_FILL, theme::TEXT_PRIMARY) };
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ButtonTone { Default, Delete, Watched, Unwatched }
+
+fn draw_button(p: Painter, rect: Rect, label: &str, focused: bool, tone: ButtonTone, glyph: Option<Glyph>, accent: [f32; 4]) {
+    let (fill, ink) = match tone {
+        ButtonTone::Delete => (theme::CONTROL_DELETE_FILL, theme::CONTROL_IDLE_INK),
+        ButtonTone::Watched => (theme::CONTROL_WATCHED_FILL, theme::ACCENT_INK),
+        ButtonTone::Unwatched => (theme::CONTROL_UNWATCHED_FILL, theme::ACCENT_INK),
+        ButtonTone::Default if focused => (accent, theme::ACCENT_INK),
+        ButtonTone::Default => (theme::CONTROL_IDLE_FILL, theme::TEXT_PRIMARY),
+    };
     widgets::draw_control_face(p, rect, fill, focused, widgets::ControlGround::Keyed);
-    if focused && danger { p.rring(rect, rect.h * 0.5, 3.0, theme::CONTROL_FOCUS_RING); }
+    if focused && tone != ButtonTone::Default { p.rring(rect, rect.h * 0.5, 3.0, theme::CONTROL_FOCUS_RING); }
     draw_button_content(p, rect, label, glyph, ink);
 }
 
