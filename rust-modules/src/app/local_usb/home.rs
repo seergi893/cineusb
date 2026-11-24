@@ -270,12 +270,11 @@ fn next_in_series<'a>(drive: &Drive, series: &SeriesKey, candidates: &[&'a Video
     completed: Option<&Path>, favorite: bool)
     -> Option<(&'a Video, u64)> {
     let mut watched = BTreeSet::new();
-    let mut paused = Vec::new();
     let mut record = |path: &Path, saved: u64| {
         let Some(episode) = series.identify(path).filter(|episode| episode.season > 0) else { return; };
         if saved == WATCHED {
             watched.extend((episode.first..=episode.last).map(|number| (episode.season, number)));
-        } else if has_resume(saved) { paused.push(episode); }
+        }
     };
     for (path, &saved) in history { record(path.as_path(), saved); }
     if let Some(path) = completed { record(path, WATCHED); }
@@ -295,9 +294,6 @@ fn next_in_series<'a>(drive: &Drive, series: &SeriesKey, candidates: &[&'a Video
     let (key, saved, video) = best?;
     if completed.is_some_and(|path| series.identify(path)
         .is_some_and(|episode| key <= (episode.season, episode.last))) { return None; }
-    // A removed but unfinished earlier episode cannot be treated as complete.
-    if paused.iter().any(|episode| (episode.season, episode.first) < key
-        && (episode.first..=episode.last).any(|number| !watched.contains(&(episode.season, number)))) { return None; }
     if has_resume(saved) || !watched.is_empty() {
         return Some((video, saved));
     }
@@ -608,6 +604,16 @@ mod usb_browser_tests {
         drive.history.as_mut().unwrap().insert(favorite.clone(), 0);
         assert!(recommendations(&drive).is_empty(), "watched history does not keep an unfavorited series visible");
         drive.history.as_mut().unwrap().insert(favorite, FAVORITE);
+
+        // An earlier episode deleted while unfinished must not block the next available file.
+        std::fs::remove_file(&first).unwrap();
+        drive.history.as_mut().unwrap().retain(|_, value| *value != WATCHED);
+        drive.history.as_mut().unwrap().insert(
+            entry_key("uuid:test", &drive.volume, &first, 0, 0).unwrap(),
+            pack_progress(60_000_000_000, Some(600_000_000_000)),
+        );
+        drive.videos.retain(|video| root.join(&video.path) == second);
+        assert_eq!(recommendations(&drive)[0].path, second);
 
         // The earliest available episode is still offered after resetting history and removing E01.
         drive.history.as_mut().unwrap().retain(|_, value| *value == FAVORITE);
