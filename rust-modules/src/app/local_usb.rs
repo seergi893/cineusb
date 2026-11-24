@@ -1171,7 +1171,13 @@ impl Browser {
                 if self.movie_grid() {
                     let right = QUALITY_PILL.x - 28.0;
                     match action {
-                        Action::Select => { rect.x = right - 716.0; rect.w = 344.0; }
+                        Action::Select => {
+                            rect.w = 344.0;
+                            rect.x = right - rect.w;
+                            if self.selection.as_ref().is_some_and(|marked| !marked.is_empty()) {
+                                rect.x -= 372.0;
+                            }
+                        }
                         Action::DeleteFolders => { rect.x = right - 360.0; rect.w = 360.0; }
                         Action::ToggleFavorite => {}
                     }
@@ -3031,8 +3037,7 @@ impl Browser {
                     Action::Select if self.selection.is_some() => None,
                     Action::Select | Action::DeleteFolders => Some(Glyph::Trash),
                 };
-                let tone = if action == Action::DeleteFolders
-                    || action == Action::Select && self.selection.is_none() { ButtonTone::Delete }
+                let tone = if action == Action::DeleteFolders { ButtonTone::Delete }
                     else { ButtonTone::Default };
                 self.draw_button(p, rect, label, self.action == Some(action), tone, glyph);
             }
