@@ -303,9 +303,9 @@ fn clock_label(time: Option<(i32, i32)>, settings: &Settings, automatic: i18n::C
 
 // Folder-specific controls sit in the content header, not the navigation.
 const ACTIONS: [(Action, Rect); 3] = [
-    (Action::ToggleFavorite, Rect::new(850.0, 218.0, 396.0, 55.0)),
-    (Action::Select, Rect::new(1260.0, 218.0, 260.0, 55.0)),
-    (Action::DeleteFolders, Rect::new(1534.0, 218.0, 276.0, 55.0)),
+    (Action::ToggleFavorite, Rect::new(684.0, 218.0, 396.0, 55.0)),
+    (Action::Select, Rect::new(1094.0, 218.0, 376.0, 55.0)),
+    (Action::DeleteFolders, Rect::new(1484.0, 218.0, 340.0, 55.0)),
 ];
 
 const DEMO_SETTING: usize = 13;
@@ -2226,6 +2226,7 @@ impl Browser {
         match self.nav_tab {
             SERIES_TAB => Some(Kind::Folder),
             MOVIES_TAB if self.movie_grid() => Some(Kind::Video),
+            DOCUMENTALS_TAB if self.media_cards().is_none() && !self.folders.is_empty() => Some(Kind::Video),
             _ => None,
         }
     }
@@ -3052,6 +3053,7 @@ impl Browser {
                     Action::Select if self.nav_tab == DOCUMENTALS_TAB => tr("Seleccionar documentales", "Selecciona documentals"),
                     Action::Select => tr("Seleccionar películas", "Selecciona pel·lícules"),
                     Action::DeleteFolders if self.nav_tab == SERIES_TAB => tr("Eliminar serie", "Esborra la sèrie"),
+                    Action::DeleteFolders if self.nav_tab == DOCUMENTALS_TAB => tr("Eliminar documentales", "Esborra documentals"),
                     Action::DeleteFolders => tr("Eliminar películas", "Esborra pel·lícules"),
                 };
                 let glyph = match action {
@@ -3073,6 +3075,9 @@ impl Browser {
                 let count = if self.nav_tab == MOVIES_TAB {
                     if marked.is_empty() { tr("Selecciona las películas que quieres eliminar.", "Selecciona les pel·lícules que vols esborrar.").into() }
                     else { format!("{} {}", marked.len(), tr("películas seleccionadas", "pel·lícules seleccionades")) }
+                } else if self.nav_tab == DOCUMENTALS_TAB {
+                    if marked.is_empty() { tr("Selecciona los documentales que quieres eliminar.", "Selecciona els documentals que vols esborrar.").into() }
+                    else { format!("{} {}", marked.len(), tr("documentales seleccionados", "documentals seleccionats")) }
                 } else if marked.is_empty() {
                     tr("Selecciona la serie que quieres eliminar.", "Selecciona la sèrie que vols esborrar.").into()
                 } else { format!("{} {}", marked.len(), tr("series seleccionadas", "sèries seleccionades")) };
@@ -3493,6 +3498,11 @@ impl Browser {
                         .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
                     tr("Se borrará la carpeta con todos sus episodios.", "S’esborrarà la carpeta amb tots els episodis."),
                     [cancel, tr("Eliminar serie", "Esborra la sèrie")]),
+            Dialog::DeleteFolders if self.nav_tab == DOCUMENTALS_TAB =>
+                (tr("¿Eliminar los documentales seleccionados?", "Vols esborrar els documentals seleccionats?"),
+                    format!("{} {}", self.selection.as_ref().map_or(0, BTreeSet::len), tr("documentales", "documentals")),
+                    tr("Se borrarán del disco y no se podrá deshacer.", "S’esborraran del disc i no els podràs recuperar."),
+                    [cancel, tr("Eliminar documentales", "Esborra documentals")]),
             Dialog::DeleteFolders if self.nav_tab == MOVIES_TAB =>
                 (tr("¿Eliminar las películas seleccionadas?", "Vols esborrar les pel·lícules seleccionades?"),
                     format!("{} {}", self.selection.as_ref().map_or(0, BTreeSet::len), tr("películas", "pel·lícules")),
@@ -5526,7 +5536,7 @@ mod usb_browser_tests {
 
     #[test]
     fn deletion_selection_is_scoped_to_the_current_library_tab() {
-        for tab in [MOVIES_TAB, SERIES_TAB] {
+        for tab in [MOVIES_TAB, SERIES_TAB, DOCUMENTALS_TAB] {
             let mut browser = movie_quality_browser();
             browser.nav_tab = tab;
             let folder = browser.folders.last_mut().unwrap();
