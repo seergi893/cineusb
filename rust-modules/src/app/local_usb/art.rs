@@ -88,7 +88,7 @@ pub(super) fn entry_cover(entry: &Entry, parent: Option<Cover>) -> (Cover, &'sta
     let path = Path::new(&entry.name);
     match entry.kind {
         Kind::Folder => match collection(path).or(parent) {
-            Some(Cover::Movie) => (Cover::Movie, tr("Películas", "Pel·lícules")),
+            Some(Cover::Movie) => (Cover::Folder, tr("Películas", "Pel·lícules")),
             Some(Cover::Series) => (Cover::Series, tr("Series", "Sèries")),
             _ => (Cover::Folder, "Carpeta"),
         },
