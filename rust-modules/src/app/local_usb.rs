@@ -1168,6 +1168,17 @@ impl Browser {
         if self.media_library() {
             ACTIONS.map(|(action, mut rect)| {
                 rect.y -= 90.0;
+                if !self.movie_grid() && self.action_available(Action::ToggleFavorite) {
+                    let right = QUALITY_PILL.x + QUALITY_PILL.w;
+                    if action == Action::ToggleFavorite {
+                        rect.x = right - rect.w;
+                        if self.action_available(Action::Select) {
+                            rect.x -= ACTIONS[1].1.w + 14.0;
+                        }
+                    } else if action == Action::Select {
+                        rect.x = right - rect.w;
+                    }
+                }
                 if self.movie_grid() {
                     let right = QUALITY_PILL.x - 28.0;
                     match action {
