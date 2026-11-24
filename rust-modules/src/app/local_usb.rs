@@ -1168,7 +1168,14 @@ impl Browser {
         if self.media_library() {
             ACTIONS.map(|(action, mut rect)| {
                 rect.y -= 90.0;
-                if self.movie_grid() { rect.x -= QUALITY_PILL.w + 32.0; }
+                if self.movie_grid() {
+                    let right = QUALITY_PILL.x - 28.0;
+                    match action {
+                        Action::Select => { rect.x = right - 716.0; rect.w = 344.0; }
+                        Action::DeleteFolders => { rect.x = right - 360.0; rect.w = 360.0; }
+                        Action::ToggleFavorite => {}
+                    }
+                }
                 (action, rect)
             })
         } else {
@@ -3704,19 +3711,22 @@ impl Browser {
             let Some((title, kind, cover)) = self.item(index) else { return };
             self.draw_folder_card(p, card, radius, lift, &title, kind, cover);
         }
-        if let Some(marked) = &self.selection {
-            if let Some(entry) = self.folder_entry(index).filter(|entry| entry.kind == Kind::Folder) {
-                let checked = marked.contains(&entry.name);
-                let mark = Rect::new(card.x + card.w - 57.0, card.y + 17.0, 40.0, 40.0);
-                let fill = if checked { self.accent() } else { theme::scrim_black(0.6) };
-                p.rect(mark, 20.0, fill, fill, 0.0);
-                p.rring(mark, 20.0, 2.0, theme::TEXT_PRIMARY);
-                if checked {
-                    p.rring(card, radius, 3.0, self.accent());
-                    icons::draw(p, Icon::Check, Rect::new(mark.x + 6.0, mark.y + 6.0, 28.0, 28.0), theme::ACCENT_INK);
-                }
+        if let Some(checked) = self.delete_selection_mark(index) {
+            let mark = Rect::new(card.x + card.w - 57.0, card.y + 17.0, 40.0, 40.0);
+            let fill = if checked { self.accent() } else { theme::scrim_black(0.6) };
+            p.rect(mark, 20.0, fill, fill, 0.0);
+            p.rring(mark, 20.0, 2.0, theme::TEXT_PRIMARY);
+            if checked {
+                p.rring(card, radius, 3.0, self.accent());
+                icons::draw(p, Icon::Check, Rect::new(mark.x + 6.0, mark.y + 6.0, 28.0, 28.0), theme::ACCENT_INK);
             }
         }
+    }
+
+    fn delete_selection_mark(&self, index: usize) -> Option<bool> {
+        let marked = self.selection.as_ref()?;
+        let entry = self.folder_entry(index)?;
+        (Some(entry.kind) == self.selectable_delete_kind()).then(|| marked.contains(&entry.name))
     }
 
     fn category(volume: &Volume, path: &std::path::Path, episodic: bool) -> Category {
@@ -5501,7 +5511,9 @@ mod usb_browser_tests {
             browser.open_action(Action::Select);
             assert!(browser.selection.is_some());
             assert!(!browser.action_available(Action::DeleteFolders));
+            assert_eq!(browser.delete_selection_mark(browser.selected), Some(false));
             browser.open();
+            assert_eq!(browser.delete_selection_mark(browser.selected), Some(true));
             assert_eq!(browser.selection.as_ref().unwrap().len(), 1);
             assert!(browser.action_available(Action::DeleteFolders));
             browser.open_nav_tab(0);
