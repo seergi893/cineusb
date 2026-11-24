@@ -473,8 +473,8 @@ pub(super) fn load(
         let relative_favorites: Vec<_> = favorites.iter().filter_map(|path| path.strip_prefix(&volume.path).ok().map(Path::to_path_buf)).collect();
         let used_bytes = facts.0.map(|(_, used, _, _)| used);
         let mut cached_preview = None;
-        if let Some(publish) = preview.as_mut().filter(|_| !refresh) {
-            if let Some(value) = inventory.as_mut().filter(|value| value.favorite_series == relative_favorites) {
+        if let Some(publish) = preview.as_mut() {
+            if let Some(value) = inventory.as_mut().filter(|value| !refresh && value.favorite_series == relative_favorites) {
                 // Publish usable cards before checking every directory stamp.
                 let mut cached_drive = Drive { volume: volume.clone(), facts: facts.clone(),
                     stats: Some(value.stats), videos: std::mem::take(&mut value.videos), history: history.clone() };
