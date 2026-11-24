@@ -1373,6 +1373,19 @@ impl Browser {
         if previous != Some(value) && (value == WATCHED || previous == Some(WATCHED)) {
             self.refresh_series_watched(Some(&key));
         }
+        if previous == Some(FAVORITE) && value != FAVORITE {
+            // Drop the visible recommendation immediately while the refreshed inventory is pending.
+            if let Some(relative) = key.strip_prefix(prefix).and_then(|tail| tail.strip_suffix("00")).and_then(decode_relative) {
+                let volumes: Vec<_> = self.scan.volumes.iter()
+                    .filter(|volume| self.identity(volume).is_some_and(|identity| history_prefix(identity) == prefix))
+                    .cloned().collect();
+                let selected_path = self.home_item().map(|item| item.path.clone());
+                self.dashboard.items.retain(|item| {
+                    !item.favorite || !volumes.contains(&item.volume) || !item.path.starts_with(item.volume.path.join(&relative))
+                });
+                self.restore_home_selection(selected_path);
+            }
+        }
         self.home_force_refresh |= value == FAVORITE || previous == Some(FAVORITE);
         if self.demo.is_none() {
             self.queued_progress.insert(key, value);

@@ -347,8 +347,10 @@ pub(super) fn recommendations(drive: &Drive) -> Vec<Item> {
     let mut items = Vec::new();
     for video in &drive.videos {
         if let Some(key) = SeriesKey::for_video(video).filter(|_| numbers(video).is_some_and(|e| e.season > 0)) {
-            groups.entry(key).or_default().push(video);
-        } else {
+            if key.flat_title.is_none() && favorites.contains(&key.folder) {
+                groups.entry(key).or_default().push(video);
+            }
+        } else if video.show.is_none() && video.category != 2 && numbers(video).is_none() {
             let saved = progress(video, &drive.volume, identity, history);
             if has_resume(saved) { items.push(item(drive, video, None, false, saved)); }
         }
@@ -356,10 +358,9 @@ pub(super) fn recommendations(drive: &Drive) -> Vec<Item> {
     let empty = BTreeMap::new();
     let histories = grouped_history(drive, identity, groups.keys(), history);
     for (series, videos) in groups {
-        let favorite = series.flat_title.is_none() && favorites.contains(&series.folder);
         if let Some((video, saved)) = next_in_series(drive, &series, &videos, identity, history,
-            histories.get(&series).unwrap_or(&empty), None, favorite) {
-            items.push(item(drive, video, series.title(video), favorite, saved));
+            histories.get(&series).unwrap_or(&empty), None, true) {
+            items.push(item(drive, video, series.title(video), true, saved));
         }
     }
     items.sort_by(|a, b| (!a.favorite, &a.path).cmp(&(!b.favorite, &b.path)));
@@ -603,6 +604,10 @@ mod usb_browser_tests {
         assert!(items[0].favorite);
         assert_eq!(items[0].path, second);
         assert_eq!(items[0].episode, Some((1, 2)));
+        let favorite = favorite_key("uuid:test", &drive.volume, &show).unwrap();
+        drive.history.as_mut().unwrap().insert(favorite.clone(), 0);
+        assert!(recommendations(&drive).is_empty(), "watched history does not keep an unfavorited series visible");
+        drive.history.as_mut().unwrap().insert(favorite, FAVORITE);
 
         // The earliest available episode is still offered after resetting history and removing E01.
         drive.history.as_mut().unwrap().retain(|_, value| *value == FAVORITE);
@@ -627,6 +632,11 @@ mod usb_browser_tests {
         assert!(items[0].favorite);
         assert_eq!(items[0].episode, Some((1, 1)));
         assert_eq!(unpack_progress(items[1].progress), (60_000_000_000, 600_000_000_000));
+        drive.history.as_mut().unwrap().retain(|_, value| *value != FAVORITE);
+        let items = recommendations(&drive);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].episode, None);
+        assert_eq!(unpack_progress(items[0].progress), (60_000_000_000, 600_000_000_000));
         plx_base::testscratch::remove_tree(&root);
     }
 
@@ -665,6 +675,9 @@ mod usb_browser_tests {
         assert_eq!(next_episode(&drive, &first, None), Some(second));
         let key = entry_key("uuid:test", &drive.volume, &first, first_entry.size, first_entry.modified).unwrap();
         drive.history.as_mut().unwrap().insert(key, pack_progress(60_000_000_000, Some(600_000_000_000)));
+        assert!(recommendations(&drive).is_empty(), "an unfinished non-favorite series stays off Home");
+        let favorite = favorite_key("uuid:test", &drive.volume, first.parent().unwrap().parent().unwrap()).unwrap();
+        drive.history.as_mut().unwrap().insert(favorite, FAVORITE);
         let items = recommendations(&drive);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].episode, Some((1, 1)));
@@ -767,7 +780,8 @@ mod usb_browser_tests {
         let before = drive(volume.clone(), BTreeMap::new());
         let entry = before.videos.iter().find(|item| volume.path.join(&item.path) == first).unwrap();
         let key = entry_key("uuid:test", &volume, &first, entry.size, entry.modified).unwrap();
-        let history = BTreeMap::from([(key, WATCHED)]);
+        let favorite = favorite_key("uuid:test", &volume, &show).unwrap();
+        let history = BTreeMap::from([(key, WATCHED), (favorite, FAVORITE)]);
         let original_next = next_episode(&before, &first, Some(&history)).unwrap();
         assert_eq!(original_next, second);
         std::fs::remove_dir_all(show.join("Season 1")).unwrap();
@@ -797,7 +811,7 @@ mod usb_browser_tests {
             let key = entry_key("uuid:test", &drive.volume, &root.join(&video.path), video.size, video.modified).unwrap();
             drive.history.as_mut().unwrap().insert(key, pack_progress(60_000_000_000, Some(600_000_000_000)));
         }
-        assert_eq!(recommendations(&drive).len(), 1);
+        assert!(recommendations(&drive).is_empty(), "loose episodes are not movies");
         plx_base::testscratch::remove_tree(&root);
     }
 }
