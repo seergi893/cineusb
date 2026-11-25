@@ -3789,8 +3789,7 @@ impl Browser {
             } else if let Some(recent) = index.checked_sub(self.home_recent_offset()).and_then(|position| self.home_recent.get(position)) {
                 let item = &recent.item;
                 let details = self.details.get(&item.detail_key);
-                let title = if recent.folder.is_some() { clean_series_name(&item.title) }
-                    else { video_title(&item.path, details.and_then(|details| details.title.as_deref())) };
+                let title = self.home_media_title(item, recent.folder.is_some());
                 self.media_art.draw(p, media_card::Frame { rect: card, radius, lift, accent: self.accent() }, media_card::Card {
                     title: &title, category: Self::category(&item.volume, &item.path, recent.folder.is_some()),
                     formats: details.map_or_else(Default::default, |details| media_card::Formats::file(details, self.settings.spanish_audio)),
@@ -3834,11 +3833,7 @@ impl Browser {
     fn draw_resume_card(&self, p: Painter, item: &home::Item, frame: media_card::Frame) {
         let details = self.details.get(&item.detail_key);
         let duration = details.and_then(|details| details.duration_secs);
-        let title = if item.episode.is_some() || item.show {
-            clean_series_name(&item.title)
-        } else {
-            video_title(&item.path, details.and_then(|details| details.title.as_deref()))
-        };
+        let title = self.home_media_title(item, item.episode.is_some() || item.show);
         let (fraction, remaining) = media_card::file_progress(item.progress, duration);
         self.media_art.draw(p, frame, media_card::Card {
             title: &title, category: Self::category(&item.volume, &item.path, item.show || item.episode.is_some()),
@@ -3847,6 +3842,12 @@ impl Browser {
             readout: Readout::Resume { episode: item.episode, remaining },
             fraction, watched: false, favorite: item.favorite,
         });
+    }
+
+    fn home_media_title(&self, item: &home::Item, series: bool) -> String {
+        if series { return clean_series_name(&item.title); }
+        let embedded = self.details.get(&item.detail_key).and_then(|details| details.title.as_deref());
+        home_file_title(&item.path, embedded)
     }
 
     fn draw_library_card(&self, p: Painter, index: usize, frame: media_card::Frame) -> bool {
@@ -4538,6 +4539,14 @@ fn placeholder_title(title: &str) -> bool {
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
         digits > 0 && (rest[digits..].trim().is_empty() || rest[digits..].trim_start().starts_with('('))
     })
+}
+
+fn home_file_title(path: &std::path::Path, embedded: Option<&str>) -> String {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    if stem.is_empty() || placeholder_title(&stem) {
+        return video_title(path, embedded);
+    }
+    clean_media_title(&stem, None)
 }
 
 fn clean_series_name(raw: &str) -> String {
@@ -6131,6 +6140,16 @@ mod usb_browser_tests {
                     forced: false, default: false, sdh: true },
             ],
         }
+    }
+
+    #[test]
+    fn home_movie_titles_use_the_filename_before_container_credits() {
+        use std::path::Path;
+        assert_eq!(home_file_title(Path::new("Diamantes.En.Bruto.1080p.mkv"), Some("montado por axo")),
+            "Diamantes En Bruto");
+        assert_eq!(home_file_title(Path::new("Crash (2004) 1080p.mkv"), Some("T3P4K1NG-Crash")), "Crash");
+        assert_eq!(home_file_title(Path::new("title_t00.mkv"), Some("La Odisea")), "La Odisea");
+        assert_eq!(home_file_title(Path::new("S1m0ne.mkv"), Some("Release group")), "S1m0ne");
     }
 
     #[test]

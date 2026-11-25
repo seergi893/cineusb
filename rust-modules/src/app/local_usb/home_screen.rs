@@ -32,6 +32,12 @@ impl Browser {
                 let Some(slot) = position.checked_sub(page).filter(|&slot| slot < 9) else { return hidden };
                 slot
             } else {
+                if self.dashboard.items.len() <= 3 {
+                    return home_row_card(x, HOME_GRID_TOP, &self.dashboard.items, position, |item| {
+                        let title = self.home_media_title(item, item.episode.is_some() || item.show);
+                        media_card::home_title_width(&title, item.favorite, false, i18n::current().language(), &TtfMeasure)
+                    });
+                }
                 let offset = position as f32 * HOME_CARD_PITCH - self.home_resume_scroll.pos;
                 let width = 3.0 * HOME_CARD_PITCH - 18.0;
                 if offset >= width || offset + HOME_CARD_W <= 0.0 { return hidden; }
@@ -43,7 +49,10 @@ impl Browser {
         }
         let position = index - self.home_recent_offset();
         let top = if self.dashboard.items.is_empty() { HOME_GRID_TOP } else { HOME_RECENT_TOP };
-        Rect::new(x + position as f32 * HOME_CARD_PITCH, top, HOME_CARD_W, HOME_CARD_H)
+        home_row_card(x, top, &self.home_recent, position, |recent| {
+            let title = self.home_media_title(&recent.item, recent.folder.is_some());
+            media_card::home_title_width(&title, false, true, i18n::current().language(), &TtfMeasure)
+        })
     }
 
     pub(super) fn home_neighbor(&self, dir: Dir) -> Option<usize> {
@@ -128,15 +137,13 @@ impl Browser {
         let drives = self.scan.volumes.len();
         let resume = drives..self.home_recent_offset();
         if !resume.is_empty() {
-            draw_glyph(p, Glyph::Play, Rect::new(x, HOME_HEADER_TOP + 8.0, 26.0, 26.0), self.accent());
-            draw_line(p, tr("Continuar viendo", "Continua mirant"),
-                Rect::new(x + 41.0, HOME_HEADER_TOP, 800.0, 44.0), theme::size::HEADLINE, true);
+            draw_home_heading(p, x, HOME_HEADER_TOP, Icon::Trailer, theme::USB_SERIES_CARD[2],
+                tr("Continuar viendo", "Continua mirant"));
         }
         if !self.home_all && !self.home_recent.is_empty() {
             let y = if resume.is_empty() { HOME_HEADER_TOP } else { HOME_RECENT_TOP - 56.0 };
-            icons::draw(p, Icon::Trailer, Rect::new(x, y + 8.0, 27.0, 27.0), self.accent());
-            draw_line(p, tr("Añadidas recientemente", "Afegides recentment"),
-                Rect::new(x + 41.0, y, 850.0, 44.0), theme::size::HEADLINE, true);
+            draw_home_heading(p, x, y, Icon::Clock, theme::USB_MOVIE_CARD[2],
+                tr("Añadidas recientemente", "Afegides recentment"));
         }
         if !resume.is_empty() {
             p.clip(Rect::new(x - 12.0, HOME_GRID_TOP - 15.0, 3.0 * HOME_CARD_PITCH + 16.0,
@@ -163,7 +170,8 @@ impl Browser {
         let width = card.w - 40.0;
         let compact = card.h < 400.0;
         draw_glyph(p, Glyph::Drive, Rect::new(x, card.y + 19.0, 32.0, 32.0), self.accent());
-        draw_line(p, &volume_name(volume), Rect::new(x + 43.0, card.y + 14.0, width - 43.0, 44.0), theme::size::LABEL, true);
+        draw_line(p, &home_drive_name(volume, index, self.scan.volumes.len()),
+            Rect::new(x + 43.0, card.y + 14.0, width - 43.0, 44.0), theme::size::LABEL, true);
         if let Some(stats) = drive.and_then(|drive| drive.stats) {
             for (index, (count, label, category)) in [
                 (stats.movies, tr("películas", "pel·lícules"), Category::Movie),
@@ -212,4 +220,68 @@ impl Browser {
         }
     }
 
+}
+
+fn home_row_card<T>(x: f32, y: f32, items: &[T], index: usize, title_width: impl Fn(&T) -> f32) -> Rect {
+    if index >= items.len() { return Rect::new(-5000.0, 0.0, 0.0, 0.0); }
+    if items.len() >= 3 { return Rect::new(x + index as f32 * HOME_CARD_PITCH, y, HOME_CARD_W, HOME_CARD_H); }
+    let spare = (3 - items.len()) as f32 * HOME_CARD_PITCH;
+    let mut extra = [0.0; 2];
+    for (each, item) in extra.iter_mut().zip(items) {
+        *each = (title_width(item) - HOME_CARD_W).clamp(0.0, spare);
+    }
+    let scale = spare / extra.iter().sum::<f32>().max(spare);
+    let left = x + index as f32 * HOME_CARD_PITCH + extra[..index].iter().sum::<f32>() * scale;
+    Rect::new(left, y, HOME_CARD_W + extra[index] * scale, HOME_CARD_H)
+}
+
+fn draw_home_heading(p: Painter, x: f32, y: f32, icon: Icon, color: [f32; 4], title: &str) {
+    let badge = Rect::new(x, y, 54.0, 44.0);
+    p.rrect(badge, 10.0, 10.0, theme::with_a(color, 0.20));
+    p.rring(badge, 10.0, 1.5, theme::with_a(color, 0.65));
+    icons::draw(p, icon, Rect::new(x + 7.0, y + 2.0, 40.0, 40.0), color);
+    draw_line(p, title, Rect::new(x + 69.0, y, 800.0, 44.0), theme::size::HEADLINE, true);
+}
+
+fn home_drive_name(volume: &Volume, index: usize, count: usize) -> String {
+    let label = volume_name(volume);
+    let linux_device = label.strip_prefix("sd").is_some_and(|name| {
+        let letters = name.bytes().take_while(u8::is_ascii_lowercase).count();
+        letters > 0 && (letters == 1 || letters < name.len()) && name[letters..].bytes().all(|byte| byte.is_ascii_digit())
+    });
+    if !label.trim().is_empty() && !linux_device { return label; }
+    let name = tr("Disco duro", "Disc dur");
+    if count == 1 { name.into() } else { format!("{name} {}", index + 1) }
+}
+
+#[cfg(test)]
+mod usb_browser_tests {
+    use super::*;
+
+    #[test]
+    fn longer_home_titles_use_free_slots_without_crossing_the_usb_panel() {
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        let width = |title: &&str| media_card::home_title_width(title, true, false, Language::Ca, &measure);
+        let x = plx_ui::consts::MARGIN_X;
+        let titles = ["Les aventures extraordinàries del detectiu de Barcelona", "Llegendes"];
+        let first = home_row_card(x, HOME_GRID_TOP, &titles, 0, width);
+        let second = home_row_card(x, HOME_GRID_TOP, &titles, 1, width);
+        assert!(first.w > HOME_CARD_W);
+        assert_eq!(second.w, HOME_CARD_W);
+        assert_eq!(second.x - first.x - first.w, HOME_CARD_PITCH - HOME_CARD_W);
+        assert!(second.x + second.w < HOME_DISK_X);
+        let full = home_row_card(x, HOME_GRID_TOP, &[titles[0]; 3], 2, width);
+        assert_eq!(full.w, HOME_CARD_W);
+        assert!(full.x + full.w < HOME_DISK_X);
+    }
+
+    #[test]
+    fn home_disk_replaces_device_ids_and_keeps_readable_labels() {
+        let mut volume = Volume { path: "/tmp/usb/sdb1".into(), label: None, mount_id: None, system: false };
+        assert!([ "Disco duro", "Disc dur" ].contains(&home_drive_name(&volume, 0, 1).as_str()));
+        volume.label = Some("sdb1".into());
+        assert!(home_drive_name(&volume, 1, 2).ends_with(" 2"));
+        volume.label = Some("Biblioteca".into());
+        assert_eq!(home_drive_name(&volume, 0, 2), "Biblioteca");
+    }
 }
