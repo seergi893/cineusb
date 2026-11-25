@@ -6040,18 +6040,19 @@ mod usb_browser_tests {
     }
 
     #[test]
-    fn home_drive_cards_align_to_three_columns() {
+    fn home_drive_panel_keeps_every_usb_reachable() {
         let mut browser = Browser::new();
         browser.scan.volumes = (0..9).map(|index| Volume {
             path: format!("/tmp/usb/sda/sda{index}").into(), label: None, mount_id: None, system: false,
         }).collect();
-        assert_eq!(browser.grid().cols, 3);
-        for (first, last) in [(0, 2), (3, 5), (6, 8)] {
-            let left = browser.tile_rect(first);
-            let right = browser.tile_rect(last);
-            assert_eq!(left.x, plx_ui::consts::MARGIN_X);
-            assert!(right.x + right.w <= 1920.0 - plx_ui::consts::MARGIN_X);
-            assert_eq!(left.y, right.y);
+        for index in 0..9 {
+            assert_eq!(browser.selected, index);
+            let card = browser.tile_rect(index);
+            assert_eq!(card.x, HOME_DISK_X);
+            assert!(card.x + card.w <= 1920.0 - plx_ui::consts::MARGIN_X);
+            assert!(card.y >= HOME_HEADER_TOP && card.y + card.h <= HOME_DISK_BOTTOM);
+            assert_eq!(browser.card_at(card.x + 20.0, card.y + 20.0), Some(index));
+            browser.key(Key::Down, false);
         }
     }
 
