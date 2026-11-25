@@ -18,7 +18,7 @@ impl Art {
             p.tex(garland, Rect::new(0.0, 0.0, 115.0, 77.0), 0.0, theme::TINT_WHITE);
             p.tex_uv(garland, [1.0, 0.0, 0.0, 1.0], Rect::new(1805.0, 0.0, 115.0, 77.0), 0.0, theme::TINT_WHITE);
         }
-        let area = if settings { Rect::new(114.0, 665.0, 337.5, 225.0) }
+        let area = if settings { Rect::new(114.0, 620.0, 337.5, 225.0) }
             else if home { Rect::new(1600.0, 921.0, 207.0, 138.0) }
             else { return };
         let tree = texture(&self.tree, include_bytes!("../../../../assets/cineusb/christmas-tree.png"));
