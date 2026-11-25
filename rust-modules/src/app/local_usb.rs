@@ -1,5 +1,6 @@
 //! USB browsing and its off-frame filesystem jobs.
 mod art;
+mod christmas;
 mod continuity;
 mod disk;
 mod demo;
@@ -10,7 +11,7 @@ mod media_card;
 mod details_cache;
 
 use art::Cover;
-use super::{App, Key, playback};
+use super::{App, AppArg, Key, playback};
 use disk::{Entry, Kind, Scan, Volume};
 use media_card::{Category, Readout};
 use plx_gfx::{gfx, text::TtfMeasure};
@@ -327,17 +328,21 @@ const ACTIONS: [(Action, Rect); 3] = [
 ];
 
 const DEMO_SETTING: usize = 13;
-const UNIFIED_SETTINGS_COUNT: usize = 14;
-const SETTINGS_ORDER: [usize; UNIFIED_SETTINGS_COUNT] = [0, 1, 8, 2, 3, 4, 12, 5, 6, 7, 9, 10, 11, DEMO_SETTING];
+const CHRISTMAS_SETTING: usize = 14;
+const CHRISTMAS_MUSIC_SETTING: usize = 15;
+const UNIFIED_SETTINGS_COUNT: usize = 16;
+const SETTINGS_ORDER: [usize; UNIFIED_SETTINGS_COUNT] =
+    [0, 1, 8, 2, 3, 4, 12, 5, 6, 7, 9, 10, 11, CHRISTMAS_SETTING, CHRISTMAS_MUSIC_SETTING, DEMO_SETTING];
 const SETTINGS_GROUPS: [(&[usize], f32); 4] = [
-    (&[0, 1, 8], 100.0), (&[2, 3, 4, 12], 305.0), (&[5], 560.0), (&[6, 7, 9, 10, 11, DEMO_SETTING], 667.0),
+    (&[0, 1, 8], 90.0), (&[2, 3, 4, 12], 276.0), (&[5], 508.0),
+    (&[6, 7, 9, 10, 11, CHRISTMAS_SETTING, CHRISTMAS_MUSIC_SETTING, DEMO_SETTING], 602.0),
 ];
-const SETTING_ROW_PITCH: f32 = 54.0;
+const SETTING_ROW_PITCH: f32 = 46.0;
 fn unified_setting_rect(index: usize) -> Rect {
     let (indices, top) = SETTINGS_GROUPS.iter().copied()
         .find(|&(indices, _)| indices.contains(&index)).expect("valid setting");
     let row = indices.iter().position(|&item| item == index).expect("setting belongs to group");
-    Rect::new(700.0, top + 38.0 + row as f32 * SETTING_ROW_PITCH, 1108.0, 50.0)
+    Rect::new(700.0, top + 38.0 + row as f32 * SETTING_ROW_PITCH, 1108.0, 44.0)
 }
 
 fn unified_setting_text(index: usize, settings: &Settings, demo: bool) -> (&'static str, &'static str, String) {
@@ -383,6 +388,12 @@ fn unified_setting_text(index: usize, settings: &Settings, demo: bool) -> (&'sta
         12 => (tr("Convertir DTS (experimental)", "Converteix DTS (experimental)"),
             tr("Convierte DTS 5.1 de 48 kHz a Dolby Digital al abrir el vídeo.", "Converteix DTS 5.1 de 48 kHz a Dolby Digital en obrir el vídeo."),
             on(settings.convert_dts).into()),
+        CHRISTMAS_SETTING => (tr("Modo Navidad", "Mode Nadal"),
+            tr("Decora los menús de CineUSB con motivos navideños.", "Decora els menús de CineUSB amb motius nadalencs."),
+            on(settings.christmas).into()),
+        CHRISTMAS_MUSIC_SETTING => (tr("Música de fondo", "Música de fons"),
+            tr("Suena en los menús mientras el modo Navidad está activado.", "Sona als menús mentre el mode Nadal està activat."),
+            on(settings.christmas_music).into()),
         DEMO_SETTING => (if demo { tr("Salir del modo demo", "Surt del mode demo") }
             else { tr("Activar modo demo", "Activa el mode demo") },
             tr("Explora una biblioteca USB ficticia. Cada sesión empieza de nuevo.",
@@ -419,6 +430,8 @@ struct Settings {
     clock_format: usize,
     clock_size: usize,
     convert_dts: bool,
+    christmas: bool,
+    christmas_music: bool,
 }
 
 enum SettingsJob {
@@ -588,6 +601,8 @@ pub(super) struct Browser {
     details_job: Option<DetailsRequest>,
     details: BTreeMap<DetailKey, plx_play_feed::LocalVideoDetails>,
     media_art: media_card::Art,
+    christmas_art: christmas::Art,
+    christmas_music: christmas::Music,
     series_job: Option<SeriesRequest>,
     series_cache: BTreeMap<PathBuf, SeriesCacheEntry>,
     dashboard: home::Dashboard,
@@ -659,13 +674,15 @@ impl Browser {
             next_clock_format: now, scan_phase: 0,
             action: None, action_hover: None, dialog: None, option: 0, mutating: false,
             selection: None, progress: None,
-            settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0, extensions: false, show_clock: true, clock_format: 0, clock_size: 1, convert_dts: false },
+            settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0, extensions: false, show_clock: true, clock_format: 0, clock_size: 1, convert_dts: false, christmas: false, christmas_music: true },
             settings_job: None, settings_started: false,
             pending: None, scanning: None, next_scan: now, last_tick: now,
             retired_reads: Vec::new(), retired_scans: Vec::new(),
             details_job: None, details: BTreeMap::new(),
             series_job: None, series_cache: BTreeMap::new(),
             media_art: Default::default(),
+            christmas_art: Default::default(),
+            christmas_music: Default::default(),
             dashboard: home::Dashboard { drives: vec![], items: vec![], refreshed_folder: None }, home_job: None,
             inventory_paths: BTreeMap::new(), card_labels: Default::default(),
             home_recent: Vec::new(), home_resume_start: 0, home_resume_scroll: Spring::at(0.0), home_disk_start: 0, home_all: false,
@@ -2321,6 +2338,7 @@ impl Browser {
 
     fn toggle_demo(&mut self) {
         if let Some(real) = self.real_browser.take() {
+            self.christmas_music.sync(false);
             let mut demo_browser = std::mem::replace(self, *real);
             if let Some(job) = &demo_browser.home_job {
                 job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2340,6 +2358,7 @@ impl Browser {
     }
 
     fn enter_demo(&mut self, mut library: demo::Library) {
+        self.christmas_music.sync(false);
         let mut browser = Self::new();
         browser.settings = self.settings;
         browser.settings_started = true;
@@ -2386,6 +2405,8 @@ impl Browser {
             10 => next.clock_format = step(next.clock_format, 3),
             11 => next.clock_size = step(next.clock_size, 3),
             12 => next.convert_dts = !next.convert_dts,
+            CHRISTMAS_SETTING => next.christmas = !next.christmas,
+            CHRISTMAS_MUSIC_SETTING => next.christmas_music = !next.christmas_music,
             _ => return,
         }
         self.change_settings(next);
@@ -3147,6 +3168,9 @@ impl Browser {
         let page = root.alpha(plx_ui::nav::page_alpha());
         let settings_enter = matches!(self.dialog, Some(Dialog::Settings))
             .then(|| self.dialog_started.map_or(1.0, settings_ease));
+        if self.settings.christmas {
+            self.christmas_art.draw(page, home, settings_enter.is_some());
+        }
         if settings_enter == Some(1.0) {
             self.draw_unified_settings(page, 1.0);
             return;
@@ -4317,15 +4341,18 @@ fn parse_settings(record: &str) -> Result<Option<Settings>, String> {
     let clock_format = choice(fields.next())?;
     let clock_size = choice(fields.next().or(Some("1")))?;
     let convert_dts = flag(fields.next().or(Some("0")))?;
+    let christmas = flag(fields.next().or(Some("0")))?;
+    let christmas_music = flag(fields.next().or(Some("1")))?;
     if fields.next().is_some() { return Err("invalid settings record".into()); }
-    Ok(Some(Settings { language, forced_subtitles, spanish_audio, auto_next, accent, cards, sort, extensions, show_clock, clock_format, clock_size, convert_dts }))
+    Ok(Some(Settings { language, forced_subtitles, spanish_audio, auto_next, accent, cards, sort, extensions, show_clock, clock_format, clock_size, convert_dts, christmas, christmas_music }))
 }
 
 fn save_settings(settings: Settings) -> Result<(), String> {
     let language = match settings.language { Preference::Ca => "ca", Preference::En => "en", _ => "es" };
-    let record = format!("{} {} {} {} {} {} {} {} {} {} {} {}", language,
+    let record = format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {}", language,
         u8::from(settings.forced_subtitles), u8::from(settings.spanish_audio), u8::from(settings.auto_next),
-        settings.accent, settings.cards, settings.sort, u8::from(settings.extensions), u8::from(settings.show_clock), settings.clock_format, settings.clock_size, u8::from(settings.convert_dts));
+        settings.accent, settings.cards, settings.sort, u8::from(settings.extensions), u8::from(settings.show_clock), settings.clock_format, settings.clock_size,
+        u8::from(settings.convert_dts), u8::from(settings.christmas), u8::from(settings.christmas_music));
     #[cfg(not(feature = "hostsim"))]
     return plx_platform::tv::usb::save_preferences(&record).map_err(|error| format!("{error:?}"));
     #[cfg(feature = "hostsim")]
@@ -4945,6 +4972,7 @@ pub(super) fn tick(app: &mut App) {
         && plx_media::route::set_local_source(ps, file, &title, audio, forced, &item, playback::start_caps(), app.usb.settings.convert_dts);
     if ok {
         plx_media::route::set_stream_source_raster(ps, info.width, info.height);
+        app.usb.christmas_music.sync(false);
         if playback::start_playback(ps, &mut app.adapters.player, resume.min(i64::MAX as u64) as i64, playback::Origin::Here,
             4500, None, &mut app.pages, &mut app.bridge) {
             app.usb.playing = Some(PlayingVideo { volume, path, key, position: resume, duration: info.duration_secs.map(|seconds| seconds.saturating_mul(1_000_000_000)),
@@ -4968,6 +4996,10 @@ pub(super) fn finish_clock(app: &App) -> Option<plx_appkit::player_hud::model::F
 }
 
 pub(super) fn observe_playback(app: &mut App) {
+    let menu_audio = app.usb.settings.christmas && app.usb.settings.christmas_music
+        && app.route() == AppArg::LocalUsb && app.window_activity.allow_present(true)
+        && app.usb.playing.is_none() && !super::bridge::player_arriving(&app.pages);
+    app.usb.christmas_music.sync(menu_audio);
     let Some(playing) = &mut app.usb.playing else { return };
     if super::bridge::player(&app.pages).is_some() {
         playing.seen_player = true;
@@ -5249,6 +5281,17 @@ mod usb_browser_tests {
             assert!(first.y + first.h <= next.y);
         }
         assert!(unified_setting_rect(10).y + unified_setting_rect(10).h < 980.0);
+        assert!(SETTINGS_GROUPS[3].0.contains(&CHRISTMAS_SETTING));
+        assert!(SETTINGS_GROUPS[3].0.contains(&CHRISTMAS_MUSIC_SETTING));
+    }
+
+    #[test]
+    fn christmas_preferences_preserve_legacy_defaults_and_music_choice() {
+        let previous = parse_settings("ca 0 0 1 0 0 0 0 1 0 1 0").unwrap().unwrap();
+        assert!(!previous.christmas && previous.christmas_music);
+        let enabled = parse_settings("ca 0 0 1 0 0 0 0 1 0 1 0 1 0").unwrap().unwrap();
+        assert!(enabled.christmas && !enabled.christmas_music);
+        assert!(parse_settings("ca 0 0 1 0 0 0 0 1 0 1 0 1 2").is_err());
     }
 
     #[test]
