@@ -223,14 +223,17 @@ struct EpisodeBadge {
 }
 
 impl EpisodeBadge {
-    fn new((season, episode): (u32, u32), language: Language, compact: bool) -> Self {
+    fn new((season, episode): (u32, u32), language: Language, layout: &Layout, measure: &dyn Measure) -> Self {
         let season_label = local(language, "Temporada", "Temporada", "Season");
         let episode_label = local(language, "Episodio", "Episodi", "Episode");
-        Self {
-            season: format!("{season_label} {season}"),
-            episode: format!("{episode_label} {episode}"),
-            size: if compact { theme::size::USB_CARD_META } else { theme::size::MICRO },
-        }
+        let season = format!("{season_label} {season}");
+        let episode = format!("{episode_label} {episode}");
+        let budget = layout.formats_w - EPISODE_BADGE_PAD * 2.0;
+        let sizes = [theme::size::MICRO, theme::size::DIAGNOSTIC, theme::size::USB_CARD_META, theme::size::USB_CARD_META_TIGHT];
+        let size = sizes.into_iter().skip(if layout.compact { 2 } else { 0 })
+            .find(|&size| [&season, &episode].into_iter().all(|line| measure.width_str(line, size, true) <= budget))
+            .unwrap_or(theme::size::USB_CARD_META_TIGHT);
+        Self { season, episode, size }
     }
 
     fn rect(&self, title: Rect, title_h: f32, width: f32, measure: &dyn Measure) -> Rect {
@@ -330,7 +333,7 @@ impl Art {
             _ => None,
         };
         let series_episode = card.category == Category::Series;
-        let episode_badge = number.filter(|_| series_episode).map(|number| EpisodeBadge::new(number, language, layout.compact));
+        let episode_badge = number.filter(|_| series_episode).map(|number| EpisodeBadge::new(number, language, &layout, &TtfMeasure));
         let resume_episode = series_episode && matches!(card.readout, Readout::Resume { .. });
 
         p.shadow_outside(rect, radius, 16.0, 6.0, theme::CARD_SHADOW);
@@ -659,7 +662,7 @@ mod usb_browser_tests {
                 for scale in [1.0, super::super::USB_STYLE.focus_scale] {
                     let layout = Layout::new(Rect::new(0.0, 0.0, grid.w * scale, grid.h * scale),
                         false, true, false, false, 26.0);
-                    let badge = EpisodeBadge::new((12, 103), language, layout.compact);
+                    let badge = EpisodeBadge::new((12, 103), language, &layout, &measure);
                     assert_eq!(badge.season, "Temporada 12");
                     assert_eq!(badge.episode, label);
                     let r = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
@@ -681,7 +684,7 @@ mod usb_browser_tests {
             for scale in [1.0, super::super::USB_STYLE.focus_scale] {
                 let layout = Layout::new(Rect::new(0.0, 0.0, super::super::HOME_CARD_W * scale, height * scale),
                     true, false, true, false, 0.0);
-                let badge = EpisodeBadge::new((1, 2), Language::Ca, layout.compact);
+                let badge = EpisodeBadge::new((1, 2), Language::Ca, &layout, &measure);
                 let badge_rect = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
                 assert!(badge_rect.x + badge_rect.w < layout.art.x && badge_rect.y + badge_rect.h < layout.progress.y);
                 assert!(measure.width_str(&badge.season, badge.size, true) + EPISODE_BADGE_PAD * 2.0 <= badge_rect.w);
