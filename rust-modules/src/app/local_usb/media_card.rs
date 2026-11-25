@@ -190,8 +190,22 @@ struct Layout {
     compact: bool,
 }
 
-fn episode_header(mut title: Rect, title_w: f32, title_h: f32, badge_w: f32, badge_h: f32, wide: bool) -> (Rect, Rect) {
-    let badge = if wide || title_w + 8.0 + badge_w <= title.w {
+const HOME_INSET: f32 = 22.0;
+const FAVORITE_SPACE: f32 = 23.0;
+
+fn new_badge(language: Language, measure: &dyn Measure) -> (&'static str, f32) {
+    let text = local(language, "Nuevo", "Nou", "New");
+    (text, measure.width_str(text, theme::size::USB_CARD_META, true) + 18.0)
+}
+
+pub(super) fn home_title_width(title: &str, favorite: bool, recent: bool, language: Language, measure: &dyn Measure) -> f32 {
+    let reserved = if recent { new_badge(language, measure).1 + 5.0 } else { 0.0 };
+    let favorite = if favorite { FAVORITE_SPACE } else { 0.0 };
+    (measure.width_str(title, theme::size::HEADLINE, true) + HOME_INSET * 2.0 + favorite + reserved).ceil()
+}
+
+fn episode_header(mut title: Rect, title_w: f32, title_h: f32, badge_w: f32, badge_h: f32) -> (Rect, Rect) {
+    let badge = if title_w + 8.0 + badge_w <= title.w {
         title.w -= badge_w + 8.0;
         Rect::new(title.x + title_w.min(title.w) + 8.0, title.y, badge_w, badge_h)
     } else {
@@ -213,7 +227,7 @@ impl Layout {
 
     fn new(rect: Rect, wide: bool, episode: bool, favorite: bool, series: bool, extra_footer: f32) -> Self {
         let compact = !wide && rect.w < 195.0;
-        let inset = if wide { 22.0 } else { (rect.w * 0.057).round() };
+        let inset = if wide { HOME_INSET } else { (rect.w * 0.057).round() };
         let x = rect.x + inset;
         let width = rect.w - inset * 2.0;
         let footer_h = (if series { 54.0 } else { 28.0 }) + extra_footer;
@@ -221,7 +235,7 @@ impl Layout {
         let title_size = if wide { theme::size::HEADLINE } else if compact { theme::size::MICRO } else { theme::size::LABEL };
         let leading = title_size as f32 * 1.08;
         let title_y = rect.y + inset;
-        let art_top = if wide { rect.y + 14.0 } else {
+        let art_top = if wide { title_y + leading + 5.0 } else {
             title_y + leading * 2.0 + if episode { 38.0 } else { 53.0 }
         };
         let art_bottom = footer_y - 10.0;
@@ -230,9 +244,9 @@ impl Layout {
         let picture_h = picture_width * 172.0 / 200.0;
         let art_x = if wide { rect.x + rect.w - inset - picture_width } else { x + (width - picture_width) / 2.0 };
         let formats_w = if wide { art_x - x - 12.0 } else { width };
-        let title_w = formats_w - if favorite { 23.0 } else { 0.0 };
+        let title_w = width - if favorite { FAVORITE_SPACE } else { 0.0 };
         Self {
-            title: Rect::new(x, title_y, title_w, 2.0 * leading),
+            title: Rect::new(x, title_y, title_w, if wide { leading } else { 2.0 * leading }),
             title_size, leading, formats_w, compact,
             art: Rect::new(art_x, (art_top + art_bottom - picture_h) / 2.0, picture_width, picture_h),
             progress: Rect::new(x, footer_y - 4.0, width, if wide { 5.0 } else { 4.0 }),
@@ -278,21 +292,28 @@ impl Art {
         let title = TextView::new(card.title, layout.title_size, theme::TEXT_PRIMARY).with_measure(&TtfMeasure)
             .bold().break_long_words().max_lines(2).leading(layout.leading);
         let mut title_rect = layout.title;
-        let mut header_h = title.measure_h(title_rect.w).min(title_rect.h);
+        let new_badge = recent.then(|| new_badge(language, &TtfMeasure));
+        if let Some((_, width)) = new_badge { title_rect.w -= width + 5.0; }
+        let mut header_h = if wide { title_rect.h } else { title.measure_h(title_rect.w).min(title_rect.h) };
         if let Some(number) = number.as_deref() {
             let size = theme::size::MICRO;
             let badge_w = TtfMeasure.width_str(number, size, true) + 14.0;
             let title_w = TtfMeasure.width_str(card.title, layout.title_size, true);
             let (text, badge) = episode_header(title_rect, title_w, header_h, badge_w,
-                layout.leading.max(26.0), wide);
+                layout.leading.max(26.0));
             title_rect = text;
             Self::capsule(p, badge, color);
             let run = TtfMeasure.fit_line(number, badge_w - 12.0, size, true);
             Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).bold().h(plx_ui::label::HAlign::Center).draw(p, badge);
-            header_h = title.measure_h(title_rect.w).min(title_rect.h)
+            header_h = (if wide { title_rect.h } else { title.measure_h(title_rect.w).min(title_rect.h) })
                 .max(badge.y + badge.h - title_rect.y);
         }
-        title.draw(p, title_rect);
+        if wide {
+            let run = TtfMeasure.fit_line(card.title, title_rect.w, layout.title_size, true);
+            Label::new(run.as_ptr(), layout.title_size, theme::TEXT_PRIMARY).bold().draw(p, title_rect);
+        } else {
+            title.draw(p, title_rect);
+        }
         if card.favorite {
             super::draw_glyph(p, super::Glyph::Star(true),
                 Rect::new(layout.title.x + layout.title.w + 4.0, layout.title.y + 1.0, 18.0, 18.0), theme::USB_FAVORITES);
@@ -304,12 +325,9 @@ impl Art {
                 card.formats, layout.compact, color);
             if !wide { art = layout.art_below_formats(format_bottom); }
         }
-        if recent { art.y += 20.0; }
         if art.h > 0.0 { self.draw_illustration(p, card.category, art); }
-        if recent {
-            let text = local(i18n::current().language(), "Nuevo", "Nou", "New");
+        if let Some((text, width)) = new_badge {
             let size = theme::size::USB_CARD_META;
-            let width = TtfMeasure.width_str(text, size, true) + 18.0;
             let badge = Rect::new(rect.x + rect.w - width - 15.0, rect.y + 12.0, width, 25.0);
             Self::capsule(p, badge, accent);
             let run = TtfMeasure.fit_line(text, width - 12.0, size, true);
@@ -596,14 +614,15 @@ mod usb_browser_tests {
         for preset in 0..3 {
             let grid = super::super::grid_geometry(12, preset, true);
             let layout = Layout::new(Rect::new(0.0, 0.0, grid.w, grid.h), false, true, false, false, 0.0);
-            let (short, next) = episode_header(layout.title, 50.0, layout.leading, 63.0, 27.0, false);
+            let (short, next) = episode_header(layout.title, 50.0, layout.leading, 63.0, 27.0);
             assert!(next.x > short.x + 50.0 && next.y == short.y);
-            let (long, below) = episode_header(layout.title, 400.0, layout.title.h, 63.0, 27.0, false);
+            let (long, below) = episode_header(layout.title, 400.0, layout.title.h, 63.0, 27.0);
             assert!(below.y > long.y + long.h && below.y + below.h <= layout.art.y);
         }
         let layout = Layout::new(Rect::new(0.0, 0.0, 564.0, 190.0), true, false, true, false, 0.0);
-        let (text, badge) = episode_header(layout.title, 600.0, layout.title.h, 63.0, 30.0, true);
-        assert!(badge.x > text.x + text.w && badge.x + badge.w <= layout.title.x + layout.title.w);
+        let (text, badge) = episode_header(layout.title, 600.0, layout.title.h, 63.0, 30.0);
+        assert_eq!(text.w, layout.title.w);
+        assert!(badge.y >= text.y + text.h && badge.x + badge.w < layout.art.x);
         for episode in 1..=3 {
             let (footer, _) = Readout::Episode { number: Some((1, episode)), duration: Some(3120) }
                 .labels(Category::Documentary, Language::En, false);
