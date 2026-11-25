@@ -54,7 +54,7 @@ impl Category {
         }
     }
 
-    fn symbol(self) -> icons::Svg<'static> {
+    pub(super) fn symbol(self) -> icons::Svg<'static> {
         icons::Svg::new(match self {
             Self::Movie => r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="none" stroke="white" stroke-width="2" stroke-linejoin="round" d="M3 11h18v9H3zm0 0L2 6l17-4 1 5z"/></svg>"#,
             Self::Series => r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="none" stroke="white" stroke-width="2" stroke-linejoin="round" d="m8 2 4 4 4-4M3 6h18v13H3zm5 16h8"/></svg>"#,
@@ -100,6 +100,7 @@ pub(super) fn file_progress(record: u64, seconds: Option<u64>) -> (f32, Option<u
 
 pub(super) enum Readout {
     File(Option<u64>),
+    Recent(Option<u64>),
     Series(super::series::Counts),
     Resume { episode: Option<(u32, u32)>, remaining: Option<u64> },
     Episode { number: Option<(u32, u32)>, duration: Option<u64> },
@@ -110,7 +111,7 @@ impl Readout {
         let kind = category.label(language);
         let with_kind = |text: String| if show_category { format!("{kind} · {text}") } else { text };
         match *self {
-            Self::File(duration) => match duration {
+            Self::File(duration) | Self::Recent(duration) => match duration {
                 Some(seconds) => (with_kind(video_duration(seconds)),
                     with_kind(super::card_duration(seconds, 0.0))),
                 None if show_category => (kind.into(), kind.into()),
@@ -244,7 +245,8 @@ impl Art {
     pub(super) fn draw(&self, p: Painter, frame: Frame, card: Card<'_>) {
         let Frame { rect, radius, lift, accent } = frame;
         let [top, bottom, color] = card.category.palette();
-        let wide = matches!(card.readout, Readout::Resume { .. });
+        let recent = matches!(card.readout, Readout::Recent(_));
+        let wide = recent || matches!(card.readout, Readout::Resume { .. });
         let episode = matches!(card.readout, Readout::Episode { .. });
         let series = matches!(card.readout, Readout::Series(_));
         let mut layout = Layout::new(rect, wide, episode, card.favorite, series, 0.0);
@@ -302,15 +304,25 @@ impl Art {
                 card.formats, layout.compact, color);
             if !wide { art = layout.art_below_formats(format_bottom); }
         }
+        if recent { art.y += 20.0; }
         if art.h > 0.0 { self.draw_illustration(p, card.category, art); }
+        if recent {
+            let text = local(i18n::current().language(), "Nuevo", "Nou", "New");
+            let size = theme::size::USB_CARD_META;
+            let width = TtfMeasure.width_str(text, size, true) + 18.0;
+            let badge = Rect::new(rect.x + rect.w - width - 15.0, rect.y + 12.0, width, 25.0);
+            Self::capsule(p, badge, accent);
+            let run = TtfMeasure.fit_line(text, width - 12.0, size, true);
+            Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).bold().h(plx_ui::label::HAlign::Center).draw(p, badge);
+        }
 
         let bar = layout.progress;
-        if card.watched {
+        if !recent && card.watched {
             p.rrect(Rect::new(bar.x, bar.y + bar.h * 0.5, bar.w, 1.0), 0.5, 0.5, theme::with_a(color, 0.38));
-        } else {
+        } else if !recent {
             p.rrect(bar, bar.h * 0.5, bar.h * 0.5, theme::with_a(theme::TEXT_PRIMARY, 0.19));
         }
-        if !card.watched && card.fraction > 0.0 {
+        if !recent && !card.watched && card.fraction > 0.0 {
             let fill = Rect::new(bar.x, bar.y, bar.w * card.fraction, bar.h);
             p.rrect(fill, bar.h * 0.5, bar.h * 0.5, color);
         }
@@ -471,7 +483,7 @@ fn watched_seconds(readout: &Readout) -> Option<u64> {
     match *readout {
         Readout::File(duration) | Readout::Episode { duration, .. } => duration,
         Readout::Resume { remaining, .. } => remaining,
-        Readout::Series(_) => None,
+        Readout::Series(_) | Readout::Recent(_) => None,
     }
 }
 

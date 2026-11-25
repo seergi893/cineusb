@@ -3,7 +3,7 @@ use super::{DetailKey, continuity, directory_stamps, disk, history_prefix, list_
     media_folder_score, read_history, system_mount, unpack_progress, volume_facts, Kind, Volume, VolumeFacts,
     FAVORITE, WATCHED};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +21,8 @@ pub(super) struct Video {
     pub path: PathBuf,
     pub size: u64,
     pub modified: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    added: Option<u64>,
     pub show: Option<PathBuf>,
     category: usize,
 }
@@ -116,6 +118,23 @@ fn scan(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBoo
     scan_folders(volume, identity, favorites, vec![(volume.path.clone(), 0, None)], stop)
 }
 
+fn scan_with_additions(volume: &Volume, identity: &str, favorites: &[PathBuf], stop: &AtomicBool,
+    previous: Option<&[Video]>) -> io::Result<Inventory> {
+    let mut inventory = scan(volume, identity, favorites, stop)?;
+    if let Some(previous) = previous {
+        let previous_by_path: HashMap<_, _> = previous.iter()
+            .map(|video| (video.path.as_path(), video.added)).collect();
+        // One detection date for all files found in the same pass. Keep it newer
+        // than the last batch even if the system clock repeats or moves back.
+        let added = previous.iter().filter_map(|video| video.added).max()
+            .map_or(inventory.checked, |last| inventory.checked.max(last.saturating_add(1)));
+        for video in &mut inventory.videos {
+            video.added = previous_by_path.get(video.path.as_path()).copied().unwrap_or(Some(added));
+        }
+    }
+    Ok(inventory)
+}
+
 fn scan_folders(volume: &Volume, identity: &str, favorites: &[PathBuf],
     mut folders: Vec<(PathBuf, usize, Option<PathBuf>)>, stop: &AtomicBool) -> io::Result<Inventory> {
     let mut videos = Vec::new();
@@ -171,7 +190,7 @@ fn scan_folders(volume: &Volume, identity: &str, favorites: &[PathBuf],
                 }
                 else { stats.movies += 1; }
                 videos.push(Video { path: relative, size: entry.size.unwrap_or(0), modified: entry.modified.unwrap_or(0),
-                    show: relative_show, category });
+                    added: None, show: relative_show, category });
             }
         }
     }
@@ -369,7 +388,7 @@ pub(super) fn next_listed_episode(folder: &super::Folder, current: &Path, show: 
     let show = show.and_then(|path| path.strip_prefix(&folder.volume.path).ok()).map(Path::to_path_buf);
     let videos = folder.entries.iter().filter(|entry| entry.kind == Kind::Video).map(|entry| Video {
         path: relative_folder.join(&entry.name), size: entry.size.unwrap_or_default(),
-        modified: entry.modified.unwrap_or_default(), show: show.clone(), category: 0,
+        modified: entry.modified.unwrap_or_default(), added: None, show: show.clone(), category: 0,
     }).collect();
     let drive = Drive { volume: folder.volume.clone(), facts: (None, Some(identity.into())),
         stats: None, videos, history: None };
@@ -402,6 +421,36 @@ fn item(drive: &Drive, video: &Video, show: Option<&str>, favorite: bool, progre
     let detail_key = (path.clone(), Some(video.size), Some(video.modified));
     Item { volume: drive.volume.clone(), path, title, favorite, progress, detail_key,
         episode: numbers(video).map(|e| (e.season, e.first)), show: show.is_some() }
+}
+
+#[derive(Debug)]
+pub(super) struct Recent {
+    pub item: Item,
+    pub folder: Option<PathBuf>,
+}
+
+pub(super) fn recent(drives: &[Drive]) -> Vec<Recent> {
+    let mut latest: Vec<(u64, Option<SeriesKey>, Recent)> = Vec::with_capacity(4);
+    for drive in drives {
+        for video in &drive.videos {
+            let Some(added) = video.added else { continue };
+            if latest.len() == 3 && latest.last().is_some_and(|entry| entry.0 > added) { continue; }
+            let series = video.show.as_ref().map(|folder| SeriesKey { folder: folder.clone(), flat_title: None })
+                .or_else(|| SeriesKey::for_video(video));
+            if let Some(previous) = series.as_ref().and_then(|key| latest.iter().position(|(_, existing, recent)|
+                existing.as_ref() == Some(key) && recent.item.volume == drive.volume)) {
+                if latest[previous].0 >= added { continue; }
+                latest.remove(previous);
+            }
+            let folder = series.as_ref().map(|key| drive.volume.path.join(&key.folder));
+            let title = series.as_ref().and_then(|key| key.title(video));
+            let item = item(drive, video, title, false, 0);
+            latest.push((added, series, Recent { item, folder }));
+            latest.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.item.path.cmp(&b.2.item.path)));
+            latest.truncate(3);
+        }
+    }
+    latest.into_iter().map(|(_, _, recent)| recent).collect()
 }
 
 fn verified_recommendations(drive: &mut Drive, stop: &AtomicBool) -> io::Result<Vec<Item>> {
@@ -444,7 +493,10 @@ pub(super) fn load_demo(volumes: Vec<Volume>, history: BTreeMap<String, u64>, st
     let favorites: Vec<_> = history.iter().filter(|(_, value)| **value == FAVORITE)
         .filter_map(|(key, _)| record_path(key, identity))
         .filter(|path| !super::is_video_path(path)).map(|path| volume.path.join(path)).collect();
-    let inventory = scan(&volume, identity, &favorites, stop)?;
+    let mut inventory = scan(&volume, identity, &favorites, stop)?;
+    for video in &mut inventory.videos {
+        video.added = Some(video.modified.max(0) as u64);
+    }
     let drive = Drive { volume, facts: super::demo::facts(), stats: Some(inventory.stats),
         videos: inventory.videos, history: Some(history) };
     let mut items = recommendations(&drive);
@@ -506,7 +558,9 @@ pub(super) fn load(
         }
         if refresh || inventory.as_ref().is_none_or(|value| value.used_bytes != used_bytes || value.favorite_series != relative_favorites
             || inventory_changed(&volume, value, stop).unwrap_or(true)) {
-                match scan(&volume, identity.as_deref().unwrap_or("volatile"), &favorites, stop) {
+                let previous = cached_preview.as_ref().map(|(drive, _)| drive.videos.as_slice())
+                    .or_else(|| inventory.as_ref().map(|value| value.videos.as_slice()));
+                match scan_with_additions(&volume, identity.as_deref().unwrap_or("volatile"), &favorites, stop, previous) {
                     Ok(mut value) => {
                         value.used_bytes = used_bytes;
                         if identity.is_some() { save(&value); }
@@ -556,6 +610,58 @@ mod usb_browser_tests {
     fn drive(volume: Volume, history: BTreeMap<String, u64>) -> Drive {
         let inventory = scan(&volume, "uuid:test", &[], &AtomicBool::new(false)).unwrap();
         Drive { volume, facts: (None, Some("uuid:test".into())), stats: Some(inventory.stats), videos: inventory.videos, history: Some(history) }
+    }
+
+    #[test]
+    fn recent_uses_the_latest_episode_once_per_series_and_limits_the_row() {
+        let (root, volume) = fixture("cineusb-recent-series");
+        let mut disk = drive(volume, BTreeMap::new());
+        for video in &mut disk.videos {
+            video.added = Some(if video.path.ends_with("Show S03E01.mkv") { 30 }
+                else if video.path.ends_with("Show S02E01.mkv") { 20 }
+                else { 10 });
+        }
+        let latest = recent(&[disk]);
+        assert!(latest.len() <= 3);
+        assert_eq!(latest[0].item.episode, Some((3, 1)));
+        let folder = latest[0].folder.as_ref().unwrap();
+        assert!(latest[0].item.path.starts_with(folder));
+        assert_eq!(latest.iter().filter(|entry| entry.folder.as_ref() == Some(folder)).count(), 1);
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn recent_shows_two_new_series_and_a_movie_after_reconnecting() {
+        let (root, volume) = fixture("cineusb-recent-reconnect");
+        let stop = AtomicBool::new(false);
+        let baseline = scan(&volume, "uuid:test", &[], &stop).unwrap();
+        let baseline: Inventory = serde_json::from_slice(&serde_json::to_vec(&baseline).unwrap()).unwrap();
+        assert!(baseline.videos.iter().all(|video| video.added.is_none()));
+        for name in [
+            "Sèries/Serie nueva A/Season 1/Show A S01E01.mkv",
+            "Sèries/Serie nueva A/Season 1/Show A S01E02.mkv",
+            "Sèries/Serie nueva B/Show B S01E01.mkv",
+            "Pel·lícules/Película nueva.mkv",
+        ] {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let file = std::fs::File::create(path).unwrap();
+            file.set_modified(UNIX_EPOCH).unwrap();
+        }
+        assert!(inventory_changed(&volume, &baseline, &stop).unwrap());
+        let updated = scan_with_additions(&volume, "uuid:test", &[], &stop, Some(&baseline.videos)).unwrap();
+        let cached: Inventory = serde_json::from_slice(&serde_json::to_vec(&updated).unwrap()).unwrap();
+        assert!(!inventory_changed(&volume, &cached, &stop).unwrap());
+        let rescanned = scan_with_additions(&volume, "uuid:test", &[], &stop, Some(&cached.videos)).unwrap();
+        assert!(cached.videos.iter().zip(&rescanned.videos).all(|(before, after)| before.added == after.added));
+        let disk = Drive { volume, facts: (None, Some("uuid:test".into())),
+            stats: Some(cached.stats), videos: cached.videos, history: None };
+        let latest = recent(std::slice::from_ref(&disk));
+        let folders: BTreeSet<_> = latest.iter().filter_map(|entry| entry.folder.clone()).collect();
+        assert_eq!(folders, BTreeSet::from([root.join("Sèries/Serie nueva A"), root.join("Sèries/Serie nueva B")]));
+        assert_eq!(latest.iter().filter(|entry| entry.folder.is_none()).map(|entry| entry.item.path.clone()).collect::<Vec<_>>(),
+            vec![root.join("Pel·lícules/Película nueva.mkv")]);
+        plx_base::testscratch::remove_tree(&root);
     }
 
     #[test]

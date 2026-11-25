@@ -5,6 +5,7 @@ mod disk;
 mod demo;
 mod series;
 mod home;
+mod home_screen;
 mod media_card;
 mod details_cache;
 
@@ -97,7 +98,14 @@ fn unpack_progress(value: u64) -> (u64, u64) {
 
 const TOP: f32 = 284.0;
 const MEDIA_GRID_TOP: f32 = 204.0;
-const HOME_GRID_TOP: f32 = 326.0;
+const HOME_GRID_TOP: f32 = 308.0;
+const HOME_HEADER_TOP: f32 = 252.0;
+const HOME_RECENT_TOP: f32 = 616.0;
+const HOME_CARD_W: f32 = 428.0;
+const HOME_CARD_H: f32 = 224.0;
+const HOME_CARD_PITCH: f32 = 446.0;
+const HOME_DISK_X: f32 = 1450.0;
+const HOME_DISK_BOTTOM: f32 = HOME_RECENT_TOP + HOME_CARD_H;
 const GRID_BOTTOM: f32 = 965.0;
 const GRID_WIDTH: f32 = 1920.0 - 2.0 * plx_ui::consts::MARGIN_X;
 
@@ -469,6 +477,13 @@ struct PlayingVideo {
 
 type DetailKey = (PathBuf, Option<u64>, Option<i64>);
 
+enum HomeFocus {
+    Drive(Volume),
+    Resume(PathBuf),
+    Recent(PathBuf),
+    More,
+}
+
 struct CardLabel {
     show: Option<PathBuf>,
     movie: bool,
@@ -567,6 +582,11 @@ pub(super) struct Browser {
     series_cache: BTreeMap<PathBuf, SeriesCacheEntry>,
     dashboard: home::Dashboard,
     inventory_paths: BTreeMap<PathBuf, (usize, usize)>,
+    home_recent: Vec<home::Recent>,
+    home_resume_start: usize,
+    home_resume_scroll: Spring,
+    home_disk_start: usize,
+    home_all: bool,
     card_labels: std::cell::RefCell<BTreeMap<DetailKey, CardLabel>>,
     home_job: Option<HomeRequest>,
     home_refresh: Instant,
@@ -638,6 +658,7 @@ impl Browser {
             media_art: Default::default(),
             dashboard: home::Dashboard { drives: vec![], items: vec![], refreshed_folder: None }, home_job: None,
             inventory_paths: BTreeMap::new(), card_labels: Default::default(),
+            home_recent: Vec::new(), home_resume_start: 0, home_resume_scroll: Spring::at(0.0), home_disk_start: 0, home_all: false,
             home_refresh: now, home_first_open: Some(now), home_force_refresh: false,
             manual_refresh: None, refresh_notice: None,
             facts: None, facts_job: None, prepared: None, ready: None, playing: None,
@@ -657,7 +678,9 @@ impl Browser {
     }
 
     fn len(&self) -> usize {
-        if self.drive_picker() { return self.scan.volumes.len() + self.dashboard.items.len(); }
+        if self.drive_picker() {
+            return self.home_more_index() + usize::from(self.dashboard.items.len() > 3);
+        }
         if self.tab_waiting_for_volume() { return 0; }
         if let Some(view) = self.media_cards() {
             return if self.documental_folder_picker(view) { view.paths.len() } else { 0 };
@@ -940,7 +963,7 @@ impl Browser {
                     // A temporary Homebrew failure must not bring back an old mount from the jail.
                     if (!self.scan.system || scan.system)
                         && (self.scan != scan || self.status == tr("Buscando discos USB…", "Buscant discos USB…")) {
-                        let selected = self.scan.volumes.get(self.selected).cloned();
+                        let home_focus = self.home_focus();
                         self.details.clear();
                         self.refresh_movie_grid();
                         self.invalidate_series_counts();
@@ -964,8 +987,7 @@ impl Browser {
                             video = None;
                         }
                         if self.drive_picker() {
-                            let index = selected.and_then(|volume| self.scan.volumes.iter().position(|item| *item == volume));
-                            self.select(index.unwrap_or_default(), true);
+                            self.restore_home_selection(home_focus);
                         }
                         if self.status == tr("Buscando discos USB…", "Buscant discos USB…") { self.status.clear(); }
                         changed = true;
@@ -1031,6 +1053,13 @@ impl Browser {
         changed |= self.update_video_details();
         changed |= self.update_series_counts(now);
         changed |= self.update_home(now);
+        if self.drive_picker() && !self.home_all {
+            let target = self.home_resume_start.min(self.dashboard.items.len().saturating_sub(3)) as f32 * HOME_CARD_PITCH;
+            let previous = self.home_resume_scroll.pos;
+            self.home_resume_scroll.step(target, 240.0, dt);
+            self.home_resume_scroll.land(target, dt);
+            changed |= previous != self.home_resume_scroll.pos;
+        }
         if self.demo.is_none() && self.drive_picker() && !self.dashboard.items.is_empty() {
             if let Some(opened) = self.home_first_open.take() {
                 plx_base::eventlog::log(&format!("cineusb: first Continue Watching cards ready after {} ms", opened.elapsed().as_millis()));
@@ -1085,11 +1114,7 @@ impl Browser {
     }
 
     fn scroll_target(&self) -> f32 {
-        if self.drive_picker() {
-            let card = self.home_rect(self.selected);
-            return self.scroll.pos.clamp((card.y + card.h - GRID_BOTTOM + 22.0).max(0.0),
-                (card.y - HOME_GRID_TOP).max(0.0));
-        }
+        if self.drive_picker() { return 0.0; }
         let grid = self.grid();
         let row = self.selected / grid.cols;
         let viewport = GRID_BOTTOM - self.grid_top() - 22.0;
@@ -1153,40 +1178,9 @@ impl Browser {
         grid_geometry(self.len(), self.settings.cards, self.media_library())
     }
 
-    fn home_continue_top(&self) -> f32 {
-        HOME_GRID_TOP + self.scan.volumes.len().div_ceil(3) as f32 * 218.0 + 60.0
-    }
-
-    fn home_rect(&self, index: usize) -> Rect {
-        let drives = self.scan.volumes.len();
-        let (index, top, pitch, height) = if index < drives {
-            (index, HOME_GRID_TOP, 218.0, 190.0)
-        } else {
-            let height = [210.0, 190.0, 230.0][self.settings.cards];
-            (index.saturating_sub(drives), self.home_continue_top(), height + 28.0, height)
-        };
-        Rect::new(plx_ui::consts::MARGIN_X + (index % 3) as f32 * 582.0,
-            top + (index / 3) as f32 * pitch, 564.0, height)
-    }
-
     fn visible_cards(&self) -> std::ops::Range<usize> {
         if self.drive_picker() { return 0..self.len(); }
         poster_grid::visible_in(&self.grid(), self.len(), self.grid_top(), self.scroll.pos)
-    }
-
-    fn home_neighbor(&self, dir: Dir) -> Option<usize> {
-        let drives = self.scan.volumes.len();
-        let (offset, count) = if self.selected < drives { (0, drives) } else { (drives, self.dashboard.items.len()) };
-        let index = self.selected - offset;
-        if let Some(next) = poster_grid::neighbour(index, count, 3, dir) { return Some(offset + next); }
-        match dir {
-            Dir::Down if offset == 0 && !self.dashboard.items.is_empty() => Some(drives + (index % 3).min(self.dashboard.items.len() - 1)),
-            Dir::Up if offset == drives && drives > 0 => {
-                let start = (drives - 1) / 3 * 3;
-                Some((start + index % 3).min(drives - 1))
-            }
-            _ => None,
-        }
     }
 
     fn media_series_name(&self) -> Option<std::borrow::Cow<'_, str>> {
@@ -1234,11 +1228,7 @@ impl Browser {
     }
 
     fn tile_rect(&self, index: usize) -> Rect {
-        if self.drive_picker() {
-            let mut card = self.home_rect(index);
-            card.y -= self.scroll.pos;
-            return card;
-        }
+        if self.drive_picker() { return self.home_rect(index); }
         let mut grid = self.grid();
         if !self.media_library() {
             let first = index / grid.cols * grid.cols;
@@ -1457,7 +1447,7 @@ impl Browser {
                 let volumes: Vec<_> = self.scan.volumes.iter()
                     .filter(|volume| self.identity(volume).is_some_and(|identity| history_prefix(identity) == prefix))
                     .cloned().collect();
-                let selected_path = self.home_item().map(|item| item.path.clone());
+                let selected_path = self.home_focus();
                 self.dashboard.items.retain(|item| {
                     !item.favorite || !volumes.contains(&item.volume) || !item.path.starts_with(item.volume.path.join(&relative))
                 });
@@ -1823,6 +1813,7 @@ impl Browser {
 
     fn index_inventory_paths(&mut self) {
         self.inventory_paths.clear();
+        self.home_recent = home::recent(&self.dashboard.drives);
         for (drive_index, drive) in self.dashboard.drives.iter().enumerate() {
             for (video_index, video) in drive.videos.iter().enumerate() {
                 self.inventory_paths.insert(drive.volume.path.join(&video.path), (drive_index, video_index));
@@ -1850,7 +1841,10 @@ impl Browser {
 
     fn card_file(&self, index: usize) -> Option<(&Volume, DetailKey)> {
         if self.drive_picker() {
-            let item = self.dashboard.items.get(index.checked_sub(self.scan.volumes.len())?)?;
+            if self.home_rect(index).w == 0.0 || index == self.home_more_index() { return None; }
+            let position = index.checked_sub(self.scan.volumes.len())?;
+            let item = self.dashboard.items.get(position)
+                .or_else(|| self.home_recent.get(position.checked_sub(self.dashboard.items.len())?).map(|recent| &recent.item))?;
             return Some((&item.volume, item.detail_key.clone()));
         }
         if let Some(view) = self.favorite_cards() {
@@ -2045,15 +2039,6 @@ impl Browser {
         }
     }
 
-    fn restore_home_selection(&mut self, selected_path: Option<PathBuf>) {
-        if !self.drive_picker() { return; }
-        if let Some(path) = selected_path {
-            self.selected = self.dashboard.items.iter().position(|item| item.path == path)
-                .map(|index| index + self.scan.volumes.len()).unwrap_or(0);
-        }
-        self.selected = self.selected.min(self.len().saturating_sub(1));
-    }
-
     fn update_home(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if self.manual_refresh.as_ref().is_some_and(|volume| !self.scan.volumes.contains(volume)) {
@@ -2062,10 +2047,12 @@ impl Browser {
             self.refresh_notice = Some((tr("Actualización interrumpida: USB desconectado.", "Actualització interrompuda: USB desconnectat.").into(), now));
         }
         let had_missing_drive = self.dashboard.drives.iter().any(|drive| !self.scan.volumes.contains(&drive.volume));
+        let previous_focus = had_missing_drive.then(|| self.home_focus()).flatten();
         self.dashboard.drives.retain(|drive| self.scan.volumes.contains(&drive.volume));
         self.dashboard.items.retain(|item| self.scan.volumes.contains(&item.volume));
         if had_missing_drive {
             self.index_inventory_paths();
+            self.restore_home_selection(previous_focus);
             self.home_refresh = now;
             changed = true;
         }
@@ -2080,7 +2067,7 @@ impl Browser {
             };
             let result = job.reply.try_recv();
             if !incoming.is_empty() {
-                let selected_path = self.home_item().map(|item| item.path.clone());
+                let selected_path = self.home_focus();
                 for item in incoming {
                     if let Some(existing) = self.dashboard.items.iter_mut().find(|existing|
                         existing.volume == item.volume && existing.path == item.path) {
@@ -2101,7 +2088,7 @@ impl Browser {
                     if job.manual { self.manual_refresh = None; changed = true; }
                     if !job.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                         if let Ok(Ok(mut dashboard)) = result {
-                            let selected_path = self.home_item().map(|item| item.path.clone());
+                            let selected_path = self.home_focus();
                             for drive in &dashboard.drives {
                                 if let Some((identity, records)) = drive.facts.1.as_ref().zip(drive.history.as_ref()) {
                                     let prefix = history_prefix(identity);
@@ -2271,6 +2258,11 @@ impl Browser {
 
     fn volume(&self) -> Option<&Volume> {
         if let Some(item) = self.home_item() { return Some(&item.volume); }
+        if self.drive_picker() && !self.home_all {
+            if let Some(recent) = self.selected.checked_sub(self.home_recent_offset()).and_then(|index| self.home_recent.get(index)) {
+                return Some(&recent.item.volume);
+            }
+        }
         self.media_cards().map(|view| &view.volume)
             .or_else(|| self.favorite_cards().map(|view| &view.volume))
             .or_else(|| self.folders.last().map(|folder| &folder.volume))
@@ -2554,7 +2546,20 @@ impl Browser {
 
     fn select(&mut self, index: usize, snap: bool) {
         self.selected = index.min(self.len().saturating_sub(1));
+        if self.drive_picker() {
+            let drives = self.scan.volumes.len();
+            if self.selected < drives {
+                self.home_disk_start = self.home_disk_start.clamp(self.selected.saturating_sub(1), self.selected);
+            } else if self.selected < self.home_recent_offset() {
+                let position = self.selected - drives;
+                self.home_resume_start = if self.home_all { position / 9 * 9 }
+                    else { self.home_resume_start.clamp(position.saturating_sub(2), position) };
+            }
+        }
         if snap {
+            if self.drive_picker() {
+                self.home_resume_scroll = Spring::at(self.home_resume_start.min(self.dashboard.items.len().saturating_sub(3)) as f32 * HOME_CARD_PITCH);
+            }
             self.scroll = Spring::at(self.scroll_target());
             self.pop.reset();
         }
@@ -2568,6 +2573,24 @@ impl Browser {
         if let Some(item) = self.home_item().cloned() {
             self.play_video_at(&item.volume, item.path, true);
             return;
+        }
+        if self.drive_picker() && self.selected == self.home_more_index() && self.dashboard.items.len() > 3 {
+            self.home_all = !self.home_all;
+            self.home_resume_start = 0;
+            self.select(self.scan.volumes.len(), true);
+            return;
+        }
+        if self.drive_picker() && !self.home_all {
+            if let Some(recent) = self.selected.checked_sub(self.home_recent_offset()).and_then(|index| self.home_recent.get(index)) {
+                let volume = recent.item.volume.clone();
+                if let Some(folder) = recent.folder.clone() {
+                    self.open_folder(volume, folder);
+                } else {
+                    self.dialog = Some(Dialog::Video { volume, path: recent.item.path.clone() });
+                    self.option = 0;
+                }
+                return;
+            }
         }
         if self.tab_waiting_for_volume() {
             self.open_nav_tab(self.nav_tab);
@@ -2707,6 +2730,11 @@ impl Browser {
             return;
         }
         if std::mem::take(&mut self.loading_favorites) && self.favorite_view.is_none() { self.set_favorite_section(false); }
+        if self.drive_picker() && self.home_all {
+            self.home_all = false;
+            self.select(self.home_more_index(), true);
+            return;
+        }
         if self.action.take().is_some() { return; }
         if self.selection.take().is_some() { self.status.clear(); return; }
         if self.retire_read() {
@@ -2774,10 +2802,14 @@ impl Browser {
     fn card_at(&self, x: f32, y: f32) -> Option<usize> {
         let top = self.grid_top();
         let bleed = if self.drive_picker() { 26.0 } else { 14.0 };
-        if y < top - bleed || y >= GRID_BOTTOM { return None; }
+        if !self.drive_picker() && (y < top - bleed || y >= GRID_BOTTOM) { return None; }
         // Keep hit targets stable while the existing focus spring scales the artwork.
         self.visible_cards()
-            .find(|&index| hit(self.tile_rect(index), x, y))
+            .find(|&index| {
+                if self.drive_picker() && index >= self.scan.volumes.len() && index < self.home_recent_offset()
+                    && (x < plx_ui::consts::MARGIN_X || x >= HOME_DISK_X - 24.0) { return false; }
+                hit(self.tile_rect(index), x, y)
+            })
     }
 
     fn pointer(&mut self, x: f32, y: f32) -> bool {
@@ -2999,7 +3031,8 @@ impl Browser {
             return;
         }
         let dir = match key {
-            Key::Up if self.selected < self.grid().cols && (!self.drive_picker() || self.selected < self.scan.volumes.len()) => {
+            Key::Up if (self.drive_picker() && self.home_neighbor(Dir::Up).is_none())
+                || (!self.drive_picker() && self.selected < self.grid().cols) => {
                 if !self.focus_movie_filter() { self.nav_focus = Some(self.nav_tab); }
                 return;
             }
@@ -3181,18 +3214,16 @@ impl Browser {
                 draw_line(p, message, Rect::new(x, 380.0, width, 70.0), theme::size::BODY, false);
             }
         } else {
-            let top = self.grid_top();
-            let bleed = if home { 26.0 } else { 14.0 };
-            p.clip(Rect::new(0.0, top - bleed, 1920.0, GRID_BOTTOM - top + bleed));
-            if home && !self.dashboard.items.is_empty() {
-                draw_line(p, tr("Continuar viendo", "Continua mirant"),
-                    Rect::new(x, self.home_continue_top() - 46.0 - self.scroll.pos, width, 34.0),
-                    theme::size::HEADLINE, true);
+            if home {
+                self.draw_home_tiles(p, x);
+            } else {
+                let top = self.grid_top();
+                p.clip(Rect::new(0.0, top - 14.0, 1920.0, GRID_BOTTOM - top + 14.0));
+                let cells = self.visible_cards();
+                for i in cells.filter(|index| *index != self.selected) { self.draw_tile(p, i, false); }
+                self.draw_tile(p, self.selected, self.grid_has_focus());
+                p.clip_clear();
             }
-            let cells = self.visible_cards();
-            for i in cells.filter(|index| *index != self.selected) { self.draw_tile(p, i, false); }
-            self.draw_tile(p, self.selected, self.grid_has_focus());
-            p.clip_clear();
         }
         let storage = self.facts.as_ref().filter(|(disk, _)| !home && self.volume() == Some(disk))
             .and_then(|(disk, (capacity, _))| capacity.map(|facts| (disk, facts)));
@@ -3260,20 +3291,16 @@ impl Browser {
                 format!("{} {}", marked.len(), tr("carpetas seleccionadas", "carpetes seleccionades"))
             }
         });
-        let section = breadcrumb.as_deref().unwrap_or(if home { tr("Discos conectados", "Discos connectats") } else { "" });
-        let section_y = if home { 220.0 } else { 191.0 };
-        draw_line(p, section, Rect::new(x, section_y, width, 34.0),
-            if home { theme::size::HEADLINE } else { theme::size::BODY }, home);
-        if home && self.library_scanning() {
-            let cx = x + TtfMeasure.width_str(section, theme::size::HEADLINE, true) + 28.0;
-            widgets::Spinner::new(cx, section_y + 17.0, 10.0).phase(self.scan_phase)
-                .tint(self.accent()).draw(&Env::inert(), p);
-        }
         if home {
+            draw_line(p, detail, Rect::new(x, 210.0, 920.0, 34.0), theme::size::CAPTION, false);
             if let Some((notice, _)) = &self.refresh_notice {
                 draw_line(p, notice, Rect::new(96.0, 956.0, 920.0, 32.0), theme::size::MICRO, false);
             }
+            return;
         }
+        let section = breadcrumb.as_deref().unwrap_or("");
+        let section_y = 191.0;
+        draw_line(p, section, Rect::new(x, section_y, width, 34.0), theme::size::BODY, false);
         draw_line(p, count.as_deref().unwrap_or(detail), Rect::new(x, section_y + 35.0, 920.0, 37.0), theme::size::CAPTION, false);
     }
 
@@ -3745,47 +3772,9 @@ impl Browser {
         draw_button(p, rect.scaled(scale), label, focused, tone, glyph, self.accent());
     }
 
-    fn draw_home_card(&self, p: Painter, index: usize, card: Rect, radius: f32, lift: f32) {
-        p.shadow_outside(card, radius, 16.0, 6.0, theme::CARD_SHADOW);
-        if lift > 0.0 {
-            p.shadow_outside(card, radius, 21.0, 5.0, theme::with_a(self.accent(), lift * 0.24));
-        }
-        p.rect_sheened(card, radius, theme::USB_DRIVE_TOP, theme::USB_DRIVE_BOTTOM);
-        if lift > 0.0 {
-            p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, theme::with_a(self.accent(), lift));
-        }
-        let x = card.x + 22.0;
-        let width = card.w - 44.0;
-        if let Some(volume) = self.scan.volumes.get(index) {
-            let drive = self.dashboard.drives.iter().find(|drive| &drive.volume == volume);
-            let name = tr("Disco USB", "Disc USB");
-            draw_glyph(p, Glyph::Drive, Rect::new(card.x + card.w - 61.0, card.y + 16.0, 37.0, 37.0), theme::TEXT_PRIMARY);
-            draw_line(p, name, Rect::new(x, card.y + 12.0, width - 50.0, 36.0), theme::size::LABEL, true);
-            let stats = drive.and_then(|drive| drive.stats).map(|stats| format!("{} {} · {} {} · {} {}",
-                stats.movies, tr("películas", "pel·lícules"), stats.series, tr("series", "sèries"),
-                stats.documentaries, tr("documentales", "documentals")));
-            let text = stats.as_deref().unwrap_or(tr("Leyendo la biblioteca…", "Llegint la biblioteca…"));
-            plx_ui::text_view::TextView::new(text, theme::size::MICRO, theme::TEXT_SECONDARY)
-                .with_measure(&TtfMeasure).break_long_words().max_lines(2)
-                .draw(p, Rect::new(x, card.y + 53.0, width, 52.0));
-            let capacity = drive.and_then(|drive| drive.facts.0).or_else(|| self.facts.as_ref()
-                .filter(|(current, _)| current == volume).and_then(|(_, facts)| facts.0));
-            if let Some((total, used, free, _)) = capacity {
-                let used_text = format!("{} {} / {}", tr("Usado", "Utilitzat"), video_size(used), video_size(total));
-                let free_text = format!("{} {}", video_size(free), tr("libres", "lliures"));
-                draw_line(p, &used_text, Rect::new(x, card.y + 108.0, width, 28.0), theme::size::MICRO, false);
-                draw_line(p, &free_text, Rect::new(x, card.y + 137.0, width, 28.0), theme::size::MICRO, false);
-                let fraction = if total == 0 { 0.0 } else { (used as f64 / total as f64).clamp(0.0, 1.0) as f32 };
-                let bar = Rect::new(x, card.y + card.h - 14.0, width, 4.0);
-                p.rrect(bar, 2.0, 2.0, theme::RAIL_TRACK);
-                if fraction > 0.0 { p.rrect(Rect::new(bar.x, bar.y, bar.w * fraction, bar.h), 2.0, 2.0, self.accent()); }
-            }
-            return;
-        }
-    }
-
     fn draw_tile(&self, p: Painter, index: usize, focused: bool) {
         let frame = self.tile_rect(index);
+        if frame.w == 0.0 { return; }
         let scale = self.pop.scale(index, focused && self.action.is_none(), &USB_STYLE);
         let card = frame.scaled(scale);
         let radius = USB_STYLE.tile_radius(card, scale);
@@ -3793,6 +3782,21 @@ impl Browser {
         if self.drive_picker() {
             if let Some(item) = index.checked_sub(self.scan.volumes.len()).and_then(|index| self.dashboard.items.get(index)) {
                 self.draw_resume_card(p, item, media_card::Frame { rect: card, radius, lift, accent: self.accent() });
+            } else if index == self.home_more_index() && self.dashboard.items.len() > 3 {
+                let label = if self.home_all { tr("Volver", "Torna").into() }
+                    else { format!("{} ({})", tr("Ver todo", "Veure tot"), self.dashboard.items.len()) };
+                self.draw_button(p, frame, &label, focused, ButtonTone::Default, None);
+            } else if let Some(recent) = index.checked_sub(self.home_recent_offset()).and_then(|position| self.home_recent.get(position)) {
+                let item = &recent.item;
+                let details = self.details.get(&item.detail_key);
+                let title = if recent.folder.is_some() { clean_series_name(&item.title) }
+                    else { video_title(&item.path, details.and_then(|details| details.title.as_deref())) };
+                self.media_art.draw(p, media_card::Frame { rect: card, radius, lift, accent: self.accent() }, media_card::Card {
+                    title: &title, category: Self::category(&item.volume, &item.path, recent.folder.is_some()),
+                    formats: details.map_or_else(Default::default, |details| media_card::Formats::file(details, self.settings.spanish_audio)),
+                    show_category: false, readout: Readout::Recent(details.and_then(|details| details.duration_secs)),
+                    fraction: 0.0, watched: false, favorite: false,
+                });
             } else {
                 self.draw_home_card(p, index, card, radius, lift);
             }
@@ -5026,6 +5030,28 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn home_keeps_fixed_card_sizes_for_zero_through_four_recommendations() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(volume.clone());
+        for count in 0..=4 {
+            browser.dashboard.items = (0..count).map(|episode| {
+                let path = volume.path.join(format!("Show S01E{episode:02}.mkv"));
+                home::Item { volume: volume.clone(), path: path.clone(), title: "Show".into(),
+                    episode: Some((1, episode)), show: true, favorite: true, progress: 0,
+                    detail_key: (path, None, None) }
+            }).collect();
+            assert_eq!(browser.len(), 1 + count as usize + usize::from(count > 3));
+            for index in 1..=count.min(3) as usize {
+                let tile = browser.home_rect(index);
+                assert_eq!((tile.w, tile.h), (HOME_CARD_W, HOME_CARD_H));
+                assert!(tile.x + tile.w < browser.home_rect(0).x);
+            }
+            assert_eq!(browser.home_rect(0).y + browser.home_rect(0).h, HOME_DISK_BOTTOM);
+        }
+    }
+
+    #[test]
     fn home_recommendations_share_pointer_and_dpad_geometry() {
         let mut browser = Browser::new();
         let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
@@ -5035,8 +5061,8 @@ mod usb_browser_tests {
             home::Item { volume: volume.clone(), path: path.clone(), title: "Una sèrie".into(),
                 episode: Some((2, episode)), show: true, favorite: true, progress: 0, detail_key: (path, None, None) }
         }).collect();
-        assert_eq!(browser.len(), 6);
-        browser.key(Key::Down, false);
+        assert_eq!(browser.len(), 7);
+        browser.key(Key::Left { alt: false }, false);
         assert_eq!(browser.selected, 1);
         assert_eq!(browser.home_item().unwrap().episode, Some((2, 1)));
         browser.key(Key::Right { alt: false }, false);
@@ -5045,12 +5071,17 @@ mod usb_browser_tests {
         assert!(browser.pointer(target.x + 30.0, target.y + 30.0));
         assert_eq!(browser.selected, 3);
         browser.key(Key::Up, false);
-        assert_eq!(browser.selected, 0);
+        assert_eq!(browser.selected, browser.home_more_index());
         assert!(browser.pending.is_none());
         assert!(browser.dialog.is_none());
         assert_eq!(browser.home_rect(1).x, plx_ui::consts::MARGIN_X);
-        assert_eq!(browser.home_rect(4).x, plx_ui::consts::MARGIN_X);
-        assert!(browser.home_rect(1).y > browser.home_rect(0).y + browser.home_rect(0).h);
+        assert_eq!(browser.home_rect(4).w, 0.0);
+        assert_eq!(browser.home_rect(0).y, HOME_HEADER_TOP);
+        browser.open();
+        assert!(browser.home_all);
+        assert_eq!(browser.home_rect(4).w, HOME_CARD_W);
+        browser.back();
+        assert!(!browser.home_all);
     }
 
     #[test]
@@ -6009,18 +6040,19 @@ mod usb_browser_tests {
     }
 
     #[test]
-    fn home_drive_cards_align_to_three_columns() {
+    fn home_drive_panel_keeps_every_usb_reachable() {
         let mut browser = Browser::new();
         browser.scan.volumes = (0..9).map(|index| Volume {
             path: format!("/tmp/usb/sda/sda{index}").into(), label: None, mount_id: None, system: false,
         }).collect();
-        assert_eq!(browser.grid().cols, 3);
-        for (first, last) in [(0, 2), (3, 5), (6, 8)] {
-            let left = browser.tile_rect(first);
-            let right = browser.tile_rect(last);
-            assert_eq!(left.x, plx_ui::consts::MARGIN_X);
-            assert!(right.x + right.w <= 1920.0 - plx_ui::consts::MARGIN_X);
-            assert_eq!(left.y, right.y);
+        for index in 0..9 {
+            assert_eq!(browser.selected, index);
+            let card = browser.tile_rect(index);
+            assert_eq!(card.x, HOME_DISK_X);
+            assert!(card.x + card.w <= 1920.0 - plx_ui::consts::MARGIN_X);
+            assert!(card.y >= HOME_HEADER_TOP && card.y + card.h <= HOME_DISK_BOTTOM);
+            assert_eq!(browser.card_at(card.x + 20.0, card.y + 20.0), Some(index));
+            browser.key(Key::Down, false);
         }
     }
 
