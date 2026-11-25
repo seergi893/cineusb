@@ -101,7 +101,7 @@ pub(super) enum Readout {
     File(Option<u64>),
     Recent(Option<u64>),
     Series(super::series::Counts),
-    Resume { episode: Option<(u32, u32)>, remaining: Option<u64> },
+    Resume { episode: Option<(u32, u32)>, remaining: Option<u64>, season_remaining: Option<usize> },
     Episode { number: Option<(u32, u32)>, duration: Option<u64> },
 }
 
@@ -219,47 +219,53 @@ const EPISODE_BADGE_PAD: f32 = 9.0;
 struct EpisodeBadge {
     season: String,
     episode: String,
-    season_size: i32,
-    episode_size: i32,
+    size: i32,
 }
 
 impl EpisodeBadge {
-    fn new((season, episode): (u32, u32), language: Language, compact: bool) -> Self {
-        let label = local(language, "Episodio", "Episodi", "Episode");
-        Self {
-            season: format!("T{season}"),
-            episode: format!("{label} {episode}"),
-            season_size: if compact { theme::size::USB_CARD_META_TIGHT } else { theme::size::USB_CARD_META },
-            episode_size: if compact { theme::size::USB_CARD_META } else { theme::size::MICRO },
-        }
+    fn new((season, episode): (u32, u32), language: Language, layout: &Layout, measure: &dyn Measure) -> Self {
+        let season_label = local(language, "Temporada", "Temporada", "Season");
+        let episode_label = local(language, "Episodio", "Episodi", "Episode");
+        let season = format!("{season_label} {season}");
+        let episode = format!("{episode_label} {episode}");
+        let budget = layout.formats_w - EPISODE_BADGE_PAD * 2.0;
+        let sizes = [theme::size::MICRO, theme::size::DIAGNOSTIC, theme::size::USB_CARD_META, theme::size::USB_CARD_META_TIGHT];
+        let size = sizes.into_iter().skip(if layout.compact { 2 } else { 0 })
+            .find(|&size| [&season, &episode].into_iter().all(|line| measure.width_str(line, size, true) <= budget))
+            .unwrap_or(theme::size::USB_CARD_META_TIGHT);
+        Self { season, episode, size }
     }
 
     fn rect(&self, title: Rect, title_h: f32, width: f32, measure: &dyn Measure) -> Rect {
-        let text_width = measure.width_str(&self.season, self.season_size, true)
-            .max(measure.width_str(&self.episode, self.episode_size, true));
+        let text_width = measure.width_str(&self.season, self.size, true)
+            .max(measure.width_str(&self.episode, self.size, true));
         Rect::new(title.x, title.y + title_h + 4.0, (text_width.ceil() + EPISODE_BADGE_PAD * 2.0).min(width),
-            (self.season_size + self.episode_size) as f32 + 12.0)
+            2.0 * self.size as f32 + 12.0)
     }
 
     fn draw(&self, p: Painter, rect: Rect) {
         let ink = theme::USB_FAVORITES;
         p.rrect(rect, 7.0, 7.0, theme::USB_FAVORITES_GROUND);
         p.rring(rect, 7.0, 1.0, theme::with_a(ink, 0.72));
-        let top = rect.y + 4.0;
-        let season_h = self.season_size as f32 + 2.0;
+        let line_h = self.size as f32 + 2.0;
         let x = rect.x + EPISODE_BADGE_PAD;
         let w = rect.w - EPISODE_BADGE_PAD * 2.0;
-        for (text, size, y, h) in [
-            (&self.season, self.season_size, top, season_h),
-            (&self.episode, self.episode_size, top + season_h, self.episode_size as f32 + 2.0),
-        ] {
-            let run = TtfMeasure.fit_line(text, w, size, true);
-            Label::new(run.as_ptr(), size, ink).bold().draw(p, Rect::new(x, y, w, h));
+        for (index, text) in [&self.season, &self.episode].into_iter().enumerate() {
+            let y = rect.y + 4.0 + index as f32 * line_h;
+            let run = TtfMeasure.fit_line(text, w, self.size, true);
+            Label::new(run.as_ptr(), self.size, ink).bold().draw(p, Rect::new(x, y, w, line_h));
         }
     }
 }
 
 impl Layout {
+    fn season_remaining_slot(&self, badge: Rect) -> (Rect, i32) {
+        let y = badge.y + badge.h + 4.0;
+        let height = (self.progress.y - y - 4.0).clamp(0.0, 26.0);
+        let size = if height >= 24.0 { theme::size::DIAGNOSTIC } else { theme::size::USB_CARD_META };
+        (Rect::new(badge.x, y, self.formats_w, height), size)
+    }
+
     fn art_below_formats(&self, formats_bottom: f32) -> Rect {
         if formats_bottom + 5.0 <= self.art.y { return self.art; }
         let top = formats_bottom + 5.0;
@@ -327,7 +333,7 @@ impl Art {
             _ => None,
         };
         let series_episode = card.category == Category::Series;
-        let episode_badge = number.filter(|_| series_episode).map(|number| EpisodeBadge::new(number, language, layout.compact));
+        let episode_badge = number.filter(|_| series_episode).map(|number| EpisodeBadge::new(number, language, &layout, &TtfMeasure));
         let resume_episode = series_episode && matches!(card.readout, Readout::Resume { .. });
 
         p.shadow_outside(rect, radius, 16.0, 6.0, theme::CARD_SHADOW);
@@ -347,6 +353,12 @@ impl Art {
         if let Some(badge) = episode_badge {
             let badge_rect = badge.rect(title_rect, header_h, layout.formats_w, &TtfMeasure);
             badge.draw(p, badge_rect);
+            if let Readout::Resume { season_remaining: Some(count), .. } = card.readout {
+                let (slot, size) = layout.season_remaining_slot(badge_rect);
+                let label = remaining_episodes_label(count, language);
+                let run = TtfMeasure.fit_line(&label, slot.w, size, true);
+                Label::new(run.as_ptr(), size, color).bold().draw(p, slot);
+            }
             if !wide { art = layout.art_below_formats(badge_rect.y + badge_rect.h); }
         } else if let Some((season, episode)) = number {
             let number = &format!("{season}×{episode:02}");
@@ -510,6 +522,17 @@ impl Art {
     }
 }
 
+fn remaining_episodes_label(count: usize, language: Language) -> String {
+    if count == 1 {
+        return local(language, "Queda 1 capítulo", "Queda 1 capítol", "1 episode left").into();
+    }
+    match language {
+        Language::Ca => format!("Queden {count} capítols"),
+        Language::Es => format!("Quedan {count} capítulos"),
+        _ => format!("{count} episodes left"),
+    }
+}
+
 fn resume_episode_footer(footer: Rect, remaining: &str, measure: &dyn Measure) -> (Rect, Option<Rect>) {
     if remaining.is_empty() {
         return (Rect::new(footer.x, footer.y, footer.w, 25.0), None);
@@ -639,13 +662,14 @@ mod usb_browser_tests {
                 for scale in [1.0, super::super::USB_STYLE.focus_scale] {
                     let layout = Layout::new(Rect::new(0.0, 0.0, grid.w * scale, grid.h * scale),
                         false, true, false, false, 26.0);
-                    let badge = EpisodeBadge::new((12, 103), language, layout.compact);
-                    assert_eq!(badge.season, "T12");
+                    let badge = EpisodeBadge::new((12, 103), language, &layout, &measure);
+                    assert_eq!(badge.season, "Temporada 12");
                     assert_eq!(badge.episode, label);
-                    assert!(badge.episode_size > badge.season_size);
                     let r = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
                     assert!(r.y >= layout.title.y + layout.title.h && r.x + r.w <= layout.title.x + layout.title.w);
-                    assert!(measure.width_str(label, badge.episode_size, true) + EPISODE_BADGE_PAD * 2.0 <= r.w);
+                    for line in [&badge.season, &badge.episode] {
+                        assert!(measure.width_str(line, badge.size, true) + EPISODE_BADGE_PAD * 2.0 <= r.w);
+                    }
                     let art = layout.art_below_formats(r.y + r.h);
                     assert!(r.y + r.h <= art.y && art.h > 0.0 && art.y + art.h < layout.progress.y);
                 }
@@ -660,9 +684,16 @@ mod usb_browser_tests {
             for scale in [1.0, super::super::USB_STYLE.focus_scale] {
                 let layout = Layout::new(Rect::new(0.0, 0.0, super::super::HOME_CARD_W * scale, height * scale),
                     true, false, true, false, 0.0);
-                let badge = EpisodeBadge::new((1, 2), Language::Ca, layout.compact);
-                let badge = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
-                assert!(badge.x + badge.w < layout.art.x && badge.y + badge.h < layout.progress.y);
+                let badge = EpisodeBadge::new((1, 2), Language::Ca, &layout, &measure);
+                let badge_rect = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
+                assert!(badge_rect.x + badge_rect.w < layout.art.x && badge_rect.y + badge_rect.h < layout.progress.y);
+                assert!(measure.width_str(&badge.season, badge.size, true) + EPISODE_BADGE_PAD * 2.0 <= badge_rect.w);
+                let (label, size) = layout.season_remaining_slot(badge_rect);
+                assert!(badge_rect.y + badge_rect.h < label.y && label.y + label.h < layout.progress.y);
+                assert!(label.x + label.w < layout.art.x && label.h >= size as f32);
+                for language in [Language::Ca, Language::Es] {
+                    assert!(measure.width_str(&remaining_episodes_label(12, language), size, true) <= label.w);
+                }
                 let (formats, time) = resume_episode_footer(layout.footer, "Queden 2 h 52 min", &measure);
                 assert!(formats.x + formats.w < time.unwrap().x);
                 assert!(layout.progress.y + layout.progress.h < formats.y);
@@ -679,6 +710,14 @@ mod usb_browser_tests {
                 assert!(time.is_none());
             }
         }
+    }
+
+    #[test]
+    fn season_remaining_label_uses_the_singular_only_for_one_file() {
+        assert_eq!(remaining_episodes_label(1, Language::Ca), "Queda 1 capítol");
+        assert_eq!(remaining_episodes_label(3, Language::Ca), "Queden 3 capítols");
+        assert_eq!(remaining_episodes_label(1, Language::Es), "Queda 1 capítulo");
+        assert_eq!(remaining_episodes_label(3, Language::Es), "Quedan 3 capítulos");
     }
 
     #[test]

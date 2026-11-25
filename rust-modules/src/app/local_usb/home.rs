@@ -61,6 +61,7 @@ pub(super) struct Item {
     pub path: PathBuf,
     pub title: String,
     pub episode: Option<(u32, u32)>,
+    pub season_remaining: Option<usize>,
     pub show: bool,
     pub favorite: bool,
     pub progress: u64,
@@ -375,7 +376,16 @@ pub(super) fn recommendations(drive: &Drive) -> Vec<Item> {
     for (series, videos) in groups {
         if let Some((video, saved)) = next_in_series(drive, &series, &videos, identity, history,
             histories.get(&series).unwrap_or(&empty), None, true) {
-            items.push(item(drive, video, series.title(video), true, saved));
+            let mut recommendation = item(drive, video, series.title(video), true, saved);
+            recommendation.season_remaining = series.identify(&video.path).map(|current| {
+                // Count the current file once, even when it contains several episodes.
+                1 + videos.iter().filter(|candidate| {
+                    series.identify(&candidate.path).is_some_and(|episode|
+                        episode.season == current.season && episode.first > current.last)
+                        && progress(candidate, &drive.volume, identity, history) != WATCHED
+                }).count()
+            });
+            items.push(recommendation);
         }
     }
     items.sort_by(|a, b| (!a.favorite, &a.path).cmp(&(!b.favorite, &b.path)));
@@ -420,7 +430,7 @@ fn item(drive: &Drive, video: &Video, show: Option<&str>, favorite: bool, progre
     let path = drive.volume.path.join(&video.path);
     let detail_key = (path.clone(), Some(video.size), Some(video.modified));
     Item { volume: drive.volume.clone(), path, title, favorite, progress, detail_key,
-        episode: numbers(video).map(|e| (e.season, e.first)), show: show.is_some() }
+        episode: numbers(video).map(|e| (e.season, e.first)), season_remaining: None, show: show.is_some() }
 }
 
 #[derive(Debug)]
@@ -610,6 +620,34 @@ mod usb_browser_tests {
     fn drive(volume: Volume, history: BTreeMap<String, u64>) -> Drive {
         let inventory = scan(&volume, "uuid:test", &[], &AtomicBool::new(false)).unwrap();
         Drive { volume, facts: (None, Some("uuid:test".into())), stats: Some(inventory.stats), videos: inventory.videos, history: Some(history) }
+    }
+
+    #[test]
+    fn remaining_season_files_include_the_current_file_and_exclude_future_seasons() {
+        let (root, volume) = fixture("cineusb-home-remaining-season");
+        let show = root.join("Sèries/Una sèrie");
+        let season = show.join("Season 2");
+        let previous = show.join("Season 1/Show S01E01.mkv");
+        let later = season.join("Show S02E04.mkv");
+        let already_watched = season.join("Show S02E05.mkv");
+        for file in [&later, &already_watched] { std::fs::write(file, []).unwrap(); }
+        let mut drive = drive(volume, BTreeMap::new());
+        let identity = "uuid:test";
+        let mut history = BTreeMap::from([(favorite_key(identity, &drive.volume, &show).unwrap(), FAVORITE)]);
+        for path in [previous, already_watched] {
+            let relative = path.strip_prefix(&drive.volume.path).unwrap();
+            let video = drive.videos.iter().find(|video| video.path == relative).unwrap();
+            history.insert(entry_key(identity, &drive.volume, &path, video.size, video.modified).unwrap(), WATCHED);
+        }
+        drive.history = Some(history);
+        let stop = AtomicBool::new(false);
+        let items = verified_recommendations(&mut drive, &stop).unwrap();
+        assert_eq!(items[0].episode, Some((2, 1)));
+        assert_eq!(items[0].season_remaining, Some(3));
+        std::fs::remove_file(later).unwrap();
+        let items = verified_recommendations(&mut drive, &stop).unwrap();
+        assert_eq!(items[0].season_remaining, Some(2));
+        plx_base::testscratch::remove_tree(&root);
     }
 
     #[test]

@@ -3863,7 +3863,7 @@ impl Browser {
             title: &title, category: Self::category(&item.volume, &item.path, item.show || item.episode.is_some()),
             formats: details.map_or_else(Default::default, |details| media_card::Formats::file(details, self.settings.spanish_audio)),
             show_category: false,
-            readout: Readout::Resume { episode: item.episode, remaining },
+            readout: Readout::Resume { episode: item.episode, remaining, season_remaining: item.season_remaining },
             fraction, watched: false, favorite: item.favorite,
         });
     }
@@ -5034,7 +5034,7 @@ mod usb_browser_tests {
         browser.scan.volumes.push(volume.clone());
         let path = volume.path.join("Season 1/Episode 2.mkv");
         let item = home::Item { volume: volume.clone(), path: path.clone(), title: "Serie".into(),
-            episode: Some((1, 2)), show: true, favorite: true, progress: 0,
+            episode: Some((1, 2)), season_remaining: None, show: true, favorite: true, progress: 0,
             detail_key: (path.clone(), None, None) };
         let (preview_send, preview) = mpsc::channel();
         let (_send, reply) = mpsc::sync_channel(1);
@@ -5063,7 +5063,7 @@ mod usb_browser_tests {
         browser.history.insert("keep".into(), BTreeMap::from([("deleted-episode".into(), WATCHED)]));
         let path = volume.path.join("old.mkv");
         browser.dashboard.items.push(home::Item { volume: volume.clone(), path: path.clone(), title: "Keep".into(),
-            episode: None, show: false, favorite: true, progress: 0, detail_key: (path, None, None) });
+            episode: None, season_remaining: None, show: false, favorite: true, progress: 0, detail_key: (path, None, None) });
         let (send, reply) = mpsc::sync_channel(1);
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         browser.home_job = Some(HomeRequest { preview: None, reply, cancelled: cancelled.clone(), volumes: vec![volume.clone()], manual: false });
@@ -5139,7 +5139,7 @@ mod usb_browser_tests {
             browser.dashboard.items = (0..count).map(|episode| {
                 let path = volume.path.join(format!("Show S01E{episode:02}.mkv"));
                 home::Item { volume: volume.clone(), path: path.clone(), title: "Show".into(),
-                    episode: Some((1, episode)), show: true, favorite: true, progress: 0,
+                    episode: Some((1, episode)), season_remaining: None, show: true, favorite: true, progress: 0,
                     detail_key: (path, None, None) }
             }).collect();
             assert_eq!(browser.len(), 1 + count as usize + usize::from(count > 3));
@@ -5160,7 +5160,7 @@ mod usb_browser_tests {
         browser.dashboard.items = (1..=5).map(|episode| {
             let path = volume.path.join(format!("Show S02E{episode:02}.mkv"));
             home::Item { volume: volume.clone(), path: path.clone(), title: "Una sèrie".into(),
-                episode: Some((2, episode)), show: true, favorite: true, progress: 0, detail_key: (path, None, None) }
+                episode: Some((2, episode)), season_remaining: None, show: true, favorite: true, progress: 0, detail_key: (path, None, None) }
         }).collect();
         assert_eq!(browser.len(), 7);
         browser.key(Key::Left { alt: false }, false);
