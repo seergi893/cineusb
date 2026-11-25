@@ -11,7 +11,8 @@
       "title": "CineUSB",
       "iconUri": "https://raw.githubusercontent.com/seergi893/cineusb/main/pkg/largeIcon.png",
       "manifestUrl": "https://github.com/seergi893/cineusb/releases/latest/download/com.seergi893.cineusb.manifest.json",
-      "shortDescription": "Creada per Sergi Sans. Pel·lícules i sèries des d’un USB al teu televisor LG."
+      "shortDescription": "Creada per Sergi Sans. Pel·lícules i sèries des d’un USB al teu televisor LG.",
+      "fullDescriptionUrl": "https://raw.githubusercontent.com/seergi893/cineusb/main/homebrew/description.html"
     }
   ]
 }
