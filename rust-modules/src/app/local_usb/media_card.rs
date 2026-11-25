@@ -210,12 +210,12 @@ impl Layout {
             top + (available_h - height) / 2.0, width, height)
     }
 
-    fn new(rect: Rect, wide: bool, episode: bool, favorite: bool, series: bool, watched: bool) -> Self {
+    fn new(rect: Rect, wide: bool, episode: bool, favorite: bool, series: bool, extra_footer: f32) -> Self {
         let compact = !wide && rect.w < 195.0;
         let inset = if wide { 22.0 } else { (rect.w * 0.057).round() };
         let x = rect.x + inset;
         let width = rect.w - inset * 2.0;
-        let footer_h = if series { 54.0 + if watched { 30.0 } else { 0.0 } } else { 28.0 };
+        let footer_h = (if series { 54.0 } else { 28.0 }) + extra_footer;
         let footer_y = rect.y + rect.h - footer_h - if wide { 20.0 } else { 15.0 };
         let title_size = if wide { theme::size::HEADLINE } else if compact { theme::size::MICRO } else { theme::size::LABEL };
         let leading = title_size as f32 * 1.08;
@@ -247,7 +247,20 @@ impl Art {
         let wide = matches!(card.readout, Readout::Resume { .. });
         let episode = matches!(card.readout, Readout::Episode { .. });
         let series = matches!(card.readout, Readout::Series(_));
-        let layout = Layout::new(rect, wide, episode, card.favorite, series, card.watched);
+        let mut layout = Layout::new(rect, wide, episode, card.favorite, series, 0.0);
+        let language = i18n::current().language();
+        let extra_footer = if card.watched && series {
+            30.0
+        } else if card.watched && watched_seconds(&card.readout).is_some_and(|seconds| {
+            let badge = watched_badge_width(watched_label(&card, language), &TtfMeasure);
+            watched_duration(&TtfMeasure, &video_duration(seconds), &super::card_duration(seconds, 0.0),
+                layout.footer.w - badge - 8.0).is_none()
+        }) {
+            26.0
+        } else { 0.0 };
+        if extra_footer > 0.0 {
+            layout = Layout::new(rect, wide, episode, card.favorite, series, extra_footer);
+        }
         let number = match card.readout {
             Readout::Episode { number, .. } | Readout::Resume { episode: number, .. } => number,
             _ => None,
@@ -389,19 +402,20 @@ impl Art {
             let badge_y = footer.y + if series { 54.0 } else { 0.0 };
             let badge = draw_watched_badge(p, Rect::new(footer.x, badge_y, footer.w, 26.0),
                 watched_label(card, language));
-            let duration = match card.readout {
-                Readout::File(duration) | Readout::Episode { duration, .. } => duration,
-                Readout::Resume { remaining, .. } => remaining,
-                Readout::Series(_) => None,
-            };
-            if let Some(seconds) = duration {
+            if let Some(seconds) = watched_seconds(&card.readout) {
                 let width = footer.w - badge - 8.0;
                 let full = video_duration(seconds);
                 let short = super::card_duration(seconds, 0.0);
-                let (text, size) = watched_duration(&TtfMeasure, &full, &short, width);
-                let run = TtfMeasure.fit_line(text, width, size, false);
+                let (text, size, slot) = if let Some((text, size)) = watched_duration(&TtfMeasure, &full, &short, width) {
+                    (text, size, Rect::new(footer.x + badge + 8.0, badge_y, width, 26.0))
+                } else {
+                    let (text, size) = watched_duration(&TtfMeasure, &full, &short, footer.w)
+                        .unwrap_or((&short, theme::size::USB_CARD_META_TIGHT));
+                    (text, size, Rect::new(footer.x, badge_y + 26.0, footer.w, 26.0))
+                };
+                let run = TtfMeasure.fit_line(text, slot.w, size, false);
                 Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).h(plx_ui::label::HAlign::Right)
-                    .draw(p, Rect::new(footer.x + badge + 8.0, badge_y, width, 26.0));
+                    .draw(p, slot);
             }
             return;
         }
@@ -453,10 +467,17 @@ fn draw_watched_badge(p: Painter, slot: Rect, text: &str) -> f32 {
     width
 }
 
-fn watched_duration<'a>(measure: &dyn Measure, full: &'a str, short: &'a str, width: f32) -> (&'a str, i32) {
+fn watched_seconds(readout: &Readout) -> Option<u64> {
+    match *readout {
+        Readout::File(duration) | Readout::Episode { duration, .. } => duration,
+        Readout::Resume { remaining, .. } => remaining,
+        Readout::Series(_) => None,
+    }
+}
+
+fn watched_duration<'a>(measure: &dyn Measure, full: &'a str, short: &'a str, width: f32) -> Option<(&'a str, i32)> {
     [(full, theme::size::DIAGNOSTIC), (short, theme::size::DIAGNOSTIC), (short, theme::size::USB_CARD_META)]
         .into_iter().find(|(text, size)| measure.width_str(text, *size, false) <= width)
-        .unwrap_or((short, theme::size::USB_CARD_META_TIGHT))
 }
 
 fn footer_text<'a>(measure: &dyn Measure, full: &'a str, short: &'a str, width: f32, wide: bool) -> (&'a str, i32) {
@@ -497,7 +518,7 @@ mod usb_browser_tests {
             let grid = super::super::grid_geometry(12, preset, true);
             for scale in [1.0, 1.045] {
                 let rect = Rect::new(80.0, 204.0, grid.w * scale, grid.h * scale);
-                let layout = Layout::new(rect, false, false, true, false, false);
+                let layout = Layout::new(rect, false, false, true, false, 0.0);
                 assert!(layout.title.y + layout.title.h + 52.9 <= layout.art.y);
                 assert!(layout.art.y + layout.art.h < layout.progress.y);
                 assert!(layout.progress.y + layout.progress.h < layout.footer.y);
@@ -507,7 +528,7 @@ mod usb_browser_tests {
                 assert!(art.y >= three_rows + 5.0 && art.y + art.h < layout.progress.y);
             }
         }
-        let wide = Layout::new(Rect::new(80.0, 600.0, 564.0, 210.0), true, false, true, false, false);
+        let wide = Layout::new(Rect::new(80.0, 600.0, 564.0, 210.0), true, false, true, false, 0.0);
         assert!(wide.title.x + wide.formats_w < wide.art.x);
         assert!(wide.art.y + wide.art.h < wide.progress.y);
     }
@@ -520,7 +541,7 @@ mod usb_browser_tests {
             let grid = super::super::grid_geometry(12, preset, true);
             let rect = Rect::new(0.0, 0.0, grid.w, grid.h);
             for watched in [false, true] {
-                let layout = Layout::new(rect, false, false, false, true, watched);
+                let layout = Layout::new(rect, false, false, false, true, if watched { 30.0 } else { 0.0 });
                 for (language, expected) in [
                     (Language::Es, "12 temporadas · 302 capítulos"),
                     (Language::Ca, "12 temporades · 302 capítols"),
@@ -537,11 +558,17 @@ mod usb_browser_tests {
                 assert!(layout.footer.h >= if watched { 80.0 } else { 52.0 });
                 assert!(layout.art.y + layout.art.h < layout.progress.y);
             }
-            let movie = Layout::new(rect, false, false, false, false, true);
+            let movie = Layout::new(rect, false, false, false, false, 0.0);
             for badge in ["Vista", "Vist", "Watched"] {
                 let width = movie.footer.w - watched_badge_width(badge, &measure) - 8.0;
-                let (duration, size) = watched_duration(&measure, "2 h 52 min", "2h52", width);
-                assert!(measure.width_str(duration, size, false) <= width);
+                if let Some((duration, size)) = watched_duration(&measure, "2 h 52 min", "2h52", width) {
+                    assert!(measure.width_str(duration, size, false) <= width);
+                } else {
+                    let stacked = Layout::new(rect, false, false, false, false, 26.0);
+                    let (duration, size) = watched_duration(&measure, "2 h 52 min", "2h52", stacked.footer.w).unwrap();
+                    assert!(measure.width_str(duration, size, false) <= stacked.footer.w);
+                    assert!(stacked.footer.h >= 52.0);
+                }
             }
         }
     }
@@ -556,13 +583,13 @@ mod usb_browser_tests {
     fn episode_capsule_stays_in_the_header_with_short_and_long_titles() {
         for preset in 0..3 {
             let grid = super::super::grid_geometry(12, preset, true);
-            let layout = Layout::new(Rect::new(0.0, 0.0, grid.w, grid.h), false, true, false, false, false);
+            let layout = Layout::new(Rect::new(0.0, 0.0, grid.w, grid.h), false, true, false, false, 0.0);
             let (short, next) = episode_header(layout.title, 50.0, layout.leading, 63.0, 27.0, false);
             assert!(next.x > short.x + 50.0 && next.y == short.y);
             let (long, below) = episode_header(layout.title, 400.0, layout.title.h, 63.0, 27.0, false);
             assert!(below.y > long.y + long.h && below.y + below.h <= layout.art.y);
         }
-        let layout = Layout::new(Rect::new(0.0, 0.0, 564.0, 190.0), true, false, true, false, false);
+        let layout = Layout::new(Rect::new(0.0, 0.0, 564.0, 190.0), true, false, true, false, 0.0);
         let (text, badge) = episode_header(layout.title, 600.0, layout.title.h, 63.0, 30.0, true);
         assert!(badge.x > text.x + text.w && badge.x + badge.w <= layout.title.x + layout.title.w);
         for episode in 1..=3 {
