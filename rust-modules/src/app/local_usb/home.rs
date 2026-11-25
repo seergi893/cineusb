@@ -437,30 +437,41 @@ fn item(drive: &Drive, video: &Video, show: Option<&str>, favorite: bool, progre
 pub(super) struct Recent {
     pub item: Item,
     pub folder: Option<PathBuf>,
+    pub key: RecentKey,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum RecentKey {
+    File(PathBuf),
+    Series(PathBuf, Option<String>),
 }
 
 pub(super) fn recent(drives: &[Drive]) -> Vec<Recent> {
-    let mut latest: Vec<(u64, Option<SeriesKey>, Recent)> = Vec::with_capacity(4);
+    const RECENT_LIMIT: usize = 15;
+    let mut latest: Vec<(u64, Recent)> = Vec::with_capacity(RECENT_LIMIT + 1);
     for drive in drives {
         for video in &drive.videos {
             let Some(added) = video.added else { continue };
-            if latest.len() == 3 && latest.last().is_some_and(|entry| entry.0 > added) { continue; }
+            if latest.len() == RECENT_LIMIT && latest.last().is_some_and(|entry| entry.0 > added) { continue; }
             let series = video.show.as_ref().map(|folder| SeriesKey { folder: folder.clone(), flat_title: None })
                 .or_else(|| SeriesKey::for_video(video));
-            if let Some(previous) = series.as_ref().and_then(|key| latest.iter().position(|(_, existing, recent)|
-                existing.as_ref() == Some(key) && recent.item.volume == drive.volume)) {
+            let folder = series.as_ref().map(|key| drive.volume.path.join(&key.folder));
+            let key = match (&series, &folder) {
+                (Some(series), Some(folder)) => RecentKey::Series(folder.clone(), series.flat_title.clone()),
+                _ => RecentKey::File(drive.volume.path.join(&video.path)),
+            };
+            if let Some(previous) = latest.iter().position(|(_, recent)| recent.key == key) {
                 if latest[previous].0 >= added { continue; }
                 latest.remove(previous);
             }
-            let folder = series.as_ref().map(|key| drive.volume.path.join(&key.folder));
             let title = series.as_ref().and_then(|key| key.title(video));
             let item = item(drive, video, title, false, 0);
-            latest.push((added, series, Recent { item, folder }));
-            latest.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.item.path.cmp(&b.2.item.path)));
-            latest.truncate(3);
+            latest.push((added, Recent { item, folder, key }));
+            latest.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.item.path.cmp(&b.1.item.path)));
+            latest.truncate(RECENT_LIMIT);
         }
     }
-    latest.into_iter().map(|(_, _, recent)| recent).collect()
+    latest.into_iter().map(|(_, recent)| recent).collect()
 }
 
 fn verified_recommendations(drive: &mut Drive, stop: &AtomicBool) -> io::Result<Vec<Item>> {
@@ -660,11 +671,31 @@ mod usb_browser_tests {
                 else { 10 });
         }
         let latest = recent(&[disk]);
-        assert!(latest.len() <= 3);
         assert_eq!(latest[0].item.episode, Some((3, 1)));
         let folder = latest[0].folder.as_ref().unwrap();
         assert!(latest[0].item.path.starts_with(folder));
         assert_eq!(latest.iter().filter(|entry| entry.folder.as_ref() == Some(folder)).count(), 1);
+        plx_base::testscratch::remove_tree(&root);
+    }
+
+    #[test]
+    fn recent_carousel_keeps_only_the_latest_fifteen_distinct_items() {
+        let (root, volume) = fixture("cineusb-recent-carousel-limit");
+        let mut disk = drive(volume, BTreeMap::new());
+        for video in &mut disk.videos {
+            video.added = Some(if video.path.ends_with("Show S03E01.mkv") { 40 } else { 1 });
+        }
+        let movie = disk.videos.iter().find(|video| video.path.ends_with("Una película.mkv")).unwrap().clone();
+        for date in 2..=24 {
+            disk.videos.push(Video { path: PathBuf::from(format!("Pel·lícules/Movie {date:02}.mkv")), added: Some(date), ..movie.clone() });
+        }
+        disk.videos.push(disk.videos.last().unwrap().clone());
+        let latest = recent(&[disk]);
+        assert_eq!(latest.len(), 15);
+        assert_eq!(latest[0].item.episode, Some((3, 1)));
+        for (item, date) in latest[1..].iter().zip((11..=24).rev()) {
+            assert!(item.item.path.ends_with(format!("Movie {date:02}.mkv")));
+        }
         plx_base::testscratch::remove_tree(&root);
     }
 
