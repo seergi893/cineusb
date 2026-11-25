@@ -1,5 +1,6 @@
 //! USB browsing and its off-frame filesystem jobs.
 mod art;
+mod christmas;
 mod continuity;
 mod disk;
 mod demo;
@@ -10,7 +11,7 @@ mod media_card;
 mod details_cache;
 
 use art::Cover;
-use super::{App, Key, playback};
+use super::{App, AppArg, Key, playback};
 use disk::{Entry, Kind, Scan, Volume};
 use media_card::{Category, Readout};
 use plx_gfx::{gfx, text::TtfMeasure};
@@ -133,12 +134,19 @@ const OPTIONS: [Rect; 2] = [
     Rect::new(555.0, 676.0, 390.0, 66.0),
     Rect::new(975.0, 676.0, 390.0, 66.0),
 ];
-const VIDEO_PANEL: Rect = Rect::new(310.0, 292.0, 1300.0, 496.0);
+const VIDEO_DIALOG_INSET: f32 = 28.0;
+const VIDEO_ACTION_Y: f32 = 650.0;
+const VIDEO_ACTION_H: f32 = 60.0;
+const EPISODE_VIDEO_OPTIONS: [Rect; 3] = [
+    Rect::new(512.0, VIDEO_ACTION_Y, 250.0, VIDEO_ACTION_H),
+    Rect::new(774.0, VIDEO_ACTION_Y, 276.0, VIDEO_ACTION_H),
+    Rect::new(1062.0, VIDEO_ACTION_Y, 346.0, VIDEO_ACTION_H),
+];
 const VIDEO_OPTIONS: [Rect; 4] = [
-    Rect::new(355.0, 676.0, 232.0, 66.0),
-    Rect::new(599.0, 676.0, 288.0, 66.0),
-    Rect::new(899.0, 676.0, 440.0, 66.0),
-    Rect::new(1351.0, 676.0, 214.0, 66.0),
+    Rect::new(425.0, VIDEO_ACTION_Y, 220.0, VIDEO_ACTION_H),
+    Rect::new(657.0, VIDEO_ACTION_Y, 266.0, VIDEO_ACTION_H),
+    Rect::new(935.0, VIDEO_ACTION_Y, 346.0, VIDEO_ACTION_H),
+    Rect::new(1293.0, VIDEO_ACTION_Y, 202.0, VIDEO_ACTION_H),
 ];
 const SETTINGS_OPTIONS: [Rect; 6] = [
     Rect::new(550.0, 401.0, 820.0, 49.0),
@@ -320,17 +328,21 @@ const ACTIONS: [(Action, Rect); 3] = [
 ];
 
 const DEMO_SETTING: usize = 13;
-const UNIFIED_SETTINGS_COUNT: usize = 14;
-const SETTINGS_ORDER: [usize; UNIFIED_SETTINGS_COUNT] = [0, 1, 8, 2, 3, 4, 12, 5, 6, 7, 9, 10, 11, DEMO_SETTING];
+const CHRISTMAS_SETTING: usize = 14;
+const CHRISTMAS_MUSIC_SETTING: usize = 15;
+const UNIFIED_SETTINGS_COUNT: usize = 16;
+const SETTINGS_ORDER: [usize; UNIFIED_SETTINGS_COUNT] =
+    [0, 1, 8, 2, 3, 4, 12, 5, 6, 7, 9, 10, 11, CHRISTMAS_SETTING, CHRISTMAS_MUSIC_SETTING, DEMO_SETTING];
 const SETTINGS_GROUPS: [(&[usize], f32); 4] = [
-    (&[0, 1, 8], 100.0), (&[2, 3, 4, 12], 305.0), (&[5], 560.0), (&[6, 7, 9, 10, 11, DEMO_SETTING], 667.0),
+    (&[0, 1, 8], 90.0), (&[2, 3, 4, 12], 276.0), (&[5], 508.0),
+    (&[6, 7, 9, 10, 11, CHRISTMAS_SETTING, CHRISTMAS_MUSIC_SETTING, DEMO_SETTING], 602.0),
 ];
-const SETTING_ROW_PITCH: f32 = 54.0;
+const SETTING_ROW_PITCH: f32 = 46.0;
 fn unified_setting_rect(index: usize) -> Rect {
     let (indices, top) = SETTINGS_GROUPS.iter().copied()
         .find(|&(indices, _)| indices.contains(&index)).expect("valid setting");
     let row = indices.iter().position(|&item| item == index).expect("setting belongs to group");
-    Rect::new(700.0, top + 38.0 + row as f32 * SETTING_ROW_PITCH, 1108.0, 50.0)
+    Rect::new(700.0, top + 38.0 + row as f32 * SETTING_ROW_PITCH, 1108.0, 44.0)
 }
 
 fn unified_setting_text(index: usize, settings: &Settings, demo: bool) -> (&'static str, &'static str, String) {
@@ -376,6 +388,12 @@ fn unified_setting_text(index: usize, settings: &Settings, demo: bool) -> (&'sta
         12 => (tr("Convertir DTS (experimental)", "Converteix DTS (experimental)"),
             tr("Convierte DTS 5.1 de 48 kHz a Dolby Digital al abrir el vídeo.", "Converteix DTS 5.1 de 48 kHz a Dolby Digital en obrir el vídeo."),
             on(settings.convert_dts).into()),
+        CHRISTMAS_SETTING => (tr("Modo Navidad", "Mode Nadal"),
+            tr("Decora los menús de CineUSB con motivos navideños.", "Decora els menús de CineUSB amb motius nadalencs."),
+            on(settings.christmas).into()),
+        CHRISTMAS_MUSIC_SETTING => (tr("Música de fondo", "Música de fons"),
+            tr("Suena en los menús mientras el modo Navidad está activado.", "Sona als menús mentre el mode Nadal està activat."),
+            on(settings.christmas_music).into()),
         DEMO_SETTING => (if demo { tr("Salir del modo demo", "Surt del mode demo") }
             else { tr("Activar modo demo", "Activa el mode demo") },
             tr("Explora una biblioteca USB ficticia. Cada sesión empieza de nuevo.",
@@ -412,6 +430,8 @@ struct Settings {
     clock_format: usize,
     clock_size: usize,
     convert_dts: bool,
+    christmas: bool,
+    christmas_music: bool,
 }
 
 enum SettingsJob {
@@ -581,6 +601,8 @@ pub(super) struct Browser {
     details_job: Option<DetailsRequest>,
     details: BTreeMap<DetailKey, plx_play_feed::LocalVideoDetails>,
     media_art: media_card::Art,
+    christmas_art: christmas::Art,
+    christmas_music: christmas::Music,
     series_job: Option<SeriesRequest>,
     series_cache: BTreeMap<PathBuf, SeriesCacheEntry>,
     dashboard: home::Dashboard,
@@ -652,13 +674,15 @@ impl Browser {
             next_clock_format: now, scan_phase: 0,
             action: None, action_hover: None, dialog: None, option: 0, mutating: false,
             selection: None, progress: None,
-            settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0, extensions: false, show_clock: true, clock_format: 0, clock_size: 1, convert_dts: false },
+            settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0, extensions: false, show_clock: true, clock_format: 0, clock_size: 1, convert_dts: false, christmas: false, christmas_music: true },
             settings_job: None, settings_started: false,
             pending: None, scanning: None, next_scan: now, last_tick: now,
             retired_reads: Vec::new(), retired_scans: Vec::new(),
             details_job: None, details: BTreeMap::new(),
             series_job: None, series_cache: BTreeMap::new(),
             media_art: Default::default(),
+            christmas_art: Default::default(),
+            christmas_music: Default::default(),
             dashboard: home::Dashboard { drives: vec![], items: vec![], refreshed_folder: None }, home_job: None,
             inventory_paths: BTreeMap::new(), card_labels: Default::default(),
             home_recent: Vec::new(), home_resume_start: 0, home_resume_scroll: Spring::at(0.0), home_disk_start: 0, home_all: false,
@@ -2314,6 +2338,7 @@ impl Browser {
 
     fn toggle_demo(&mut self) {
         if let Some(real) = self.real_browser.take() {
+            self.christmas_music.sync(false);
             let mut demo_browser = std::mem::replace(self, *real);
             if let Some(job) = &demo_browser.home_job {
                 job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2333,6 +2358,7 @@ impl Browser {
     }
 
     fn enter_demo(&mut self, mut library: demo::Library) {
+        self.christmas_music.sync(false);
         let mut browser = Self::new();
         browser.settings = self.settings;
         browser.settings_started = true;
@@ -2379,6 +2405,8 @@ impl Browser {
             10 => next.clock_format = step(next.clock_format, 3),
             11 => next.clock_size = step(next.clock_size, 3),
             12 => next.convert_dts = !next.convert_dts,
+            CHRISTMAS_SETTING => next.christmas = !next.christmas,
+            CHRISTMAS_MUSIC_SETTING => next.christmas_music = !next.christmas_music,
             _ => return,
         }
         self.change_settings(next);
@@ -2823,7 +2851,7 @@ impl Browser {
 
     fn pointer(&mut self, x: f32, y: f32) -> bool {
         let previous_action = self.action_hover.take();
-        if matches!(self.dialog, Some(Dialog::Settings | Dialog::Delete { .. } | Dialog::DeleteFolders)) {
+        if matches!(self.dialog, Some(Dialog::Settings | Dialog::Video { .. } | Dialog::Delete { .. } | Dialog::DeleteFolders)) {
             let previous = self.option;
             let option = if matches!(self.dialog, Some(Dialog::Settings)) {
                 (0..UNIFIED_SETTINGS_COUNT).find(|&i| hit(unified_setting_rect(i), x, y))
@@ -3076,7 +3104,7 @@ impl Browser {
 
     fn horizontal_options(&self) -> &'static [Rect] {
         if matches!(self.dialog, Some(Dialog::Video { ref volume, ref path }) if self.video_is_episode(volume, path)) {
-            &VIDEO_OPTIONS[..3]
+            &EPISODE_VIDEO_OPTIONS
         } else if matches!(self.dialog, Some(Dialog::Video { .. })) { &VIDEO_OPTIONS } else { &OPTIONS }
     }
 
@@ -3140,6 +3168,9 @@ impl Browser {
         let page = root.alpha(plx_ui::nav::page_alpha());
         let settings_enter = matches!(self.dialog, Some(Dialog::Settings))
             .then(|| self.dialog_started.map_or(1.0, settings_ease));
+        if self.settings.christmas {
+            self.christmas_art.draw(page, home, settings_enter.is_some());
+        }
         if settings_enter == Some(1.0) {
             self.draw_unified_settings(page, 1.0);
             return;
@@ -3624,19 +3655,22 @@ impl Browser {
         };
         let alpha = self.dialog_started.map_or(1.0, motion_alpha);
         let p = p.alpha(0.82 + alpha * 0.18);
-        let panel = if matches!(dialog, Dialog::Video { .. }) { VIDEO_PANEL } else { PANEL };
-        let (x, w) = (panel.x + 45.0, panel.w - 90.0);
-        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.48), theme::scrim_black(0.48), 0.0);
-        p.shadow_outside(panel, theme::ALERT_PANEL_RAD, theme::MENU_SHADOW_BLUR, theme::MENU_SHADOW_DY, theme::MENU_SHADOW);
-        p.rect(panel, theme::ALERT_PANEL_RAD, theme::USB_DIALOG_TOP, theme::USB_DIALOG_BOTTOM, 0.0);
-        p.rring(panel, theme::ALERT_PANEL_RAD, 1.0, theme::HAIRLINE);
+        let (x, w) = (PANEL.x + 45.0, PANEL.w - 90.0);
+        let video = matches!(dialog, Dialog::Video { .. });
+        if let Dialog::Video { volume, path } = dialog {
+            self.draw_video_dialog_body(p, title, &subject, volume, path);
+        } else {
+            draw_dialog_panel(p, PANEL, theme::USB_DIALOG_TOP, theme::USB_DIALOG_BOTTOM);
+        }
         let destructive = matches!(dialog, Dialog::Delete { .. } | Dialog::DeleteFolders);
         let eject = matches!(dialog, Dialog::Eject(_));
         let glyph_rect = Rect::new(x, 326.0, 80.0, 80.0);
         if destructive { icons::draw(p, Icon::Alert, glyph_rect, theme::DANGER); }
         if eject { draw_glyph(p, Glyph::Eject, glyph_rect, theme::TEXT_PRIMARY); }
         let title_y = if destructive || eject { 414.0 } else { 343.0 };
-        draw_line(p, title, Rect::new(x, title_y, w, 60.0), theme::size::HEADLINE, true);
+        if !video {
+            draw_line(p, title, Rect::new(x, title_y, w, 60.0), theme::size::HEADLINE, true);
+        }
         let labels: &[&str] = match dialog {
             Dialog::Settings => &[tr("Idioma", "Idioma"), tr("Subtítulos forzados", "Subtítols forçats"),
                 tr("Idioma de audio predeterminado", "Idioma d’àudio per defecte"),
@@ -3656,12 +3690,9 @@ impl Browser {
             }
             return;
         }
-        draw_line(p, &subject, Rect::new(x, title_y + 67.0, w, 52.0), theme::size::BODY, true);
-        draw_line(p, detail, Rect::new(x, title_y + 133.0, w, 48.0), theme::size::CAPTION, false);
-        if let Dialog::Video { volume, path } = dialog {
-            if let Some(details) = self.details.get(&self.detail_key_for(path)) {
-                draw_video_details(p, details, self.is_library_movie(volume, path), x, 490.0);
-            }
+        if !video {
+            draw_line(p, &subject, Rect::new(x, title_y + 67.0, w, 52.0), theme::size::BODY, true);
+            draw_line(p, detail, Rect::new(x, title_y + 133.0, w, 48.0), theme::size::CAPTION, false);
         }
         let resume_label = match dialog {
             Dialog::Resume(seconds) => format!("{} {}", tr("Continuar desde", "Continua a partir de"), playback_time(*seconds / 1_000_000_000)),
@@ -3707,6 +3738,70 @@ impl Browser {
                 self.draw_button(p, rect, label, self.option == index, tone, glyph);
             }
         }
+    }
+
+    fn draw_video_dialog_body(&self, p: Painter, heading: &str, title: &str, volume: &Volume, path: &std::path::Path) {
+        use plx_ui::text_view::TextView;
+        let options = self.horizontal_options();
+        let (x, width) = video_dialog_column(options);
+        let context = self.video_episode_context(volume, path);
+        let details = self.details.get(&self.detail_key_for(path));
+        let chips = video_detail_chips(details, self.is_library_movie(volume, path), width, &TtfMeasure);
+        let raw_name = path.file_name().unwrap_or_default().to_string_lossy();
+        let filename = video_filename_lines(&raw_name, width, &TtfMeasure);
+        let context_view = TextView::new(&context, theme::size::CAPTION, theme::USB_FAVORITES)
+            .with_measure(&TtfMeasure).bold().break_long_words().leading(29.0);
+        let context_h = if context.is_empty() { 0.0 } else { context_view.measure_h(width) + 4.0 };
+        let chips_h = chips.last().map_or(0.0, |chip| chip.rect.y + chip.rect.h + 9.0);
+        let filename_h = filename.len() as f32 * VIDEO_FILENAME_LINE_H;
+        let other_h = 30.0 + 4.0 + context_h + 8.0 + chips_h + 28.0 + filename_h;
+        let title_view = |size| TextView::new(title, size, theme::TEXT_PRIMARY)
+            .with_measure(&TtfMeasure).bold().break_long_words().leading(size as f32 + 4.0);
+        let budget = (VIDEO_ACTION_Y - 18.0 - other_h - 24.0 - plx_ui::consts::MARGIN_Y).max(26.0);
+        let title = [theme::size::TITLE, theme::size::HEADLINE, theme::size::CAPTION, theme::size::MICRO, theme::size::USB_CARD_META]
+            .into_iter().map(title_view).find(|view| view.measure_h(width) <= budget)
+            .unwrap_or_else(|| {
+                let size = theme::size::USB_CARD_META;
+                title_view(size).max_lines((budget / (size as f32 + 4.0)).floor().max(1.0) as usize)
+            });
+        let title_h = title.measure_h(width);
+        let content_h = other_h + title_h;
+        let mut y = VIDEO_ACTION_Y - 18.0 - content_h;
+        let panel = Rect::new(x - VIDEO_DIALOG_INSET, y - 24.0, width + 2.0 * VIDEO_DIALOG_INSET,
+            VIDEO_ACTION_Y + VIDEO_ACTION_H + 28.0 - (y - 24.0));
+        draw_dialog_panel(p, panel, theme::USB_DRIVE_TOP, theme::USB_DRIVE_BOTTOM);
+        draw_line(p, heading, Rect::new(x, y, width, 30.0), theme::size::CAPTION, false);
+        y += 34.0;
+        title.draw(p, Rect::new(x, y, width, title_h));
+        y += title_h;
+        if context_h > 0.0 {
+            context_view.draw(p, Rect::new(x, y + 4.0, width, context_h - 4.0));
+            y += context_h;
+        }
+        y += 8.0;
+        for chip in chips { chip.draw(p, x, y); }
+        y += chips_h;
+        draw_line(p, tr("Archivo original", "Fitxer original"), Rect::new(x, y, width, 28.0), theme::size::CAPTION, false);
+        y += 28.0;
+        for line in filename {
+            draw_line(p, line, Rect::new(x, y, width, VIDEO_FILENAME_LINE_H), theme::size::MICRO, false);
+            y += VIDEO_FILENAME_LINE_H;
+        }
+    }
+
+    fn video_episode_context(&self, volume: &Volume, path: &std::path::Path) -> String {
+        if !self.video_is_episode(volume, path) { return String::new(); }
+        let show = self.episode_show(volume, path);
+        let relative = show.as_deref().and_then(|show| path.strip_prefix(show).ok())
+            .or_else(|| path.strip_prefix(&volume.path).ok()).unwrap_or(path);
+        let name = show.as_deref().and_then(std::path::Path::file_name).map(|name| clean_series_name(&name.to_string_lossy()))
+            .or_else(|| {
+                let (prefix, _, _) = continuity::episode(path.file_name()?)?;
+                (!prefix.is_empty()).then(|| clean_series_name(&String::from_utf8_lossy(prefix)))
+            });
+        let Some((season, episode)) = home::episode_numbers(relative, show.is_some()) else { return name.unwrap_or_default(); };
+        let number = format!("Temporada {season} · {} {episode}", tr("Episodio", "Episodi"));
+        name.filter(|name| !name.is_empty()).map_or_else(|| number.clone(), |name| format!("{name} · {number}"))
     }
 
     fn dialog_video_title(&self, path: &std::path::Path) -> String {
@@ -4072,8 +4167,65 @@ fn resolution_label(width: u32, height: u32, movie: bool) -> Option<String> {
     })
 }
 
-fn draw_video_details(p: Painter, details: &plx_play_feed::LocalVideoDetails, movie: bool, start: f32, mut y: f32) {
+fn draw_dialog_panel(p: Painter, panel: Rect, top: [f32; 4], bottom: [f32; 4]) {
+    let scrim = theme::scrim_black(0.48);
+    p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, scrim, scrim, 0.0);
+    p.shadow_outside(panel, theme::ALERT_PANEL_RAD, theme::MENU_SHADOW_BLUR, theme::MENU_SHADOW_DY, theme::MENU_SHADOW);
+    p.rect(panel, theme::ALERT_PANEL_RAD, top, bottom, 0.0);
+    p.rring(panel, theme::ALERT_PANEL_RAD, 1.0, theme::HAIRLINE);
+}
+
+fn video_dialog_column(options: &[Rect]) -> (f32, f32) {
+    let x = options[0].x;
+    let last = options[options.len() - 1];
+    (x, last.x + last.w - x)
+}
+
+const VIDEO_FILENAME_LINE_H: f32 = 26.0;
+
+fn video_filename_lines<'a>(mut name: &'a str, width: f32, measure: &dyn Measure) -> Vec<&'a str> {
+    let mut lines = Vec::new();
+    while !name.is_empty() {
+        if measure.width_str(name, theme::size::MICRO, false) <= width {
+            lines.push(name);
+            break;
+        }
+        let boundaries: Vec<_> = name.char_indices().skip(1).map(|(index, _)| index).collect();
+        let fit = boundaries.partition_point(|&end| measure.width_str(&name[..end], theme::size::MICRO, false) <= width);
+        let end = if fit > 0 { boundaries[fit - 1] } else { name.chars().next().unwrap().len_utf8() };
+        let (line, rest) = name.split_at(end);
+        lines.push(line);
+        name = rest;
+    }
+    lines
+}
+
+struct VideoDetailChip {
+    text: String,
+    rect: Rect,
+    format: bool,
+}
+
+impl VideoDetailChip {
+    fn draw(self, p: Painter, start: f32, top: f32) {
+        let rect = Rect::new(start + self.rect.x, top + self.rect.y, self.rect.w, self.rect.h);
+        p.rect_sheened(rect, 9.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+        let icon = if self.format {
+            p.rring(rect, 9.0, 1.0, theme::TEXT_SECONDARY);
+            let svg = icons::Svg::new(include_str!("../../../assets/icons/cineusb-dynamic-range.svg"));
+            icons::draw_svg(p, svg, Rect::new(rect.x + 9.0, rect.y + 9.0, 18.0, 18.0), theme::TEXT_READING);
+            24.0
+        } else { 0.0 };
+        let run = TtfMeasure.fit_line(&self.text, rect.w - icon, theme::size::MICRO, true);
+        Label::new(run.as_ptr(), theme::size::MICRO, theme::TEXT_READING).h(HAlign::Center).bold()
+            .draw(p, Rect::new(rect.x + icon, rect.y, rect.w - icon, rect.h));
+    }
+}
+
+fn video_detail_chips(details: Option<&plx_play_feed::LocalVideoDetails>, movie: bool, width: f32,
+    measure: &dyn Measure) -> Vec<VideoDetailChip> {
     use plx_play_feed::VideoRange;
+    let Some(details) = details else { return Vec::new(); };
     let dolby = matches!(details.range, Some(VideoRange::DolbyVision | VideoRange::DolbyVisionHdr10));
     let formats = [
         dolby.then_some("Dolby Vision"),
@@ -4087,26 +4239,19 @@ fn draw_video_details(p: Painter, details: &plx_play_feed::LocalVideoDetails, mo
     let labels = resolution.as_deref().into_iter().map(|text| (text, false)).chain(
         formats.into_iter().flatten().map(|text| (text, true))).chain(
         [size.as_deref(), duration.as_deref()].into_iter().flatten().map(|text| (text, false)));
-    let mut x = start;
+    let mut chips = Vec::new();
+    let (mut x, mut y) = (0.0, 0.0);
     for (text, format) in labels {
-        let (run, width) = TtfMeasure.fit_line_measured(text, 360.0, theme::size::MICRO, true);
         let icon = if format { 24.0 } else { 0.0 };
-        let chip_width = width + icon + 25.0;
-        if x + chip_width > PANEL.x + PANEL.w - 45.0 {
-            x = start;
-            y += 52.0;
+        let chip_width = measure.width_str(text, theme::size::MICRO, true).ceil() + icon + 22.0;
+        if x + chip_width > width && x > 0.0 {
+            x = 0.0;
+            y += 43.0;
         }
-        let rect = Rect::new(x, y, chip_width, 43.0);
-        p.rect_sheened(rect, 10.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
-        if format {
-            p.rring(rect, 10.0, 1.0, theme::TEXT_SECONDARY);
-            let svg = icons::Svg::new(include_str!("../../../assets/icons/cineusb-dynamic-range.svg"));
-            icons::draw_svg(p, svg, Rect::new(x + 10.0, y + 12.0, 19.0, 19.0), theme::TEXT_READING);
-        }
-        Label::new(run.as_ptr(), theme::size::MICRO, theme::TEXT_READING).h(HAlign::Center).bold()
-            .draw(p, Rect::new(x + icon, y, rect.w - icon, rect.h));
-        x += rect.w + 9.0;
+        chips.push(VideoDetailChip { text: text.into(), rect: Rect::new(x, y, chip_width, 35.0), format });
+        x += chip_width + 8.0;
     }
+    chips
 }
 
 #[derive(Clone, Copy)]
@@ -4196,15 +4341,18 @@ fn parse_settings(record: &str) -> Result<Option<Settings>, String> {
     let clock_format = choice(fields.next())?;
     let clock_size = choice(fields.next().or(Some("1")))?;
     let convert_dts = flag(fields.next().or(Some("0")))?;
+    let christmas = flag(fields.next().or(Some("0")))?;
+    let christmas_music = flag(fields.next().or(Some("1")))?;
     if fields.next().is_some() { return Err("invalid settings record".into()); }
-    Ok(Some(Settings { language, forced_subtitles, spanish_audio, auto_next, accent, cards, sort, extensions, show_clock, clock_format, clock_size, convert_dts }))
+    Ok(Some(Settings { language, forced_subtitles, spanish_audio, auto_next, accent, cards, sort, extensions, show_clock, clock_format, clock_size, convert_dts, christmas, christmas_music }))
 }
 
 fn save_settings(settings: Settings) -> Result<(), String> {
     let language = match settings.language { Preference::Ca => "ca", Preference::En => "en", _ => "es" };
-    let record = format!("{} {} {} {} {} {} {} {} {} {} {} {}", language,
+    let record = format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {}", language,
         u8::from(settings.forced_subtitles), u8::from(settings.spanish_audio), u8::from(settings.auto_next),
-        settings.accent, settings.cards, settings.sort, u8::from(settings.extensions), u8::from(settings.show_clock), settings.clock_format, settings.clock_size, u8::from(settings.convert_dts));
+        settings.accent, settings.cards, settings.sort, u8::from(settings.extensions), u8::from(settings.show_clock), settings.clock_format, settings.clock_size,
+        u8::from(settings.convert_dts), u8::from(settings.christmas), u8::from(settings.christmas_music));
     #[cfg(not(feature = "hostsim"))]
     return plx_platform::tv::usb::save_preferences(&record).map_err(|error| format!("{error:?}"));
     #[cfg(feature = "hostsim")]
@@ -4824,6 +4972,7 @@ pub(super) fn tick(app: &mut App) {
         && plx_media::route::set_local_source(ps, file, &title, audio, forced, &item, playback::start_caps(), app.usb.settings.convert_dts);
     if ok {
         plx_media::route::set_stream_source_raster(ps, info.width, info.height);
+        app.usb.christmas_music.sync(false);
         if playback::start_playback(ps, &mut app.adapters.player, resume.min(i64::MAX as u64) as i64, playback::Origin::Here,
             4500, None, &mut app.pages, &mut app.bridge) {
             app.usb.playing = Some(PlayingVideo { volume, path, key, position: resume, duration: info.duration_secs.map(|seconds| seconds.saturating_mul(1_000_000_000)),
@@ -4847,6 +4996,10 @@ pub(super) fn finish_clock(app: &App) -> Option<plx_appkit::player_hud::model::F
 }
 
 pub(super) fn observe_playback(app: &mut App) {
+    let menu_audio = app.running && app.usb.settings.christmas && app.usb.settings.christmas_music
+        && app.route() == AppArg::LocalUsb && app.window_activity.allow_present(true)
+        && app.usb.playing.is_none() && !super::bridge::player_arriving(&app.pages);
+    app.usb.christmas_music.sync(menu_audio);
     let Some(playing) = &mut app.usb.playing else { return };
     if super::bridge::player(&app.pages).is_some() {
         playing.seen_player = true;
@@ -4904,6 +5057,7 @@ pub(super) fn playback_completed(app: &mut App) {
 
 pub(super) fn flush_playback(app: &mut App) {
     observe_playback(app);
+    app.usb.christmas_music.sync(false);
     app.usb.finish_video(false);
     app.usb.flush_progress(true);
 }
@@ -5128,6 +5282,17 @@ mod usb_browser_tests {
             assert!(first.y + first.h <= next.y);
         }
         assert!(unified_setting_rect(10).y + unified_setting_rect(10).h < 980.0);
+        assert!(SETTINGS_GROUPS[3].0.contains(&CHRISTMAS_SETTING));
+        assert!(SETTINGS_GROUPS[3].0.contains(&CHRISTMAS_MUSIC_SETTING));
+    }
+
+    #[test]
+    fn christmas_preferences_preserve_legacy_defaults_and_music_choice() {
+        let previous = parse_settings("ca 0 0 1 0 0 0 0 1 0 1 0").unwrap().unwrap();
+        assert!(!previous.christmas && previous.christmas_music);
+        let enabled = parse_settings("ca 0 0 1 0 0 0 0 1 0 1 0 1 0").unwrap().unwrap();
+        assert!(enabled.christmas && !enabled.christmas_music);
+        assert!(parse_settings("ca 0 0 1 0 0 0 0 1 0 1 0 1 2").is_err());
     }
 
     #[test]
@@ -5612,6 +5777,39 @@ mod usb_browser_tests {
                 "navigation actions must never overlap");
         }
         assert!(NAV_PILL.x + NAV_PILL.w <= 1920.0);
+    }
+
+    #[test]
+    fn compact_video_dialog_wraps_the_original_filename_without_losing_characters() {
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        let filename = format!("{} Causa abierta  S01E03.Last.Seen.mkv", "àç".repeat(52));
+        for options in [EPISODE_VIDEO_OPTIONS.as_slice(), VIDEO_OPTIONS.as_slice()] {
+            let (_, width) = video_dialog_column(options);
+            let lines = video_filename_lines(&filename, width, &measure);
+            assert!(lines.len() > 1);
+            assert_eq!(lines.concat(), filename);
+            assert!(lines.iter().all(|line| measure.width_str(line, theme::size::MICRO, false) <= width));
+        }
+    }
+
+    #[test]
+    fn compact_video_dialog_actions_fit_in_both_languages() {
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        for options in [EPISODE_VIDEO_OPTIONS.as_slice(), VIDEO_OPTIONS.as_slice()] {
+            let labels = [
+                ["Reproducir", "Reprodueix"],
+                ["Eliminar archivo", "Esborra el fitxer"],
+                ["Marcar como no visto", "Marcar com a no vist"],
+                ["Añadir", "Afegeix"],
+            ];
+            for (index, (&rect, labels)) in options.iter().zip(labels).enumerate() {
+                let budget = rect.w - if index == 3 { 76.0 } else { 67.0 };
+                for label in labels {
+                    assert!(measure.width_str(label, theme::size::CAPTION, true) <= budget, "{label}");
+                }
+            }
+            assert!(options.windows(2).all(|pair| pair[0].x + pair[0].w < pair[1].x));
+        }
     }
 
     #[test]

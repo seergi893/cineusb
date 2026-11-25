@@ -79,13 +79,14 @@ fn validate_extended(text: &str) -> io::Result<()> {
     let fields: Vec<_> = text.split(' ').collect();
     let [language, forced, audio, next, accent, cards, sort, tail @ ..] = fields.as_slice() else { return Err(invalid()) };
     record(language, forced, audio)?;
-    // The current record ends with the DTS toggle. Older records end at the
-    // clock size or omit earlier optional settings.
+    // The current record ends with the Christmas and music toggles.
+    // Keep accepting records from previous versions.
     if !matches!(tail,
         [] | ["0" | "1"]
         | ["0" | "1", "0" | "1", "0" | "1" | "2"]
         | ["0" | "1", "0" | "1", "0" | "1" | "2", "0" | "1" | "2"]
         | ["0" | "1", "0" | "1", "0" | "1" | "2", "0" | "1" | "2", "0" | "1"]
+        | ["0" | "1", "0" | "1", "0" | "1" | "2", "0" | "1" | "2", "0" | "1", "0" | "1", "0" | "1"]
     ) { return Err(invalid()); }
     if !matches!(*next, "0" | "1") || ![accent, cards, sort].into_iter().all(|value| matches!(*value, "0" | "1" | "2")) {
         return Err(invalid());
@@ -98,6 +99,13 @@ pub fn write_extended(fields: &[String]) -> io::Result<()> {
     validate_extended(&text)?;
     save(&preference_file()?, &text)?;
     io::stdout().write_all(text.as_bytes())
+}
+
+#[test]
+fn accepts_christmas_preferences_after_legacy_fields() {
+    assert!(validate_extended("ca 0 0 1 0 0 0 0 1 0 1 0").is_ok());
+    assert!(validate_extended("ca 0 0 1 0 0 0 0 1 0 1 0 1 0").is_ok());
+    assert!(validate_extended("ca 0 0 1 0 0 0 0 1 0 1 0 1 2").is_err());
 }
 
 /// Store a separate atomic record per video. Keep the full key to verify the index on read.

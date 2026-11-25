@@ -731,6 +731,10 @@ which is the way out without BACK.
 
 ## 7. Sound — the answer to checklist #42
 
+This section describes the upstream PlxNative checklist. CineUSB adds an optional
+local Christmas melody through Appearance settings. Menu music uses SDL audio
+when available and releases the device before video playback.
+
 **The application produces no audio of its own.** Not reduced, not muted by default, not switched
 off in a setting — none exists. This was checked five independent ways across the whole tree:
 
