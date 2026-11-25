@@ -133,12 +133,19 @@ const OPTIONS: [Rect; 2] = [
     Rect::new(555.0, 676.0, 390.0, 66.0),
     Rect::new(975.0, 676.0, 390.0, 66.0),
 ];
-const VIDEO_PANEL: Rect = Rect::new(310.0, 292.0, 1300.0, 496.0);
+const VIDEO_DIALOG_INSET: f32 = 28.0;
+const VIDEO_ACTION_Y: f32 = 650.0;
+const VIDEO_ACTION_H: f32 = 60.0;
+const EPISODE_VIDEO_OPTIONS: [Rect; 3] = [
+    Rect::new(512.0, VIDEO_ACTION_Y, 250.0, VIDEO_ACTION_H),
+    Rect::new(774.0, VIDEO_ACTION_Y, 276.0, VIDEO_ACTION_H),
+    Rect::new(1062.0, VIDEO_ACTION_Y, 346.0, VIDEO_ACTION_H),
+];
 const VIDEO_OPTIONS: [Rect; 4] = [
-    Rect::new(355.0, 676.0, 232.0, 66.0),
-    Rect::new(599.0, 676.0, 288.0, 66.0),
-    Rect::new(899.0, 676.0, 440.0, 66.0),
-    Rect::new(1351.0, 676.0, 214.0, 66.0),
+    Rect::new(425.0, VIDEO_ACTION_Y, 220.0, VIDEO_ACTION_H),
+    Rect::new(657.0, VIDEO_ACTION_Y, 266.0, VIDEO_ACTION_H),
+    Rect::new(935.0, VIDEO_ACTION_Y, 346.0, VIDEO_ACTION_H),
+    Rect::new(1293.0, VIDEO_ACTION_Y, 202.0, VIDEO_ACTION_H),
 ];
 const SETTINGS_OPTIONS: [Rect; 6] = [
     Rect::new(550.0, 401.0, 820.0, 49.0),
@@ -2823,7 +2830,7 @@ impl Browser {
 
     fn pointer(&mut self, x: f32, y: f32) -> bool {
         let previous_action = self.action_hover.take();
-        if matches!(self.dialog, Some(Dialog::Settings | Dialog::Delete { .. } | Dialog::DeleteFolders)) {
+        if matches!(self.dialog, Some(Dialog::Settings | Dialog::Video { .. } | Dialog::Delete { .. } | Dialog::DeleteFolders)) {
             let previous = self.option;
             let option = if matches!(self.dialog, Some(Dialog::Settings)) {
                 (0..UNIFIED_SETTINGS_COUNT).find(|&i| hit(unified_setting_rect(i), x, y))
@@ -3076,7 +3083,7 @@ impl Browser {
 
     fn horizontal_options(&self) -> &'static [Rect] {
         if matches!(self.dialog, Some(Dialog::Video { ref volume, ref path }) if self.video_is_episode(volume, path)) {
-            &VIDEO_OPTIONS[..3]
+            &EPISODE_VIDEO_OPTIONS
         } else if matches!(self.dialog, Some(Dialog::Video { .. })) { &VIDEO_OPTIONS } else { &OPTIONS }
     }
 
@@ -3624,19 +3631,22 @@ impl Browser {
         };
         let alpha = self.dialog_started.map_or(1.0, motion_alpha);
         let p = p.alpha(0.82 + alpha * 0.18);
-        let panel = if matches!(dialog, Dialog::Video { .. }) { VIDEO_PANEL } else { PANEL };
-        let (x, w) = (panel.x + 45.0, panel.w - 90.0);
-        p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, theme::scrim_black(0.48), theme::scrim_black(0.48), 0.0);
-        p.shadow_outside(panel, theme::ALERT_PANEL_RAD, theme::MENU_SHADOW_BLUR, theme::MENU_SHADOW_DY, theme::MENU_SHADOW);
-        p.rect(panel, theme::ALERT_PANEL_RAD, theme::USB_DIALOG_TOP, theme::USB_DIALOG_BOTTOM, 0.0);
-        p.rring(panel, theme::ALERT_PANEL_RAD, 1.0, theme::HAIRLINE);
+        let (x, w) = (PANEL.x + 45.0, PANEL.w - 90.0);
+        let video = matches!(dialog, Dialog::Video { .. });
+        if let Dialog::Video { volume, path } = dialog {
+            self.draw_video_dialog_body(p, title, &subject, volume, path);
+        } else {
+            draw_dialog_panel(p, PANEL, theme::USB_DIALOG_TOP, theme::USB_DIALOG_BOTTOM);
+        }
         let destructive = matches!(dialog, Dialog::Delete { .. } | Dialog::DeleteFolders);
         let eject = matches!(dialog, Dialog::Eject(_));
         let glyph_rect = Rect::new(x, 326.0, 80.0, 80.0);
         if destructive { icons::draw(p, Icon::Alert, glyph_rect, theme::DANGER); }
         if eject { draw_glyph(p, Glyph::Eject, glyph_rect, theme::TEXT_PRIMARY); }
         let title_y = if destructive || eject { 414.0 } else { 343.0 };
-        draw_line(p, title, Rect::new(x, title_y, w, 60.0), theme::size::HEADLINE, true);
+        if !video {
+            draw_line(p, title, Rect::new(x, title_y, w, 60.0), theme::size::HEADLINE, true);
+        }
         let labels: &[&str] = match dialog {
             Dialog::Settings => &[tr("Idioma", "Idioma"), tr("Subtítulos forzados", "Subtítols forçats"),
                 tr("Idioma de audio predeterminado", "Idioma d’àudio per defecte"),
@@ -3656,12 +3666,9 @@ impl Browser {
             }
             return;
         }
-        draw_line(p, &subject, Rect::new(x, title_y + 67.0, w, 52.0), theme::size::BODY, true);
-        draw_line(p, detail, Rect::new(x, title_y + 133.0, w, 48.0), theme::size::CAPTION, false);
-        if let Dialog::Video { volume, path } = dialog {
-            if let Some(details) = self.details.get(&self.detail_key_for(path)) {
-                draw_video_details(p, details, self.is_library_movie(volume, path), x, 490.0);
-            }
+        if !video {
+            draw_line(p, &subject, Rect::new(x, title_y + 67.0, w, 52.0), theme::size::BODY, true);
+            draw_line(p, detail, Rect::new(x, title_y + 133.0, w, 48.0), theme::size::CAPTION, false);
         }
         let resume_label = match dialog {
             Dialog::Resume(seconds) => format!("{} {}", tr("Continuar desde", "Continua a partir de"), playback_time(*seconds / 1_000_000_000)),
@@ -3707,6 +3714,67 @@ impl Browser {
                 self.draw_button(p, rect, label, self.option == index, tone, glyph);
             }
         }
+    }
+
+    fn draw_video_dialog_body(&self, p: Painter, heading: &str, title: &str, volume: &Volume, path: &std::path::Path) {
+        use plx_ui::text_view::TextView;
+        let options = self.horizontal_options();
+        let (x, width) = video_dialog_column(options);
+        let context = self.video_episode_context(volume, path);
+        let details = self.details.get(&self.detail_key_for(path));
+        let chips = video_detail_chips(details, self.is_library_movie(volume, path), width, &TtfMeasure);
+        let raw_name = path.file_name().unwrap_or_default().to_string_lossy();
+        let filename = video_filename_lines(&raw_name, width, &TtfMeasure);
+        let context_view = TextView::new(&context, theme::size::CAPTION, theme::USB_FAVORITES)
+            .with_measure(&TtfMeasure).bold().break_long_words().leading(29.0);
+        let context_h = if context.is_empty() { 0.0 } else { context_view.measure_h(width) + 4.0 };
+        let chips_h = chips.last().map_or(0.0, |chip| chip.rect.y + chip.rect.h + 9.0);
+        let filename_h = filename.len() as f32 * VIDEO_FILENAME_LINE_H;
+        let other_h = 30.0 + 4.0 + context_h + 8.0 + chips_h + 28.0 + filename_h;
+        let title_view = |size| TextView::new(title, size, theme::TEXT_PRIMARY)
+            .with_measure(&TtfMeasure).bold().break_long_words().leading(size as f32 + 4.0);
+        let budget = (VIDEO_ACTION_Y - 18.0 - other_h - 24.0 - plx_ui::consts::MARGIN_Y).max(26.0);
+        let title = [theme::size::TITLE, theme::size::HEADLINE, theme::size::CAPTION]
+            .into_iter().map(title_view).find(|view| view.measure_h(width) <= budget)
+            .unwrap_or_else(|| title_view(theme::size::MICRO));
+        let title_h = title.measure_h(width);
+        let content_h = other_h + title_h;
+        let mut y = VIDEO_ACTION_Y - 18.0 - content_h;
+        let panel = Rect::new(x - VIDEO_DIALOG_INSET, y - 24.0, width + 2.0 * VIDEO_DIALOG_INSET,
+            VIDEO_ACTION_Y + VIDEO_ACTION_H + 28.0 - (y - 24.0));
+        draw_dialog_panel(p, panel, theme::USB_DRIVE_TOP, theme::USB_DRIVE_BOTTOM);
+        draw_line(p, heading, Rect::new(x, y, width, 30.0), theme::size::CAPTION, false);
+        y += 34.0;
+        title.draw(p, Rect::new(x, y, width, title_h));
+        y += title_h;
+        if context_h > 0.0 {
+            context_view.draw(p, Rect::new(x, y + 4.0, width, context_h - 4.0));
+            y += context_h;
+        }
+        y += 8.0;
+        for chip in chips { chip.draw(p, x, y); }
+        y += chips_h;
+        draw_line(p, tr("Archivo original", "Fitxer original"), Rect::new(x, y, width, 28.0), theme::size::CAPTION, false);
+        y += 28.0;
+        for line in filename {
+            draw_line(p, line, Rect::new(x, y, width, VIDEO_FILENAME_LINE_H), theme::size::MICRO, false);
+            y += VIDEO_FILENAME_LINE_H;
+        }
+    }
+
+    fn video_episode_context(&self, volume: &Volume, path: &std::path::Path) -> String {
+        if !self.video_is_episode(volume, path) { return String::new(); }
+        let show = self.episode_show(volume, path);
+        let relative = show.as_deref().and_then(|show| path.strip_prefix(show).ok())
+            .or_else(|| path.strip_prefix(&volume.path).ok()).unwrap_or(path);
+        let name = show.as_deref().and_then(std::path::Path::file_name).map(|name| clean_series_name(&name.to_string_lossy()))
+            .or_else(|| {
+                let (prefix, _, _) = continuity::episode(path.file_name()?)?;
+                (!prefix.is_empty()).then(|| clean_series_name(&String::from_utf8_lossy(prefix)))
+            });
+        let Some((season, episode)) = home::episode_numbers(relative, show.is_some()) else { return name.unwrap_or_default(); };
+        let number = format!("Temporada {season} · {} {episode}", tr("Episodio", "Episodi"));
+        name.filter(|name| !name.is_empty()).map_or_else(|| number.clone(), |name| format!("{name} · {number}"))
     }
 
     fn dialog_video_title(&self, path: &std::path::Path) -> String {
@@ -4072,8 +4140,65 @@ fn resolution_label(width: u32, height: u32, movie: bool) -> Option<String> {
     })
 }
 
-fn draw_video_details(p: Painter, details: &plx_play_feed::LocalVideoDetails, movie: bool, start: f32, mut y: f32) {
+fn draw_dialog_panel(p: Painter, panel: Rect, top: [f32; 4], bottom: [f32; 4]) {
+    let scrim = theme::scrim_black(0.48);
+    p.rect(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, scrim, scrim, 0.0);
+    p.shadow_outside(panel, theme::ALERT_PANEL_RAD, theme::MENU_SHADOW_BLUR, theme::MENU_SHADOW_DY, theme::MENU_SHADOW);
+    p.rect(panel, theme::ALERT_PANEL_RAD, top, bottom, 0.0);
+    p.rring(panel, theme::ALERT_PANEL_RAD, 1.0, theme::HAIRLINE);
+}
+
+fn video_dialog_column(options: &[Rect]) -> (f32, f32) {
+    let x = options[0].x;
+    let last = options[options.len() - 1];
+    (x, last.x + last.w - x)
+}
+
+const VIDEO_FILENAME_LINE_H: f32 = 26.0;
+
+fn video_filename_lines<'a>(mut name: &'a str, width: f32, measure: &dyn Measure) -> Vec<&'a str> {
+    let mut lines = Vec::new();
+    while !name.is_empty() {
+        if measure.width_str(name, theme::size::MICRO, false) <= width {
+            lines.push(name);
+            break;
+        }
+        let boundaries: Vec<_> = name.char_indices().skip(1).map(|(index, _)| index).collect();
+        let fit = boundaries.partition_point(|&end| measure.width_str(&name[..end], theme::size::MICRO, false) <= width);
+        let end = if fit > 0 { boundaries[fit - 1] } else { name.chars().next().unwrap().len_utf8() };
+        let (line, rest) = name.split_at(end);
+        lines.push(line);
+        name = rest;
+    }
+    lines
+}
+
+struct VideoDetailChip {
+    text: String,
+    rect: Rect,
+    format: bool,
+}
+
+impl VideoDetailChip {
+    fn draw(self, p: Painter, start: f32, top: f32) {
+        let rect = Rect::new(start + self.rect.x, top + self.rect.y, self.rect.w, self.rect.h);
+        p.rect_sheened(rect, 9.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
+        let icon = if self.format {
+            p.rring(rect, 9.0, 1.0, theme::TEXT_SECONDARY);
+            let svg = icons::Svg::new(include_str!("../../../assets/icons/cineusb-dynamic-range.svg"));
+            icons::draw_svg(p, svg, Rect::new(rect.x + 9.0, rect.y + 9.0, 18.0, 18.0), theme::TEXT_READING);
+            24.0
+        } else { 0.0 };
+        let run = TtfMeasure.fit_line(&self.text, rect.w - icon, theme::size::MICRO, true);
+        Label::new(run.as_ptr(), theme::size::MICRO, theme::TEXT_READING).h(HAlign::Center).bold()
+            .draw(p, Rect::new(rect.x + icon, rect.y, rect.w - icon, rect.h));
+    }
+}
+
+fn video_detail_chips(details: Option<&plx_play_feed::LocalVideoDetails>, movie: bool, width: f32,
+    measure: &dyn Measure) -> Vec<VideoDetailChip> {
     use plx_play_feed::VideoRange;
+    let Some(details) = details else { return Vec::new(); };
     let dolby = matches!(details.range, Some(VideoRange::DolbyVision | VideoRange::DolbyVisionHdr10));
     let formats = [
         dolby.then_some("Dolby Vision"),
@@ -4087,26 +4212,19 @@ fn draw_video_details(p: Painter, details: &plx_play_feed::LocalVideoDetails, mo
     let labels = resolution.as_deref().into_iter().map(|text| (text, false)).chain(
         formats.into_iter().flatten().map(|text| (text, true))).chain(
         [size.as_deref(), duration.as_deref()].into_iter().flatten().map(|text| (text, false)));
-    let mut x = start;
+    let mut chips = Vec::new();
+    let (mut x, mut y) = (0.0, 0.0);
     for (text, format) in labels {
-        let (run, width) = TtfMeasure.fit_line_measured(text, 360.0, theme::size::MICRO, true);
         let icon = if format { 24.0 } else { 0.0 };
-        let chip_width = width + icon + 25.0;
-        if x + chip_width > PANEL.x + PANEL.w - 45.0 {
-            x = start;
-            y += 52.0;
+        let chip_width = measure.width_str(text, theme::size::MICRO, true).ceil() + icon + 22.0;
+        if x + chip_width > width && x > 0.0 {
+            x = 0.0;
+            y += 43.0;
         }
-        let rect = Rect::new(x, y, chip_width, 43.0);
-        p.rect_sheened(rect, 10.0, theme::CONTROL_IDLE_FILL, theme::CONTROL_IDLE_FILL);
-        if format {
-            p.rring(rect, 10.0, 1.0, theme::TEXT_SECONDARY);
-            let svg = icons::Svg::new(include_str!("../../../assets/icons/cineusb-dynamic-range.svg"));
-            icons::draw_svg(p, svg, Rect::new(x + 10.0, y + 12.0, 19.0, 19.0), theme::TEXT_READING);
-        }
-        Label::new(run.as_ptr(), theme::size::MICRO, theme::TEXT_READING).h(HAlign::Center).bold()
-            .draw(p, Rect::new(x + icon, y, rect.w - icon, rect.h));
-        x += rect.w + 9.0;
+        chips.push(VideoDetailChip { text: text.into(), rect: Rect::new(x, y, chip_width, 35.0), format });
+        x += chip_width + 8.0;
     }
+    chips
 }
 
 #[derive(Clone, Copy)]
@@ -5612,6 +5730,39 @@ mod usb_browser_tests {
                 "navigation actions must never overlap");
         }
         assert!(NAV_PILL.x + NAV_PILL.w <= 1920.0);
+    }
+
+    #[test]
+    fn compact_video_dialog_wraps_the_original_filename_without_losing_characters() {
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        let filename = format!("{} Causa abierta  S01E03.Last.Seen.mkv", "àç".repeat(52));
+        for options in [EPISODE_VIDEO_OPTIONS.as_slice(), VIDEO_OPTIONS.as_slice()] {
+            let (_, width) = video_dialog_column(options);
+            let lines = video_filename_lines(&filename, width, &measure);
+            assert!(lines.len() > 1);
+            assert_eq!(lines.concat(), filename);
+            assert!(lines.iter().all(|line| measure.width_str(line, theme::size::MICRO, false) <= width));
+        }
+    }
+
+    #[test]
+    fn compact_video_dialog_actions_fit_in_both_languages() {
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        for options in [EPISODE_VIDEO_OPTIONS.as_slice(), VIDEO_OPTIONS.as_slice()] {
+            let labels = [
+                ["Reproducir", "Reprodueix"],
+                ["Eliminar archivo", "Esborra el fitxer"],
+                ["Marcar como no visto", "Marcar com a no vist"],
+                ["Añadir", "Afegeix"],
+            ];
+            for (index, (&rect, labels)) in options.iter().zip(labels).enumerate() {
+                let budget = rect.w - if index == 3 { 76.0 } else { 67.0 };
+                for label in labels {
+                    assert!(measure.width_str(label, theme::size::CAPTION, true) <= budget, "{label}");
+                }
+            }
+            assert!(options.windows(2).all(|pair| pair[0].x + pair[0].w < pair[1].x));
+        }
     }
 
     #[test]
