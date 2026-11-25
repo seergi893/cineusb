@@ -502,7 +502,7 @@ type DetailKey = (PathBuf, Option<u64>, Option<i64>);
 enum HomeFocus {
     Drive(Volume),
     Resume(PathBuf),
-    Recent(PathBuf),
+    Recent(home::RecentKey),
     More,
 }
 
@@ -608,6 +608,9 @@ pub(super) struct Browser {
     dashboard: home::Dashboard,
     inventory_paths: BTreeMap<PathBuf, (usize, usize)>,
     home_recent: Vec<home::Recent>,
+    home_recent_start: usize,
+    home_recent_scroll: Spring,
+    home_recent_arrow_hover: Option<Dir>,
     home_resume_start: usize,
     home_resume_scroll: Spring,
     home_disk_start: usize,
@@ -685,7 +688,8 @@ impl Browser {
             christmas_music: Default::default(),
             dashboard: home::Dashboard { drives: vec![], items: vec![], refreshed_folder: None }, home_job: None,
             inventory_paths: BTreeMap::new(), card_labels: Default::default(),
-            home_recent: Vec::new(), home_resume_start: 0, home_resume_scroll: Spring::at(0.0), home_disk_start: 0, home_all: false,
+            home_recent: Vec::new(), home_recent_start: 0, home_recent_scroll: Spring::at(0.0), home_recent_arrow_hover: None,
+            home_resume_start: 0, home_resume_scroll: Spring::at(0.0), home_disk_start: 0, home_all: false,
             home_refresh: now, home_first_open: Some(now), home_force_refresh: false,
             manual_refresh: None, refresh_notice: None,
             facts: None, facts_job: None, prepared: None, ready: None, playing: None,
@@ -1081,11 +1085,7 @@ impl Browser {
         changed |= self.update_series_counts(now);
         changed |= self.update_home(now);
         if self.drive_picker() && !self.home_all {
-            let target = self.home_resume_start.min(self.dashboard.items.len().saturating_sub(3)) as f32 * HOME_CARD_PITCH;
-            let previous = self.home_resume_scroll.pos;
-            self.home_resume_scroll.step(target, 240.0, dt);
-            self.home_resume_scroll.land(target, dt);
-            changed |= previous != self.home_resume_scroll.pos;
+            changed |= self.advance_home_carousels(dt);
         }
         if self.demo.is_none() && self.drive_picker() && !self.dashboard.items.is_empty() {
             if let Some(opened) = self.home_first_open.take() {
@@ -2586,11 +2586,14 @@ impl Browser {
                 let position = self.selected - drives;
                 self.home_resume_start = if self.home_all { position / 9 * 9 }
                     else { self.home_resume_start.clamp(position.saturating_sub(2), position) };
+            } else if self.home_recent_range().contains(&self.selected) {
+                self.reveal_recent_card(self.selected - self.home_recent_offset());
             }
         }
         if snap {
             if self.drive_picker() {
                 self.home_resume_scroll = Spring::at(self.home_resume_start.min(self.dashboard.items.len().saturating_sub(3)) as f32 * HOME_CARD_PITCH);
+                self.home_recent_scroll = Spring::at(self.home_recent_start as f32 * HOME_CARD_PITCH);
             }
             self.scroll = Spring::at(self.scroll_target());
             self.pop.reset();
@@ -2840,6 +2843,7 @@ impl Browser {
             .find(|&index| {
                 if self.drive_picker() && index >= self.scan.volumes.len() && index < self.home_recent_offset()
                     && (x < plx_ui::consts::MARGIN_X || x >= HOME_DISK_X - 24.0) { return false; }
+                if self.drive_picker() && !self.recent_card_accepts_pointer(index, x) { return false; }
                 hit(self.tile_rect(index), x, y)
             })
     }
@@ -2850,6 +2854,16 @@ impl Browser {
     }
 
     fn pointer(&mut self, x: f32, y: f32) -> bool {
+        let arrow = self.nav_available().then(|| self.recent_arrow_at(x, y)).flatten().map(|(dir, _)| dir);
+        let changed = arrow != self.home_recent_arrow_hover;
+        self.home_recent_arrow_hover = arrow;
+        if arrow.is_some() {
+            return changed | self.nav_hover.take().is_some() | self.nav_focus.take().is_some();
+        }
+        self.pointer_content(x, y) || changed
+    }
+
+    fn pointer_content(&mut self, x: f32, y: f32) -> bool {
         let previous_action = self.action_hover.take();
         if matches!(self.dialog, Some(Dialog::Settings | Dialog::Video { .. } | Dialog::Delete { .. } | Dialog::DeleteFolders)) {
             let previous = self.option;
@@ -2905,6 +2919,7 @@ impl Browser {
 
     fn click(&mut self, x: f32, y: f32) {
         self.action_hover = None;
+        self.home_recent_arrow_hover = None;
         if self.nav_available() && hit(NAV_PILL, x, y) {
             if let Some(tab) = NAV_TABS.iter().position(|rect| hit(*rect, x, y)) {
                 self.nav_hover = Some(tab);
@@ -2932,6 +2947,12 @@ impl Browser {
                 self.option = index;
                 self.choose_option();
             }
+            return;
+        }
+        if let Some((dir, index)) = self.recent_arrow_at(x, y) {
+            self.nav_focus = None;
+            self.home_recent_arrow_hover = Some(dir);
+            self.select(index, false);
             return;
         }
         if self.movie_grid() && hit(QUALITY_PILL, x, y) {
@@ -2973,6 +2994,7 @@ impl Browser {
                 self.nav_hover = None;
                 self.quality_hover = None;
                 self.action_hover = None;
+                self.home_recent_arrow_hover = None;
                 return;
             }
             Key::Ok if repeat => {}
@@ -2980,6 +3002,7 @@ impl Browser {
                 self.nav_focus = self.nav_hover.take().or(self.nav_focus);
                 self.quality_focus = self.quality_hover.take().or(self.quality_focus);
                 self.action = self.action_hover.take().or(self.action);
+                self.home_recent_arrow_hover = None;
             }
             Key::Back => { self.nav_hover = None; self.quality_hover = None; self.action_hover = None; }
             _ => {}
