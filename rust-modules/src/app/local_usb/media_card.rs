@@ -101,7 +101,7 @@ pub(super) enum Readout {
     File(Option<u64>),
     Recent(Option<u64>),
     Series(super::series::Counts),
-    Resume { episode: Option<(u32, u32)>, remaining: Option<u64> },
+    Resume { episode: Option<(u32, u32)>, remaining: Option<u64>, season_remaining: Option<usize> },
     Episode { number: Option<(u32, u32)>, duration: Option<u64> },
 }
 
@@ -256,6 +256,13 @@ impl EpisodeBadge {
 }
 
 impl Layout {
+    fn season_remaining_slot(&self, badge: Rect) -> (Rect, i32) {
+        let y = badge.y + badge.h + 4.0;
+        let height = (self.progress.y - y - 4.0).clamp(0.0, 26.0);
+        let size = if height >= 24.0 { theme::size::DIAGNOSTIC } else { theme::size::USB_CARD_META };
+        (Rect::new(badge.x, y, self.formats_w, height), size)
+    }
+
     fn art_below_formats(&self, formats_bottom: f32) -> Rect {
         if formats_bottom + 5.0 <= self.art.y { return self.art; }
         let top = formats_bottom + 5.0;
@@ -343,6 +350,12 @@ impl Art {
         if let Some(badge) = episode_badge {
             let badge_rect = badge.rect(title_rect, header_h, layout.formats_w, &TtfMeasure);
             badge.draw(p, badge_rect);
+            if let Readout::Resume { season_remaining: Some(count), .. } = card.readout {
+                let (slot, size) = layout.season_remaining_slot(badge_rect);
+                let label = remaining_episodes_label(count, language);
+                let run = TtfMeasure.fit_line(&label, slot.w, size, true);
+                Label::new(run.as_ptr(), size, color).bold().draw(p, slot);
+            }
             if !wide { art = layout.art_below_formats(badge_rect.y + badge_rect.h); }
         } else if let Some((season, episode)) = number {
             let number = &format!("{season}×{episode:02}");
@@ -506,6 +519,17 @@ impl Art {
     }
 }
 
+fn remaining_episodes_label(count: usize, language: Language) -> String {
+    if count == 1 {
+        return local(language, "Queda 1 capítulo", "Queda 1 capítol", "1 episode left").into();
+    }
+    match language {
+        Language::Ca => format!("Queden {count} capítols"),
+        Language::Es => format!("Quedan {count} capítulos"),
+        _ => format!("{count} episodes left"),
+    }
+}
+
 fn resume_episode_footer(footer: Rect, remaining: &str, measure: &dyn Measure) -> (Rect, Option<Rect>) {
     if remaining.is_empty() {
         return (Rect::new(footer.x, footer.y, footer.w, 25.0), None);
@@ -661,6 +685,12 @@ mod usb_browser_tests {
                 let badge_rect = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
                 assert!(badge_rect.x + badge_rect.w < layout.art.x && badge_rect.y + badge_rect.h < layout.progress.y);
                 assert!(measure.width_str(&badge.season, badge.size, true) + EPISODE_BADGE_PAD * 2.0 <= badge_rect.w);
+                let (label, size) = layout.season_remaining_slot(badge_rect);
+                assert!(badge_rect.y + badge_rect.h < label.y && label.y + label.h < layout.progress.y);
+                assert!(label.x + label.w < layout.art.x && label.h >= size as f32);
+                for language in [Language::Ca, Language::Es] {
+                    assert!(measure.width_str(&remaining_episodes_label(12, language), size, true) <= label.w);
+                }
                 let (formats, time) = resume_episode_footer(layout.footer, "Queden 2 h 52 min", &measure);
                 assert!(formats.x + formats.w < time.unwrap().x);
                 assert!(layout.progress.y + layout.progress.h < formats.y);
@@ -677,6 +707,14 @@ mod usb_browser_tests {
                 assert!(time.is_none());
             }
         }
+    }
+
+    #[test]
+    fn season_remaining_label_uses_the_singular_only_for_one_file() {
+        assert_eq!(remaining_episodes_label(1, Language::Ca), "Queda 1 capítol");
+        assert_eq!(remaining_episodes_label(3, Language::Ca), "Queden 3 capítols");
+        assert_eq!(remaining_episodes_label(1, Language::Es), "Queda 1 capítulo");
+        assert_eq!(remaining_episodes_label(3, Language::Es), "Quedan 3 capítulos");
     }
 
     #[test]
