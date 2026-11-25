@@ -2687,6 +2687,7 @@ impl Browser {
             return;
         }
         let direct_resume = self.home_item().is_some();
+        let title = self.identified_video_title(volume, &path);
         let mount_id = system_mount(volume);
         let spanish = self.settings.spanish_audio;
         let known_identity = self.identity(volume).map(str::to_owned);
@@ -2699,7 +2700,6 @@ impl Browser {
         self.status = tr("Abriendo vídeo…", "Obrint el vídeo…").into();
         self.request(move || {
             let result = inspect_video(&path, mount_id, spanish).map(|(file, info)| {
-                let title = video_title(&path, info.title.as_deref());
                 let identity = known_identity.or_else(|| volume_facts(&volume).1);
                 let mut key = identity.as_deref().and_then(|identity| progress_key(identity, &volume, &path, &file));
                 let mut saved = key.as_ref().and_then(|key| {
@@ -3638,11 +3638,11 @@ impl Browser {
             Dialog::Resume(_) => (tr("Reanudar reproducción", "Continua mirant"),
                 self.prepared.as_ref().map_or_else(String::new, |media| media.title.clone()), "",
                 ["", tr("Empezar desde el principio", "Torna a començar")]),
-            Dialog::Next { path, .. } => (tr("Siguiente episodio", "Episodi següent"),
-                video_title(path, None), "",
+            Dialog::Next { volume, path, .. } => (tr("Siguiente episodio", "Episodi següent"),
+                self.identified_video_title(volume, path), "",
                 [tr("Reproducir ahora", "Reprodueix ara"), cancel]),
-            Dialog::Video { path, .. } => (tr("Opciones del vídeo", "Opcions del vídeo"),
-                self.dialog_video_title(path),
+            Dialog::Video { volume, path } => (tr("Opciones del vídeo", "Opcions del vídeo"),
+                self.dialog_video_title(volume, path),
                 "",
                 [tr("Reproducir", "Reprodueix"), tr("Eliminar archivo", "Esborra el fitxer")]),
             Dialog::Delete { path, finished_episode, .. } => (
@@ -3767,7 +3767,7 @@ impl Browser {
         use plx_ui::text_view::TextView;
         let options = self.horizontal_options();
         let (x, width) = video_dialog_column(options);
-        let context = self.video_episode_context(volume, path);
+        let context = self.video_episode_context(volume, path, title);
         let details = self.details.get(&self.detail_key_for(path));
         let chips = video_detail_chips(details, self.is_library_movie(volume, path), width, &TtfMeasure);
         let raw_name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -3812,7 +3812,7 @@ impl Browser {
         }
     }
 
-    fn video_episode_context(&self, volume: &Volume, path: &std::path::Path) -> String {
+    fn video_episode_context(&self, volume: &Volume, path: &std::path::Path, title: &str) -> String {
         if !self.video_is_episode(volume, path) { return String::new(); }
         let show = self.episode_show(volume, path);
         let relative = show.as_deref().and_then(|show| path.strip_prefix(show).ok())
@@ -3821,17 +3821,33 @@ impl Browser {
             .or_else(|| {
                 let (prefix, _, _) = continuity::episode(path.file_name()?)?;
                 (!prefix.is_empty()).then(|| clean_series_name(&String::from_utf8_lossy(prefix)))
-            });
+            }).filter(|name| !name.is_empty() && name != title);
         let Some((season, episode)) = home::episode_numbers(relative, show.is_some()) else { return name.unwrap_or_default(); };
         let number = format!("Temporada {season} · {} {episode}", tr("Episodio", "Episodi"));
-        name.filter(|name| !name.is_empty()).map_or_else(|| number.clone(), |name| format!("{name} · {number}"))
+        match name { Some(name) => format!("{name} · {number}"), None => number }
     }
 
-    fn dialog_video_title(&self, path: &std::path::Path) -> String {
+    fn identified_video_title(&self, volume: &Volume, path: &std::path::Path) -> String {
+        if self.drive_picker() {
+            let matches = |item: &home::Item| item.volume == *volume && item.path == path;
+            if let Some(item) = self.home_item().filter(|item| matches(item)) {
+                return self.home_media_title(item, item.episode.is_some() || item.show);
+            }
+            if let Some(recent) = self.selected.checked_sub(self.home_recent_offset())
+                .and_then(|index| self.home_recent.get(index)).filter(|recent| matches(&recent.item)) {
+                return self.home_media_title(&recent.item, recent.folder.is_some());
+            }
+        }
         let key = self.detail_key_for(path);
         let tagged = self.details.get(&key).and_then(|details| details.title.as_deref());
-        let movie = matches!(&self.dialog, Some(Dialog::Video { volume, .. }) if self.is_library_movie(volume, path));
-        let mut title = if movie { movie_title(path, tagged) } else { video_title(path, tagged) };
+        let show = self.episode_show(volume, path);
+        let episodic = self.video_is_episode(volume, path);
+        let category = if self.is_library_movie(volume, path) { Category::Movie } else { Self::category(volume, path, episodic) };
+        library_video_title(path, show.as_deref(), category, episodic, tagged)
+    }
+
+    fn dialog_video_title(&self, volume: &Volume, path: &std::path::Path) -> String {
+        let mut title = self.identified_video_title(volume, path);
         if let Some(extension) = path.extension().filter(|_| self.settings.extensions) {
             title.push('.');
             title.push_str(&extension.to_string_lossy());
@@ -3989,11 +4005,7 @@ impl Browser {
     fn home_media_title(&self, item: &home::Item, series: bool) -> String {
         if series { return clean_series_name(&item.title); }
         let embedded = self.details.get(&item.detail_key).and_then(|details| details.title.as_deref());
-        if Self::category(&item.volume, &item.path, false) == Category::Movie {
-            movie_title(&item.path, embedded)
-        } else {
-            home_file_title(&item.path, embedded)
-        }
+        library_video_title(&item.path, None, Self::category(&item.volume, &item.path, false), false, embedded)
     }
 
     fn draw_library_card(&self, p: Painter, index: usize, frame: media_card::Frame) -> bool {
@@ -4013,19 +4025,8 @@ impl Browser {
                 let numbers = (!movie).then(|| home::episode_numbers(episode_path, show.is_some())).flatten();
                 let episodic = !movie && (numbers.is_some() || show.is_some());
                 let category = Self::category(volume, path, episodic);
-                let title = if episodic {
-                    show.as_deref().and_then(std::path::Path::file_name).and_then(|name| name.to_str())
-                        .map(clean_series_name)
-                        .or_else(|| {
-                            let (prefix, _, _) = continuity::episode(path.file_name()?)?;
-                            let prefix = std::str::from_utf8(prefix).ok()?;
-                            (!prefix.is_empty()).then(|| clean_series_name(prefix))
-                        }).unwrap_or_else(|| video_title(path, source_title))
-                } else if movie || category == Category::Movie {
-                    movie_title(path, source_title)
-                } else {
-                    video_title(path, source_title)
-                };
+                let title_kind = if movie { Category::Movie } else { category };
+                let title = library_video_title(path, show.as_deref(), title_kind, episodic, source_title);
                 labels.insert(key.clone(), CardLabel {
                     show, movie, source_title: source_title.map(str::to_owned), title, category, numbers, episodic,
                 });
@@ -4750,6 +4751,20 @@ fn home_file_title(path: &std::path::Path, embedded: Option<&str>) -> String {
         return video_title(path, embedded);
     }
     clean_media_title(&stem, None)
+}
+
+fn library_video_title(path: &std::path::Path, show: Option<&std::path::Path>, category: Category,
+    episodic: bool, embedded: Option<&str>) -> String {
+    if episodic {
+        return show.and_then(std::path::Path::file_name)
+            .map(|name| clean_series_name(&name.to_string_lossy()))
+            .or_else(|| {
+                let (prefix, _, _) = continuity::episode(path.file_name()?)?;
+                let prefix = std::str::from_utf8(prefix).ok()?;
+                (!prefix.is_empty()).then(|| clean_series_name(prefix))
+            }).unwrap_or_else(|| video_title(path, None));
+    }
+    if category == Category::Movie { movie_title(path, embedded) } else { home_file_title(path, embedded) }
 }
 
 fn movie_title(path: &std::path::Path, embedded: Option<&str>) -> String {
@@ -6524,7 +6539,52 @@ mod usb_browser_tests {
     }
 
     #[test]
-    fn hud_title_prefers_the_tag_and_preserves_meaningful_numbers() {
+    fn video_dialog_and_playback_resolve_the_title_of_the_selected_home_card() {
+        let volume = Volume { path: "/tmp/usb/sda1".into(), label: None, mount_id: None, system: false };
+        let mut browser = Browser::new();
+        browser.scan.volumes.push(volume.clone());
+        for (file, indexed_title, episode, expected) in [
+            ("Pel·lícules/Comanchería.1080p.mkv", "Comanchería.1080p", None, "Comanchería"),
+            ("Sèries/Causa abierta/Temporada 1/Causa.abierta.S01E03.Last.Seen.mkv", "Causa abierta", Some((1, 3)), "Causa abierta"),
+        ] {
+            let path = volume.path.join(file);
+            let key = (path.clone(), None, None);
+            browser.details.insert(key.clone(), plx_play_feed::LocalVideoDetails {
+                title: Some("montado por axo".into()), ..Default::default()
+            });
+            browser.dashboard.items = vec![home::Item { volume: volume.clone(), path: path.clone(),
+                title: indexed_title.into(), episode, season_remaining: None, show: episode.is_some(),
+                favorite: false, progress: 0, detail_key: key }];
+            browser.selected = 1;
+            let item = browser.home_item().unwrap();
+            assert_eq!(browser.home_media_title(item, episode.is_some()), expected);
+            assert_eq!(browser.dialog_video_title(&volume, &path), expected);
+            assert_eq!(browser.identified_video_title(&volume, &path), expected);
+        }
+    }
+
+    #[test]
+    fn video_dialog_and_playback_resolve_library_movies_and_episodes_consistently() {
+        let mut browser = movie_quality_browser();
+        let volume = browser.folders.last().unwrap().volume.clone();
+        let movie = volume.path.join("Pel·lícules/T3P4K1NG- Crash.mkv");
+        let key = browser.detail_key_for(&movie);
+        browser.details.insert(key, plx_play_feed::LocalVideoDetails {
+            title: Some("T3P4K1NG- Crash".into()), ..Default::default()
+        });
+        assert_eq!(browser.dialog_video_title(&volume, &movie), "Crash");
+        assert_eq!(browser.identified_video_title(&volume, &movie), "Crash");
+        browser.nav_tab = SERIES_TAB;
+        let episode = volume.path.join("Sèries/Causa abierta/Causa.abierta.S01E03.Last.Seen.mkv");
+        assert_eq!(browser.dialog_video_title(&volume, &episode), "Causa abierta");
+        assert_eq!(browser.identified_video_title(&volume, &episode), "Causa abierta");
+        let context = browser.video_episode_context(&volume, &episode, "Causa abierta");
+        assert!(context.starts_with("Temporada 1 · "));
+        assert!(context.ends_with(" 3"));
+    }
+
+    #[test]
+    fn generic_title_cleanup_preserves_meaningful_numbers() {
         for (file, title) in [
             ("La Odisea - 2026 - BDremux 4K UHD - HDR.mkv", "La Odisea"),
             ("Blade.Runner.2049.2160p.HDR10+.x265-Group", "Blade Runner 2049"),
