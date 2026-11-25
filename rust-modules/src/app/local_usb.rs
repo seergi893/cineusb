@@ -3814,6 +3814,9 @@ impl Browser {
 
     fn video_episode_context(&self, volume: &Volume, path: &std::path::Path, title: &str) -> String {
         if !self.video_is_episode(volume, path) { return String::new(); }
+        let title = if self.settings.extensions && path.extension().is_some() {
+            title.rsplit_once('.').map_or(title, |(base, _)| base)
+        } else { title };
         let show = self.episode_show(volume, path);
         let relative = show.as_deref().and_then(|show| path.strip_prefix(show).ok())
             .or_else(|| path.strip_prefix(&volume.path).ok()).unwrap_or(path);
@@ -6581,6 +6584,10 @@ mod usb_browser_tests {
         let context = browser.video_episode_context(&volume, &episode, "Causa abierta");
         assert!(context.starts_with("Temporada 1 · "));
         assert!(context.ends_with(" 3"));
+        browser.settings.extensions = true;
+        let options_title = browser.dialog_video_title(&volume, &episode);
+        assert_eq!(options_title, "Causa abierta.mkv");
+        assert_eq!(browser.video_episode_context(&volume, &episode, &options_title), context);
     }
 
     #[test]
