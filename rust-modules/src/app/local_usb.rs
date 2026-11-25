@@ -5052,7 +5052,7 @@ mod usb_browser_tests {
             }).collect();
             assert_eq!(browser.len(), 1 + count as usize + usize::from(count > 3));
             for index in 1..=count.min(3) as usize {
-                let tile = browser.home_rect(index);
+                let tile = browser.home_rect_measured(index, &plx_base::fontcov::advances::ShippedMeasure);
                 assert_eq!((tile.w, tile.h), (HOME_CARD_W, HOME_CARD_H));
                 assert!(tile.x + tile.w < browser.home_rect(0).x);
             }

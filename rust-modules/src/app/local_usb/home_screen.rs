@@ -11,6 +11,10 @@ impl Browser {
     }
 
     pub(super) fn home_rect(&self, index: usize) -> Rect {
+        self.home_rect_measured(index, &TtfMeasure)
+    }
+
+    pub(super) fn home_rect_measured(&self, index: usize, measure: &dyn Measure) -> Rect {
         let drives = self.scan.volumes.len();
         let x = plx_ui::consts::MARGIN_X;
         let hidden = Rect::new(-5000.0, 0.0, 0.0, 0.0);
@@ -35,7 +39,7 @@ impl Browser {
                 if self.dashboard.items.len() <= 3 {
                     return home_row_card(x, HOME_GRID_TOP, &self.dashboard.items, position, |item| {
                         let title = self.home_media_title(item, item.episode.is_some() || item.show);
-                        media_card::home_title_width(&title, item.favorite, false, i18n::current().language(), &TtfMeasure)
+                        media_card::home_title_width(&title, item.favorite, false, i18n::current().language(), measure)
                     });
                 }
                 let offset = position as f32 * HOME_CARD_PITCH - self.home_resume_scroll.pos;
@@ -51,7 +55,7 @@ impl Browser {
         let top = if self.dashboard.items.is_empty() { HOME_GRID_TOP } else { HOME_RECENT_TOP };
         home_row_card(x, top, &self.home_recent, position, |recent| {
             let title = self.home_media_title(&recent.item, recent.folder.is_some());
-            media_card::home_title_width(&title, false, true, i18n::current().language(), &TtfMeasure)
+            media_card::home_title_width(&title, false, true, i18n::current().language(), measure)
         })
     }
 
