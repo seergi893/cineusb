@@ -212,6 +212,51 @@ fn episode_header(mut title: Rect, title_w: f32, title_h: f32, badge_w: f32, bad
     (title, badge)
 }
 
+const EPISODE_BADGE_PAD: f32 = 9.0;
+
+struct EpisodeBadge {
+    season: String,
+    episode: String,
+    season_size: i32,
+    episode_size: i32,
+}
+
+impl EpisodeBadge {
+    fn new((season, episode): (u32, u32), language: Language, compact: bool) -> Self {
+        let label = local(language, "Episodio", "Episodi", "Episode");
+        Self {
+            season: format!("T{season}"),
+            episode: format!("{label} {episode}"),
+            season_size: if compact { theme::size::USB_CARD_META_TIGHT } else { theme::size::USB_CARD_META },
+            episode_size: if compact { theme::size::USB_CARD_META } else { theme::size::MICRO },
+        }
+    }
+
+    fn rect(&self, title: Rect, title_h: f32, width: f32, measure: &dyn Measure) -> Rect {
+        let text_width = measure.width_str(&self.season, self.season_size, true)
+            .max(measure.width_str(&self.episode, self.episode_size, true));
+        Rect::new(title.x, title.y + title_h + 4.0, (text_width.ceil() + EPISODE_BADGE_PAD * 2.0).min(width),
+            (self.season_size + self.episode_size) as f32 + 12.0)
+    }
+
+    fn draw(&self, p: Painter, rect: Rect) {
+        let ink = theme::USB_FAVORITES;
+        p.rrect(rect, 7.0, 7.0, theme::USB_FAVORITES_GROUND);
+        p.rring(rect, 7.0, 1.0, theme::with_a(ink, 0.72));
+        let top = rect.y + 4.0;
+        let season_h = self.season_size as f32 + 2.0;
+        let x = rect.x + EPISODE_BADGE_PAD;
+        let w = rect.w - EPISODE_BADGE_PAD * 2.0;
+        for (text, size, y, h) in [
+            (&self.season, self.season_size, top, season_h),
+            (&self.episode, self.episode_size, top + season_h, self.episode_size as f32 + 2.0),
+        ] {
+            let run = TtfMeasure.fit_line(text, w, size, true);
+            Label::new(run.as_ptr(), size, ink).bold().draw(p, Rect::new(x, y, w, h));
+        }
+    }
+}
+
 impl Layout {
     fn art_below_formats(&self, formats_bottom: f32) -> Rect {
         if formats_bottom + 5.0 <= self.art.y { return self.art; }
@@ -278,7 +323,10 @@ impl Art {
         let number = match card.readout {
             Readout::Episode { number, .. } | Readout::Resume { episode: number, .. } => number,
             _ => None,
-        }.map(|(s, e)| format!("{s}×{e:02}"));
+        };
+        let series_episode = card.category == Category::Series;
+        let episode_badge = number.filter(|_| series_episode).map(|number| EpisodeBadge::new(number, language, layout.compact));
+        let resume_episode = series_episode && matches!(card.readout, Readout::Resume { .. });
 
         p.shadow_outside(rect, radius, 16.0, 6.0, theme::CARD_SHADOW);
         if lift > 0.0 {
@@ -293,7 +341,13 @@ impl Art {
         let new_badge = recent.then(|| new_badge(language, &TtfMeasure));
         if let Some((_, width)) = new_badge { title_rect.w -= width + 5.0; }
         let mut header_h = if wide { title_rect.h } else { title.measure_h(title_rect.w).min(title_rect.h) };
-        if let Some(number) = number.as_deref() {
+        let mut art = layout.art;
+        if let Some(badge) = episode_badge {
+            let badge_rect = badge.rect(title_rect, header_h, layout.formats_w, &TtfMeasure);
+            badge.draw(p, badge_rect);
+            if !wide { art = layout.art_below_formats(badge_rect.y + badge_rect.h); }
+        } else if let Some((season, episode)) = number {
+            let number = &format!("{season}×{episode:02}");
             let size = theme::size::MICRO;
             let badge_w = TtfMeasure.width_str(number, size, true) + 14.0;
             let title_w = TtfMeasure.width_str(card.title, layout.title_size, true);
@@ -316,8 +370,7 @@ impl Art {
             super::draw_glyph(p, super::Glyph::Star(true),
                 Rect::new(layout.title.x + layout.title.w + 4.0, layout.title.y + 1.0, 18.0, 18.0), theme::USB_FAVORITES);
         }
-        let mut art = layout.art;
-        if !episode {
+        if !episode && !resume_episode {
             let y = layout.title.y + header_h + 5.0;
             let format_bottom = Self::draw_formats(p, Rect::new(layout.title.x, y, layout.formats_w, if wide { 25.0 } else { 23.0 }),
                 card.formats, layout.compact, wide, color);
@@ -342,7 +395,11 @@ impl Art {
             let fill = Rect::new(bar.x, bar.y, bar.w * card.fraction, bar.h);
             p.rrect(fill, bar.h * 0.5, bar.h * 0.5, color);
         }
-        Self::draw_footer(p, layout.footer, &card, color, wide);
+        if resume_episode {
+            Self::draw_resume_episode_footer(p, layout.footer, &card, color, language);
+        } else {
+            Self::draw_footer(p, layout.footer, &card, color, wide);
+        }
         if lift > 0.0 {
             p.rring(rect, radius, theme::CONTROL_FOCUS_RING_W, theme::with_a(accent, lift));
         }
@@ -385,6 +442,18 @@ impl Art {
             Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).bold().draw(p, slot);
         }
         if row.next_x() > rect.x { y + rect.h } else { rect.y }
+    }
+
+    fn draw_resume_episode_footer(p: Painter, footer: Rect, card: &Card<'_>, color: [f32; 4], language: Language) {
+        let (full, _) = card.readout.labels(card.category, language, false);
+        let short = watched_seconds(&card.readout).map(|seconds| super::card_duration(seconds, 0.0));
+        let (formats, remaining) = resume_episode_footer(footer, &full, &TtfMeasure);
+        Self::draw_formats(p, formats, card.formats, false, true, color);
+        if let Some(remaining) = remaining {
+            let (label, size) = footer_text(&TtfMeasure, &full, short.as_deref().unwrap_or(&full), remaining.w, true);
+            let run = TtfMeasure.fit_line(label, remaining.w, size, false);
+            Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).h(plx_ui::label::HAlign::Right).draw(p, remaining);
+        }
     }
 
     fn draw_footer(p: Painter, footer: Rect, card: &Card<'_>, color: [f32; 4], wide: bool) {
@@ -437,6 +506,15 @@ impl Art {
         Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY)
             .draw(p, Rect::new(footer.x + icon_w, footer.y, width, footer.h));
     }
+}
+
+fn resume_episode_footer(footer: Rect, remaining: &str, measure: &dyn Measure) -> (Rect, Option<Rect>) {
+    if remaining.is_empty() {
+        return (Rect::new(footer.x, footer.y, footer.w, 25.0), None);
+    }
+    let width = measure.width_str(remaining, theme::size::DIAGNOSTIC, false).ceil().min(footer.w * 0.40);
+    (Rect::new(footer.x, footer.y, footer.w - width - 10.0, 25.0),
+        Some(Rect::new(footer.x + footer.w - width, footer.y, width, footer.h)))
 }
 
 fn count_size(text: &str, measure: &dyn Measure, width: f32) -> i32 {
@@ -546,6 +624,57 @@ fn format_labels(full: [Option<&'static str>; 4], available: f32, gap: f32, size
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn episode_capsule_fits_below_two_line_titles_at_every_size() {
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        for (language, label) in [(Language::Ca, "Episodi 103"), (Language::Es, "Episodio 103")] {
+            for preset in 0..3 {
+                let grid = super::super::grid_geometry(12, preset, true);
+                for scale in [1.0, super::super::USB_STYLE.focus_scale] {
+                    let layout = Layout::new(Rect::new(0.0, 0.0, grid.w * scale, grid.h * scale),
+                        false, true, false, false, 26.0);
+                    let badge = EpisodeBadge::new((12, 103), language, layout.compact);
+                    assert_eq!(badge.season, "T12");
+                    assert_eq!(badge.episode, label);
+                    assert!(badge.episode_size > badge.season_size);
+                    let r = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
+                    assert!(r.y >= layout.title.y + layout.title.h && r.x + r.w <= layout.title.x + layout.title.w);
+                    assert!(measure.width_str(label, badge.episode_size, true) + EPISODE_BADGE_PAD * 2.0 <= r.w);
+                    let art = layout.art_below_formats(r.y + r.h);
+                    assert!(r.y + r.h <= art.y && art.h > 0.0 && art.y + art.h < layout.progress.y);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resume_episode_keeps_formats_and_time_on_one_footer_line() {
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        for height in [194.0, super::super::HOME_CARD_H] {
+            for scale in [1.0, super::super::USB_STYLE.focus_scale] {
+                let layout = Layout::new(Rect::new(0.0, 0.0, super::super::HOME_CARD_W * scale, height * scale),
+                    true, false, true, false, 0.0);
+                let badge = EpisodeBadge::new((1, 2), Language::Ca, layout.compact);
+                let badge = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
+                assert!(badge.x + badge.w < layout.art.x && badge.y + badge.h < layout.progress.y);
+                let (formats, time) = resume_episode_footer(layout.footer, "Queden 2 h 52 min", &measure);
+                assert!(formats.x + formats.w < time.unwrap().x);
+                assert!(layout.progress.y + layout.progress.h < formats.y);
+                assert!(formats.y + formats.h <= layout.footer.y + layout.footer.h);
+                for video in ["HDR10+", "Dolby Vision"] {
+                    for audio in ["Dolby Digital Plus", "Dolby TrueHD", "DTS-HD HRA"] {
+                        let labels = [Some("4K UHD"), Some(video), Some(audio), None];
+                        let (_, widths, _) = format_labels(labels, formats.w, 7.0, theme::size::DIAGNOSTIC, 1, &measure);
+                        assert_eq!(format_rows(widths.into_iter(), 7.0, formats.w), 1, "{video} / {audio}");
+                    }
+                }
+                let (formats, time) = resume_episode_footer(layout.footer, "", &measure);
+                assert_eq!(formats.w, layout.footer.w);
+                assert!(time.is_none());
+            }
+        }
+    }
 
     #[test]
     fn layout_keeps_a_two_line_title_clear_of_formats_art_and_footer() {
