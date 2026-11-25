@@ -3801,6 +3801,8 @@ impl Browser {
         let media = self.draw_library_card(p, index, media_card::Frame { rect: card, radius, lift, accent: self.accent() });
         if !media {
             let Some((title, kind, cover)) = self.item(index) else { return };
+            let kind = if self.media_library() && (kind == tr("Películas", "Pel·lícules")
+                || kind == tr("Series", "Sèries") || kind == "Documental") { "" } else { kind };
             self.draw_folder_card(p, card, radius, lift, &title, kind, cover);
         }
         if let Some(checked) = self.delete_selection_mark(index) {
@@ -3837,6 +3839,7 @@ impl Browser {
         self.media_art.draw(p, frame, media_card::Card {
             title: &title, category: Self::category(&item.volume, &item.path, item.show || item.episode.is_some()),
             formats: details.map_or_else(Default::default, |details| media_card::Formats::file(details, self.settings.spanish_audio)),
+            show_category: false,
             readout: Readout::Resume { episode: item.episode, remaining },
             fraction, watched: false, favorite: item.favorite,
         });
@@ -3880,6 +3883,7 @@ impl Browser {
             self.media_art.draw(p, frame, media_card::Card {
                 title: &label.title, category: label.category, fraction, favorite, watched: record == WATCHED,
                 formats: details.map_or_else(Default::default, |details| media_card::Formats::file(details, self.settings.spanish_audio)),
+                show_category: !self.media_library(),
                 readout: if label.episodic { Readout::Episode { number: label.numbers, duration } } else { Readout::File(duration) },
             });
             return true;
@@ -3895,6 +3899,7 @@ impl Browser {
         self.media_art.draw(p, frame, media_card::Card {
             title: &title, category,
             formats: summary.map_or_else(Default::default, |summary| summary.formats(self.settings.spanish_audio)),
+            show_category: !self.media_library(),
             readout: counts.map_or(Readout::File(None), Readout::Series),
             fraction: if total > 0 { watched as f32 / total as f32 } else { 0.0 },
             watched: total > 0 && watched == total,
@@ -3955,8 +3960,10 @@ impl Browser {
             p.rring(card, radius, theme::CONTROL_FOCUS_RING_W, theme::with_a(self.accent(), lift));
         }
         let caption = widgets::poster_title(p, card, radius, title, false, &TtfMeasure);
-        draw_line(p, kind, Rect::new(card.x + 16.0, caption.y - 30.0, card.w - 32.0, 28.0),
-            theme::size::CAPTION, false);
+        if !kind.is_empty() {
+            draw_line(p, kind, Rect::new(card.x + 16.0, caption.y - 30.0, card.w - 32.0, 28.0),
+                theme::size::CAPTION, false);
+        }
     }
 }
 

@@ -106,13 +106,15 @@ pub(super) enum Readout {
 }
 
 impl Readout {
-    fn labels(&self, category: Category, language: Language) -> (String, String) {
+    fn labels(&self, category: Category, language: Language, show_category: bool) -> (String, String) {
         let kind = category.label(language);
+        let with_kind = |text: String| if show_category { format!("{kind} · {text}") } else { text };
         match *self {
             Self::File(duration) => match duration {
-                Some(seconds) => (format!("{kind} · {}", video_duration(seconds)),
-                    format!("{kind} · {}", super::card_duration(seconds, 0.0))),
-                None => (kind.into(), kind.into()),
+                Some(seconds) => (with_kind(video_duration(seconds)),
+                    with_kind(super::card_duration(seconds, 0.0))),
+                None if show_category => (kind.into(), kind.into()),
+                None => (String::new(), String::new()),
             },
             Self::Series(counts) => {
                 let season = if counts.seasons == 1 {
@@ -121,14 +123,14 @@ impl Readout {
                 let episode = if counts.episodes == 1 {
                     local(language, "capítulo", "capítol", "episode")
                 } else { local(language, "capítulos", "capítols", "episodes") };
-                let text = format!("{kind} · {} {season} · {} {episode}", counts.seasons, counts.episodes);
+                let text = with_kind(format!("{} {season} · {} {episode}", counts.seasons, counts.episodes));
                 (text.clone(), text)
             }
             Self::Resume { remaining, .. } => {
-                let mut text = kind.to_owned();
-                if let Some(seconds) = remaining {
-                    text.push_str(&format!(" · {} {}", local(language, "Quedan", "Queden", "Remaining"), video_duration(seconds)));
-                }
+                let text = remaining.map_or_else(
+                    || if show_category { kind.to_owned() } else { String::new() },
+                    |seconds| with_kind(format!("{} {}", local(language, "Quedan", "Queden", "Remaining"), video_duration(seconds))),
+                );
                 (text.clone(), text)
             }
             Self::Episode { duration, .. } => {
@@ -146,6 +148,7 @@ impl Readout {
 pub(super) struct Card<'a> {
     pub title: &'a str,
     pub category: Category,
+    pub show_category: bool,
     pub formats: Formats,
     pub readout: Readout,
     pub fraction: f32,
@@ -365,7 +368,7 @@ impl Art {
     }
 
     fn draw_footer(p: Painter, footer: Rect, card: &Card<'_>, color: [f32; 4], wide: bool) {
-        let (full, short) = card.readout.labels(card.category, i18n::current().language());
+        let (full, short) = card.readout.labels(card.category, i18n::current().language(), card.show_category);
         if matches!(card.readout, Readout::Series(_)) {
             let lines = series_footer_lines(&full, &TtfMeasure, footer.w);
             for (index, line) in lines.into_iter().flatten().enumerate() {
@@ -384,7 +387,7 @@ impl Art {
         }
         let ink = if card.watched { theme::USB_WATCHED_EDGE } else { color };
         let smallest = theme::size::USB_CARD_COUNT_TIGHT;
-        let icon_w = if TtfMeasure.width_str(&short, smallest, false) > footer.w - 23.0 { 0.0 } else { 23.0 };
+        let icon_w = if short.is_empty() || TtfMeasure.width_str(&short, smallest, false) > footer.w - 23.0 { 0.0 } else { 23.0 };
         let symbol_x = if icon_w > 0.0 { footer.x } else { footer.x + footer.w - 17.0 };
         let symbol_y = if icon_w > 0.0 { footer.y + 4.0 } else { footer.y - 32.0 };
         let symbol = Rect::new(symbol_x, symbol_y, 17.0, 17.0);
@@ -393,6 +396,7 @@ impl Art {
         } else if icon_w > 0.0 {
             icons::draw_svg(p, card.category.symbol(), symbol, ink);
         }
+        if full.is_empty() { return; }
         let width = footer.w - icon_w;
         let (label, size) = footer_text(&TtfMeasure, &full, &short, width, wide);
         let run = TtfMeasure.fit_line(label, width, size, false);
@@ -474,8 +478,10 @@ mod usb_browser_tests {
             (Language::Ca, "Documental · 12 temporades · 302 capítols"),
             (Language::En, "Documentary · 12 seasons · 302 episodes"),
         ] {
-            let (full, _) = Readout::Series(counts).labels(Category::Documentary, language);
+            let (full, _) = Readout::Series(counts).labels(Category::Documentary, language, true);
             assert_eq!(full, expected);
+            let (without_category, _) = Readout::Series(counts).labels(Category::Documentary, language, false);
+            assert_eq!(without_category, expected.split_once(" · ").unwrap().1);
             let lines = series_footer_lines(&full, &measure, layout.footer.w);
             assert_eq!(lines.into_iter().flatten().collect::<Vec<_>>().join(" · "), expected);
             assert_eq!(lines.into_iter().flatten().count() as f32 * 19.0, layout.footer.h);
@@ -504,7 +510,7 @@ mod usb_browser_tests {
         assert!(badge.x > text.x + text.w && badge.x + badge.w <= layout.title.x + layout.title.w);
         for episode in 1..=3 {
             let (footer, _) = Readout::Episode { number: Some((1, episode)), duration: Some(3120) }
-                .labels(Category::Documentary, Language::En);
+                .labels(Category::Documentary, Language::En, false);
             assert_eq!(footer, "Episode · 52 min");
         }
     }
