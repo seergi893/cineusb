@@ -3734,9 +3734,12 @@ impl Browser {
         let title_view = |size| TextView::new(title, size, theme::TEXT_PRIMARY)
             .with_measure(&TtfMeasure).bold().break_long_words().leading(size as f32 + 4.0);
         let budget = (VIDEO_ACTION_Y - 18.0 - other_h - 24.0 - plx_ui::consts::MARGIN_Y).max(26.0);
-        let title = [theme::size::TITLE, theme::size::HEADLINE, theme::size::CAPTION]
+        let title = [theme::size::TITLE, theme::size::HEADLINE, theme::size::CAPTION, theme::size::MICRO, theme::size::USB_CARD_META]
             .into_iter().map(title_view).find(|view| view.measure_h(width) <= budget)
-            .unwrap_or_else(|| title_view(theme::size::MICRO));
+            .unwrap_or_else(|| {
+                let size = theme::size::USB_CARD_META;
+                title_view(size).max_lines((budget / (size as f32 + 4.0)).floor().max(1.0) as usize)
+            });
         let title_h = title.measure_h(width);
         let content_h = other_h + title_h;
         let mut y = VIDEO_ACTION_Y - 18.0 - content_h;
