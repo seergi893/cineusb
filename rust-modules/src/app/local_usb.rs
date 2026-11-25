@@ -3839,7 +3839,7 @@ impl Browser {
         self.media_art.draw(p, frame, media_card::Card {
             title: &title, category: Self::category(&item.volume, &item.path, item.show || item.episode.is_some()),
             formats: details.map_or_else(Default::default, |details| media_card::Formats::file(details, self.settings.spanish_audio)),
-            show_category: true,
+            show_category: false,
             readout: Readout::Resume { episode: item.episode, remaining },
             fraction, watched: false, favorite: item.favorite,
         });
