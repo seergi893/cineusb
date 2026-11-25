@@ -98,11 +98,13 @@ fn unpack_progress(value: u64) -> (u64, u64) {
 
 const TOP: f32 = 284.0;
 const MEDIA_GRID_TOP: f32 = 204.0;
-const HOME_GRID_TOP: f32 = 308.0;
-const HOME_HEADER_TOP: f32 = 252.0;
-const HOME_RECENT_TOP: f32 = 616.0;
+const HOME_INTRO_BOTTOM: f32 = 244.0;
+const HOME_HEADER_TOP: f32 = HOME_INTRO_BOTTOM + 40.0;
+const HOME_HEADING_PITCH: f32 = 58.0;
+const HOME_GRID_TOP: f32 = HOME_HEADER_TOP + HOME_HEADING_PITCH;
 const HOME_CARD_W: f32 = 428.0;
-const HOME_CARD_H: f32 = 224.0;
+const HOME_CARD_H: f32 = 240.0;
+const HOME_RECENT_TOP: f32 = HOME_GRID_TOP + HOME_CARD_H + 29.0 + HOME_HEADING_PITCH;
 const HOME_CARD_PITCH: f32 = 446.0;
 const HOME_DISK_X: f32 = 1450.0;
 const HOME_DISK_BOTTOM: f32 = HOME_RECENT_TOP + HOME_CARD_H;
@@ -3292,7 +3294,7 @@ impl Browser {
             }
         });
         if home {
-            draw_line(p, detail, Rect::new(x, 210.0, 920.0, 34.0), theme::size::CAPTION, false);
+            draw_line(p, detail, Rect::new(x, HOME_INTRO_BOTTOM - 34.0, 920.0, 34.0), theme::size::CAPTION, false);
             if let Some((notice, _)) = &self.refresh_notice {
                 draw_line(p, notice, Rect::new(96.0, 956.0, 920.0, 32.0), theme::size::MICRO, false);
             }

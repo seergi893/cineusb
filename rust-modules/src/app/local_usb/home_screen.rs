@@ -145,7 +145,7 @@ impl Browser {
                 tr("Continuar viendo", "Continua mirant"));
         }
         if !self.home_all && !self.home_recent.is_empty() {
-            let y = if resume.is_empty() { HOME_HEADER_TOP } else { HOME_RECENT_TOP - 56.0 };
+            let y = if resume.is_empty() { HOME_HEADER_TOP } else { HOME_RECENT_TOP - HOME_HEADING_PITCH };
             draw_home_heading(p, x, y, Icon::Clock, theme::USB_MOVIE_CARD[2], self.accent(),
                 tr("Añadidas recientemente", "Afegides recentment"));
         }
@@ -264,6 +264,19 @@ fn home_drive_name(volume: &Volume, index: usize, count: usize) -> String {
 #[cfg(test)]
 mod usb_browser_tests {
     use super::*;
+
+    #[test]
+    fn home_leaves_space_between_intro_rows_and_remote_hints() {
+        let mut browser = Browser::new();
+        let volume = Volume { path: "/tmp/usb/sdb1".into(), label: None, mount_id: None, system: false };
+        browser.scan.volumes.push(volume);
+        let disk = browser.home_rect(0);
+        assert!(disk.y - HOME_INTRO_BOTTOM >= 36.0);
+        let focused_resume_bottom = HOME_GRID_TOP + HOME_CARD_H * (1.0 + (USB_STYLE.focus_scale - 1.0) / 2.0);
+        assert!(HOME_RECENT_TOP - HOME_HEADING_PITCH - focused_resume_bottom >= 22.0);
+        assert_eq!(disk.y + disk.h, HOME_RECENT_TOP + HOME_CARD_H);
+        assert!(disk.scaled(USB_STYLE.focus_scale).y + disk.scaled(USB_STYLE.focus_scale).h < 956.0);
+    }
 
     #[test]
     fn longer_home_titles_use_free_slots_without_crossing_the_usb_panel() {

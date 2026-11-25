@@ -1,6 +1,5 @@
 //! One composition for USB media, with a wider arrangement for direct playback from Home.
 use super::{MovieQuality, unpack_progress, video_duration, WATCHED};
-use plx_appkit::player_hud::format_logos::{FormatLogo, FormatLogos};
 use plx_gfx::{gfx, svg, text::TtfMeasure};
 use plx_machine::machine::Measure;
 use plx_play_feed::{LocalVideoDetails, VideoRange};
@@ -159,7 +158,6 @@ pub(super) struct Card<'a> {
 
 #[derive(Default)]
 pub(super) struct Art {
-    logos: RefCell<FormatLogos>,
     illustrations: RefCell<[Option<u32>; 3]>,
 }
 
@@ -321,8 +319,8 @@ impl Art {
         let mut art = layout.art;
         if !episode {
             let y = layout.title.y + header_h + 5.0;
-            let format_bottom = self.draw_formats(p, Rect::new(layout.title.x, y, layout.formats_w, if wide { 24.0 } else { 23.0 }),
-                card.formats, layout.compact, color);
+            let format_bottom = Self::draw_formats(p, Rect::new(layout.title.x, y, layout.formats_w, if wide { 25.0 } else { 23.0 }),
+                card.formats, layout.compact, wide, color);
             if !wide { art = layout.art_below_formats(format_bottom); }
         }
         if art.h > 0.0 { self.draw_illustration(p, card.category, art); }
@@ -364,38 +362,16 @@ impl Art {
         p.rring(rect, 7.0, 1.0, theme::with_a(color, 0.40));
     }
 
-    fn draw_formats(&self, p: Painter, rect: Rect, formats: Formats, compact: bool, color: [f32; 4]) -> f32 {
+    fn draw_formats(p: Painter, rect: Rect, formats: Formats, compact: bool, wide: bool, color: [f32; 4]) -> f32 {
         let mixed = formats.mixed.then(|| local(i18n::current().language(), "Mixtos", "Mixts", "Mixed"));
         let labels = [formats.resolution, formats.video, formats.audio, mixed];
-        let mut logos = self.logos.borrow_mut();
-        if !p.is_recording() {
-            for label in [formats.video, formats.audio].into_iter().flatten() { logos.prepare(label); }
-        }
-        let logos = labels.map(|label| label.and_then(|label| logos.get(label)));
         let gap = if compact { 5.0 } else { 7.0 };
         let size = if compact { theme::size::USB_CARD_META } else { theme::size::DIAGNOSTIC };
-        let height = if compact { 13.0 } else { 17.0 };
-        let width = |index: usize, size, height| labels[index].map_or(0.0, |label| mark_width(label, logos[index], size, height) + 10.0);
-        let rows = |size, height| {
-            let widths = (0..labels.len()).map(|index| width(index, size, height));
-            format_rows(widths, gap, rect.w)
-        };
-        let (size, height) = match rows(size, height) {
-            0 | 1 => (size, height),
-            _ if compact && rows(theme::size::USB_CARD_META, 11.0) > 2 =>
-                (theme::size::USB_CARD_META_TIGHT, 9.0),
-            _ => (theme::size::USB_CARD_META, 11.0),
-        };
+        let (labels, widths, size) = format_labels(labels, rect.w, gap, size, if wide { 1 } else { 2 }, &TtfMeasure);
         let mut row = Flow::new(rect.x, gap);
         let mut y = rect.y;
-        for (index, (label, logo)) in labels.iter().zip(&logos).enumerate() {
-            let Some(label) = *label else { continue };
-            let mut font = size;
-            let mut mark = width(index, size, height);
-            if mark > rect.w && logo.is_none() {
-                font = theme::size::USB_CARD_META_TIGHT;
-                mark = width(index, font, height);
-            }
+        for (label, mark) in labels.into_iter().zip(widths) {
+            let Some(label) = label else { continue };
             let mark = mark.min(rect.w);
             if row.next_x() > rect.x && row.next_x() + mark > rect.x + rect.w {
                 row = Flow::new(rect.x, gap);
@@ -405,12 +381,8 @@ impl Art {
             let slot = Rect::new(span.x, y, span.w, rect.h);
             Self::capsule(p, slot, color);
             let slot = Rect::new(slot.x + 5.0, slot.y, slot.w - 10.0, slot.h);
-            if let Some(logo) = logo {
-                logo.draw(p, Rect::new(slot.x, slot.y + (slot.h - height) / 2.0, slot.w, height), 1.0);
-            } else {
-                let run = TtfMeasure.fit_line(label, slot.w, font, true);
-                Label::new(run.as_ptr(), font, theme::TEXT_SECONDARY).bold().draw(p, slot);
-            }
+            let run = TtfMeasure.fit_line(label, slot.w, size, true);
+            Label::new(run.as_ptr(), size, theme::TEXT_PRIMARY).bold().draw(p, slot);
         }
         if row.next_x() > rect.x { y + rect.h } else { rect.y }
     }
@@ -534,8 +506,32 @@ fn format_rows(widths: impl Iterator<Item = f32>, gap: f32, available: f32) -> u
     rows
 }
 
-fn mark_width(label: &str, logo: Option<&FormatLogo>, size: i32, logo_height: f32) -> f32 {
-    logo.map_or_else(|| TtfMeasure.width_str(label, size, true), |logo| logo.width(logo_height))
+fn format_labels(full: [Option<&'static str>; 4], available: f32, gap: f32, size: i32, preferred_rows: usize,
+    measure: &dyn Measure) -> ([Option<&'static str>; 4], [f32; 4], i32) {
+    let widths = |labels: [Option<&str>; 4], size| {
+        labels.map(|label| label.map_or(0.0, |text| measure.width_str(text, size, true).ceil() + 10.0))
+    };
+    let full_widths = widths(full, size);
+    if full_widths.iter().all(|&width| width <= available)
+        && format_rows(full_widths.into_iter(), gap, available) <= preferred_rows {
+        return (full, full_widths, size);
+    }
+    let short = full.map(|label| label.map(|text| match text {
+        "Dolby Vision" => "DV",
+        "Dolby Digital Plus" => "DD+",
+        "Dolby Digital" => "DD",
+        "Dolby Atmos" => "Atmos",
+        "Dolby TrueHD" => "TrueHD",
+        "DTS-HD MA" => "DTS MA",
+        "DTS-HD HRA" => "DTS HRA",
+        _ => text,
+    }));
+    let short_widths = widths(short, size);
+    if size > theme::size::USB_CARD_META && format_rows(short_widths.into_iter(), gap, available) > preferred_rows {
+        let smaller = theme::size::USB_CARD_META;
+        return (short, widths(short, smaller), smaller);
+    }
+    (short, short_widths, size)
 }
 
 #[cfg(test)]
@@ -607,6 +603,31 @@ mod usb_browser_tests {
     fn compact_format_capsules_pack_without_overlapping_the_art() {
         assert_eq!(format_rows([65.0, 84.0, 108.0].into_iter(), 5.0, 139.0), 3);
         assert_eq!(format_rows([56.0, 71.0, 96.0].into_iter(), 5.0, 139.0), 2);
+    }
+
+    #[test]
+    fn hdr_and_dolby_badges_fit_without_miniature_logos() {
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        for video in ["HDR", "HDR10+", "Dolby Vision"] {
+            let labels = [Some("4K UHD"), Some(video), Some("Dolby Digital Plus"), None];
+            let (wide_names, _, _) = format_labels(labels, 475.0, 7.0, theme::size::DIAGNOSTIC, 1, &measure);
+            assert_eq!(wide_names, labels);
+            let (names, widths, _) = format_labels(labels, 220.0, 7.0, theme::size::DIAGNOSTIC, 1, &measure);
+            assert_eq!(names[1], Some(if video == "Dolby Vision" { "DV" } else { video }));
+            assert_eq!(names[2], Some("DD+"));
+            assert_eq!(format_rows(widths.into_iter(), 7.0, 220.0), 1);
+            for preset in 0..3 {
+                let grid = super::super::grid_geometry(12, preset, true);
+                let layout = Layout::new(Rect::new(0.0, 0.0, grid.w, grid.h), false, false, false, false, 0.0);
+                let gap = if layout.compact { 5.0 } else { 7.0 };
+                let size = if layout.compact { theme::size::USB_CARD_META } else { theme::size::DIAGNOSTIC };
+                let (names, widths, size) = format_labels(labels, layout.formats_w, gap, size, 2, &measure);
+                assert_eq!(names.iter().flatten().count(), 3);
+                assert!(widths.iter().all(|&width| width <= layout.formats_w));
+                assert!(size >= theme::size::USB_CARD_META);
+                assert!(format_rows(widths.into_iter(), gap, layout.formats_w) <= 2);
+            }
+        }
     }
 
     #[test]
