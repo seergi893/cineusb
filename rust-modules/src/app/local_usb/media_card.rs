@@ -133,6 +133,8 @@ impl Readout {
                 );
                 (text.clone(), text)
             }
+            Self::Episode { number: Some(_), duration } if category == Category::Series =>
+                Self::File(duration).labels(category, language, false),
             Self::Episode { duration, .. } => {
                 let label = local(language, "Episodio", "Episodi", "Episode").to_owned();
                 match duration {
@@ -628,6 +630,9 @@ mod usb_browser_tests {
     #[test]
     fn episode_capsule_fits_below_two_line_titles_at_every_size() {
         let measure = plx_base::fontcov::advances::ShippedMeasure;
+        let readout = Readout::Episode { number: Some((12, 103)), duration: Some(3120) };
+        assert_eq!(readout.labels(Category::Series, Language::Ca, false).0, video_duration(3120));
+        assert!(readout.labels(Category::Documentary, Language::Ca, false).0.starts_with("Episodi · "));
         for (language, label) in [(Language::Ca, "Episodi 103"), (Language::Es, "Episodio 103")] {
             for preset in 0..3 {
                 let grid = super::super::grid_geometry(12, preset, true);
