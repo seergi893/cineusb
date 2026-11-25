@@ -127,10 +127,10 @@ impl Readout {
                 (text.clone(), text)
             }
             Self::Resume { remaining, .. } => {
-                let mut text = kind.to_owned();
-                if let Some(seconds) = remaining {
-                    text.push_str(&format!(" · {} {}", local(language, "Quedan", "Queden", "Remaining"), video_duration(seconds)));
-                }
+                let text = remaining.map_or_else(
+                    || if show_category { kind.to_owned() } else { String::new() },
+                    |seconds| with_kind(format!("{} {}", local(language, "Quedan", "Queden", "Remaining"), video_duration(seconds))),
+                );
                 (text.clone(), text)
             }
             Self::Episode { duration, .. } => {
