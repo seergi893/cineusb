@@ -514,7 +514,7 @@ fn resume_episode_footer(footer: Rect, remaining: &str, measure: &dyn Measure) -
     if remaining.is_empty() {
         return (Rect::new(footer.x, footer.y, footer.w, 25.0), None);
     }
-    let width = measure.width_str(remaining, theme::size::DIAGNOSTIC, false).ceil().min(footer.w * 0.40);
+    let width = measure.width_str(remaining, theme::size::DIAGNOSTIC, false).ceil().min((footer.w / 3.0).floor());
     (Rect::new(footer.x, footer.y, footer.w - width - 10.0, 25.0),
         Some(Rect::new(footer.x + footer.w - width, footer.y, width, footer.h)))
 }
