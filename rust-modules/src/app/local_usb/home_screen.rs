@@ -137,22 +137,25 @@ impl Browser {
         let drives = self.scan.volumes.len();
         let resume = drives..self.home_recent_offset();
         if !resume.is_empty() {
-            draw_home_heading(p, x, HOME_HEADER_TOP, Icon::Trailer, theme::USB_SERIES_CARD[2],
+            draw_home_heading(p, x, HOME_HEADER_TOP, Icon::Trailer, theme::USB_SERIES_CARD[2], self.accent(),
                 tr("Continuar viendo", "Continua mirant"));
         }
         if !self.home_all && !self.home_recent.is_empty() {
             let y = if resume.is_empty() { HOME_HEADER_TOP } else { HOME_RECENT_TOP - 56.0 };
-            draw_home_heading(p, x, y, Icon::Clock, theme::USB_MOVIE_CARD[2],
+            draw_home_heading(p, x, y, Icon::Clock, theme::USB_MOVIE_CARD[2], self.accent(),
                 tr("Añadidas recientemente", "Afegides recentment"));
         }
         if !resume.is_empty() {
-            p.clip(Rect::new(x - 12.0, HOME_GRID_TOP - 15.0, 3.0 * HOME_CARD_PITCH + 16.0,
-                if self.home_all { GRID_BOTTOM - HOME_GRID_TOP + 15.0 } else { HOME_CARD_H + 32.0 }));
+            let carousel = resume.len() > 3;
+            if carousel {
+                p.clip(Rect::new(x - 12.0, HOME_GRID_TOP - 15.0, 3.0 * HOME_CARD_PITCH + 16.0,
+                    if self.home_all { GRID_BOTTOM - HOME_GRID_TOP + 15.0 } else { HOME_CARD_H + 32.0 }));
+            }
             for index in resume.clone().filter(|index| *index != self.selected) {
                 self.draw_tile(p, index, false);
             }
             if resume.contains(&self.selected) { self.draw_tile(p, self.selected, self.grid_has_focus()); }
-            p.clip_clear();
+            if carousel { p.clip_clear(); }
         }
         for index in (0..self.len()).filter(|index| !resume.contains(index)) {
             self.draw_tile(p, index, self.selected == index && self.grid_has_focus());
@@ -235,10 +238,10 @@ fn home_row_card<T>(x: f32, y: f32, items: &[T], index: usize, title_width: impl
     Rect::new(left, y, HOME_CARD_W + extra[index] * scale, HOME_CARD_H)
 }
 
-fn draw_home_heading(p: Painter, x: f32, y: f32, icon: Icon, color: [f32; 4], title: &str) {
+fn draw_home_heading(p: Painter, x: f32, y: f32, icon: Icon, color: [f32; 4], accent: [f32; 4], title: &str) {
     let badge = Rect::new(x, y, 54.0, 44.0);
     p.rrect(badge, 10.0, 10.0, theme::with_a(color, 0.20));
-    p.rring(badge, 10.0, 1.5, theme::with_a(color, 0.65));
+    p.rring(badge, 10.0, 1.5, theme::with_a(accent, 0.65));
     icons::draw(p, icon, Rect::new(x + 7.0, y + 2.0, 40.0, 40.0), color);
     draw_line(p, title, Rect::new(x + 69.0, y, 800.0, 44.0), theme::size::HEADLINE, true);
 }
@@ -270,6 +273,8 @@ mod usb_browser_tests {
         assert_eq!(second.w, HOME_CARD_W);
         assert_eq!(second.x - first.x - first.w, HOME_CARD_PITCH - HOME_CARD_W);
         assert!(second.x + second.w < HOME_DISK_X);
+        let widest = home_row_card(x, HOME_GRID_TOP, &["Sèrie"], 0, |_| 2000.0).scaled(USB_STYLE.focus_scale);
+        assert!(widest.x + widest.w < HOME_DISK_X);
         let full = home_row_card(x, HOME_GRID_TOP, &[titles[0]; 3], 2, width);
         assert_eq!(full.w, HOME_CARD_W);
         assert!(full.x + full.w < HOME_DISK_X);
