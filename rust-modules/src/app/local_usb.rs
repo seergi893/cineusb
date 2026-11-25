@@ -123,7 +123,7 @@ fn tr(es: &'static str, ca: &'static str) -> &'static str {
     if i18n::current().language() == Language::Ca { ca } else { es }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action { ToggleFavorite, Select, DeleteFolders }
 
 enum Mutation { Delete, Eject }
@@ -565,6 +565,7 @@ pub(super) struct Browser {
     next_clock_format: Instant,
     scan_phase: u32,
     action: Option<Action>,
+    action_hover: Option<Action>,
     dialog: Option<Dialog>,
     option: usize,
     mutating: bool,
@@ -649,7 +650,7 @@ impl Browser {
             scroll: Spring::at(0.0), pop: GridPop::new(), status: String::new(),
             hour: None, clock_time: None, tv_clock: i18n::current().clock(), next_clock_tick: now,
             next_clock_format: now, scan_phase: 0,
-            action: None, dialog: None, option: 0, mutating: false,
+            action: None, action_hover: None, dialog: None, option: 0, mutating: false,
             selection: None, progress: None,
             settings: Settings { language: Preference::Es, forced_subtitles: false, spanish_audio: false, auto_next: true, accent: 0, cards: 0, sort: 0, extensions: false, show_clock: true, clock_format: 0, clock_size: 1, convert_dts: false },
             settings_job: None, settings_started: false,
@@ -1135,6 +1136,7 @@ impl Browser {
     }
 
     fn grid_has_focus(&self) -> bool {
+        if self.action_hover.is_some() { return false; }
         if self.movie_grid() {
             return self.quality_focus.is_none() && self.quality_hover.is_none()
                 && self.nav_focus.is_none() && self.nav_hover.is_none();
@@ -2814,13 +2816,24 @@ impl Browser {
             })
     }
 
+    fn action_at(&self, x: f32, y: f32) -> Option<(Action, Rect)> {
+        self.content_actions().into_iter()
+            .find(|(action, rect)| self.action_available(*action) && hit(*rect, x, y))
+    }
+
     fn pointer(&mut self, x: f32, y: f32) -> bool {
-        if matches!(self.dialog, Some(Dialog::Settings)) {
+        let previous_action = self.action_hover.take();
+        if matches!(self.dialog, Some(Dialog::Settings | Dialog::Delete { .. } | Dialog::DeleteFolders)) {
             let previous = self.option;
-            if let Some(index) = (0..UNIFIED_SETTINGS_COUNT).find(|&i| hit(unified_setting_rect(i), x, y)) {
+            let option = if matches!(self.dialog, Some(Dialog::Settings)) {
+                (0..UNIFIED_SETTINGS_COUNT).find(|&i| hit(unified_setting_rect(i), x, y))
+            } else {
+                self.horizontal_options().iter().position(|&rect| hit(rect, x, y))
+            };
+            if let Some(index) = option.filter(|&index| self.option_available(index)) {
                 self.option = index;
             }
-            return previous != self.option;
+            return previous != self.option || previous_action.is_some();
         }
         let previous_quality = self.quality_hover;
         self.quality_hover = if self.movie_grid() && self.nav_available() && hit(QUALITY_PILL, x, y) {
@@ -2830,7 +2843,7 @@ impl Browser {
             let left_nav = self.nav_hover.take().is_some() | self.nav_focus.take().is_some();
             let left_action = self.action.take().is_some();
             let left_focus = self.quality_focus.take().is_some();
-            return self.quality_hover != previous_quality || left_nav || left_action || left_focus;
+            return self.quality_hover != previous_quality || left_nav || left_action || left_focus || previous_action.is_some();
         }
         let previous = self.nav_hover;
         self.nav_hover = if self.nav_available() && hit(NAV_PILL, x, y) {
@@ -2843,6 +2856,11 @@ impl Browser {
             self.nav_focus = None;
             self.quality_focus = None;
         } else if self.nav_available() {
+            if let Some((action, _)) = self.action_at(x, y) {
+                let moved_focus = self.nav_focus.take().is_some() | self.action.take().is_some() | self.quality_focus.take().is_some();
+                self.action_hover = Some(action);
+                return previous_action != self.action_hover || previous.is_some() || previous_quality.is_some() || moved_focus;
+            }
             if let Some(index) = self.card_at(x, y) {
                 let left_nav = self.nav_focus.take().is_some();
                 let left_action = self.action.take().is_some();
@@ -2851,13 +2869,14 @@ impl Browser {
                     self.select(index, false);
                     return true;
                 }
-                return previous.is_some() || left_nav || left_action || left_quality;
+                return previous.is_some() || left_nav || left_action || left_quality || previous_action.is_some();
             }
         }
-        previous != self.nav_hover || previous_quality != self.quality_hover
+        previous != self.nav_hover || previous_quality != self.quality_hover || previous_action.is_some()
     }
 
     fn click(&mut self, x: f32, y: f32) {
+        self.action_hover = None;
         if self.nav_available() && hit(NAV_PILL, x, y) {
             if let Some(tab) = NAV_TABS.iter().position(|rect| hit(*rect, x, y)) {
                 self.nav_hover = Some(tab);
@@ -2899,12 +2918,12 @@ impl Browser {
         }
         self.quality_focus = None;
         self.quality_hover = None;
-        if let Some((action, rect)) = self.content_actions().into_iter()
-            .find(|(action, rect)| self.action_available(*action) && hit(*rect, x, y)) {
+        if let Some((action, rect)) = self.action_at(x, y) {
             self.nav_focus = None;
             self.press_button(rect);
             self.action = Some(action);
             self.open_action(action);
+            if self.nav_available() { self.action_hover = self.action_at(x, y).map(|(action, _)| action); }
             return;
         }
         if let Some(index) = self.card_at(x, y) {
@@ -2925,14 +2944,16 @@ impl Browser {
             Key::PointerHidden => {
                 self.nav_hover = None;
                 self.quality_hover = None;
+                self.action_hover = None;
                 return;
             }
             Key::Ok if repeat => {}
             Key::Up | Key::Down | Key::Left { alt: false } | Key::Right { alt: false } | Key::Ok => {
                 self.nav_focus = self.nav_hover.take().or(self.nav_focus);
                 self.quality_focus = self.quality_hover.take().or(self.quality_focus);
+                self.action = self.action_hover.take().or(self.action);
             }
-            Key::Back => { self.nav_hover = None; self.quality_hover = None; }
+            Key::Back => { self.nav_hover = None; self.quality_hover = None; self.action_hover = None; }
             _ => {}
         }
         if let Some(tab) = self.nav_focus {
@@ -3153,7 +3174,7 @@ impl Browser {
                 };
                 let tone = if action == Action::DeleteFolders { ButtonTone::Delete }
                     else { ButtonTone::Default };
-                self.draw_button(p, rect, label, self.action == Some(action), tone, glyph);
+                self.draw_button(p, rect, label, self.action_hover.or(self.action) == Some(action), tone, glyph);
             }
         }
         if self.movie_grid() { self.draw_movie_filter(p); }
@@ -3691,7 +3712,8 @@ impl Browser {
     fn dialog_video_title(&self, path: &std::path::Path) -> String {
         let key = self.detail_key_for(path);
         let tagged = self.details.get(&key).and_then(|details| details.title.as_deref());
-        let mut title = video_title(path, tagged);
+        let movie = matches!(&self.dialog, Some(Dialog::Video { volume, .. }) if self.is_library_movie(volume, path));
+        let mut title = if movie { movie_title(path, tagged) } else { video_title(path, tagged) };
         if let Some(extension) = path.extension().filter(|_| self.settings.extensions) {
             title.push('.');
             title.push_str(&extension.to_string_lossy());
@@ -3704,7 +3726,7 @@ impl Browser {
     fn draw_series_favorite(&self, p: Painter, rect: Rect) {
         let Some((root, key)) = self.series_favorite_key() else { return };
         let marked = self.history_value(&key) == Some(FAVORITE);
-        let focused = self.action == Some(Action::ToggleFavorite);
+        let focused = self.action_hover.or(self.action) == Some(Action::ToggleFavorite);
         // A real 340 ms transition, reversing the yellow fill when removed.
         let alpha = self.favorite_motion.as_ref()
             .filter(|(changed, _, _)| changed == &root)
@@ -3849,7 +3871,11 @@ impl Browser {
     fn home_media_title(&self, item: &home::Item, series: bool) -> String {
         if series { return clean_series_name(&item.title); }
         let embedded = self.details.get(&item.detail_key).and_then(|details| details.title.as_deref());
-        home_file_title(&item.path, embedded)
+        if Self::category(&item.volume, &item.path, false) == Category::Movie {
+            movie_title(&item.path, embedded)
+        } else {
+            home_file_title(&item.path, embedded)
+        }
     }
 
     fn draw_library_card(&self, p: Painter, index: usize, frame: media_card::Frame) -> bool {
@@ -3877,7 +3903,11 @@ impl Browser {
                             let prefix = std::str::from_utf8(prefix).ok()?;
                             (!prefix.is_empty()).then(|| clean_series_name(prefix))
                         }).unwrap_or_else(|| video_title(path, source_title))
-                } else { video_title(path, source_title) };
+                } else if movie || category == Category::Movie {
+                    movie_title(path, source_title)
+                } else {
+                    video_title(path, source_title)
+                };
                 labels.insert(key.clone(), CardLabel {
                     show, movie, source_title: source_title.map(str::to_owned), title, category, numbers, episodic,
                 });
@@ -4549,6 +4579,66 @@ fn home_file_title(path: &std::path::Path, embedded: Option<&str>) -> String {
         return video_title(path, embedded);
     }
     clean_media_title(&stem, None)
+}
+
+fn movie_title(path: &std::path::Path, embedded: Option<&str>) -> String {
+    let stem = path.file_stem().or_else(|| path.file_name()).unwrap_or_default().to_string_lossy();
+    if let Some(title) = movie_title_candidate(&stem) { return title; }
+    if let Some(title) = embedded.filter(|title| title.len() <= 512 && !title.chars().any(char::is_control))
+        .and_then(movie_title_candidate) {
+        return title;
+    }
+    if let Some(title) = path.parent().and_then(std::path::Path::file_name).and_then(|name| name.to_str())
+        .filter(|name| [MOVIES_TAB, SERIES_TAB, DOCUMENTALS_TAB].into_iter().all(|tab| media_folder_score(name, tab) == 0))
+        .and_then(movie_title_candidate) {
+        return title;
+    }
+    tr("Película", "Pel·lícula").into()
+}
+
+fn movie_title_candidate(raw: &str) -> Option<String> {
+    // Release prefixes with several digits and no lowercase letters, such as T3P4K1NG.
+    let coded_group = |tag: &str| {
+        let tag = tag.trim();
+        tag.bytes().filter(u8::is_ascii_digit).count() >= 2
+            && tag.bytes().any(|b| b.is_ascii_uppercase())
+            && tag.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    };
+    let raw = raw.trim();
+    let raw = raw.strip_prefix('[').and_then(|value| value.split_once(']'))
+        .or_else(|| raw.split_once('-'))
+        .filter(|(tag, _)| coded_group(tag))
+        .map_or(raw, |(_, title)| title.trim());
+    let lower = raw.to_ascii_lowercase();
+    let cut = lower.char_indices().find_map(|(index, separator)| {
+        if !matches!(separator, ' ' | '.' | '_' | '-' | '[' | '(') { return None; }
+        let tail = &lower[index + 1..];
+        let resolution = ["2160p", "1440p", "1080p", "720p", "576p", "480p"].into_iter()
+            .find_map(|token| tail.strip_prefix(token));
+        // A release tag often follows the resolution after a dot, even when it has no known codec name.
+        if resolution.is_some_and(|rest| rest.starts_with(['.', '_'])) && index > 0 {
+            return Some(index);
+        }
+        if separator == '-' && raw[..index].ends_with(" m")
+            && resolution.is_some_and(|rest| rest.is_empty() || !rest.starts_with(char::is_alphanumeric)) {
+            return Some(index - 2);
+        }
+        None
+    });
+    let value = cut.map_or(raw, |index| {
+        let prefix = raw[..index].trim_end_matches(' ');
+        let prefix = if raw[index..].starts_with('-') { prefix.strip_suffix(" m").unwrap_or(prefix) } else { prefix };
+        prefix.rsplit_once('.').filter(|(name, year)| !name.is_empty() && year.len() == 4
+            && year.parse::<u16>().is_ok_and(|year| (1888..=2035).contains(&year)))
+            .map_or(prefix, |(name, _)| name)
+    });
+    let title = clean_media_title(value.trim_end_matches([' ', '.', '_', '-', '[', '(']), None);
+    let lower = title.to_ascii_lowercase();
+    let generic = placeholder_title(&title) || matches!(lower.as_str(), "" | "video" | "movie" | "película" | "pel·lícula"
+        | "2160p" | "1440p" | "1080p" | "720p" | "576p" | "480p");
+    let credit = ["montado por ", "montaje de ", "encode by ", "encoded by ", "ripped by ", "muxed by "]
+        .into_iter().any(|prefix| lower.starts_with(prefix));
+    (!generic && !credit).then_some(title)
 }
 
 fn clean_series_name(raw: &str) -> String {
@@ -5649,6 +5739,45 @@ mod usb_browser_tests {
     }
 
     #[test]
+    fn pointer_highlights_selection_cancel_and_delete_in_each_library() {
+        for tab in [MOVIES_TAB, SERIES_TAB, DOCUMENTALS_TAB] {
+            let mut browser = movie_quality_browser();
+            browser.nav_tab = tab;
+            let folder = browser.folders.last_mut().unwrap();
+            folder.volume.system = true;
+            folder.volume.mount_id = Some(42);
+            if tab == SERIES_TAB {
+                folder.entries = vec![disk::media_entry("Una sèrie".into(), true).unwrap()];
+            }
+            let center = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let (x, y) = center(browser.content_actions()[1].1);
+            assert!(browser.pointer(x, y));
+            assert_eq!(browser.action_hover, Some(Action::Select));
+            assert!(!browser.grid_has_focus());
+            assert!(browser.selection.is_none());
+            browser.click(x, y);
+            assert!(browser.selection.is_some());
+            assert_eq!(browser.action_hover, Some(Action::Select));
+            browser.open();
+            let (x, y) = center(browser.content_actions()[2].1);
+            assert!(browser.pointer(x, y));
+            assert_eq!(browser.action_hover, Some(Action::DeleteFolders));
+            assert!(browser.dialog.is_none());
+            browser.key(Key::PointerHidden, false);
+            assert!(browser.action_hover.is_none());
+            browser.click(x, y);
+            assert!(matches!(browser.dialog, Some(Dialog::DeleteFolders)));
+            let (confirm_x, confirm_y) = center(browser.horizontal_options()[1]);
+            assert!(browser.pointer(confirm_x, confirm_y));
+            assert_eq!(browser.option, 1);
+            let (cancel_x, cancel_y) = center(browser.horizontal_options()[0]);
+            assert!(browser.pointer(cancel_x, cancel_y));
+            assert_eq!(browser.option, 0);
+            assert!(browser.pending.is_none());
+        }
+    }
+
+    #[test]
     fn deletion_selection_is_scoped_to_the_current_library_tab() {
         for tab in [MOVIES_TAB, SERIES_TAB, DOCUMENTALS_TAB] {
             let mut browser = movie_quality_browser();
@@ -6141,6 +6270,25 @@ mod usb_browser_tests {
                     language: Some("eng".into()), title: "SDH".into(),
                     forced: false, default: false, sdh: true },
             ],
+        }
+    }
+
+    #[test]
+    fn movie_titles_discard_container_credits_and_filename_release_tags() {
+        use std::path::Path;
+        for (path, tag, expected) in [
+            ("Pel·lícules/Comanchería.1080p.mkv", "montado por axo", "Comanchería"),
+            ("Pel·lícules/T3P4K1NG- Crash.mkv", "T3P4K1NG- Crash", "Crash"),
+            ("Pel·lícules/[T3P4K1NG] Crash (2004).mkv", "Crash", "Crash"),
+            ("Pel·lícules/Margin Call m-1080p.guerrero.mkv", "Margin Call m-1080p.guerrero", "Margin Call"),
+            ("Pel·lícules/Comanchería/title_t00.mkv", "montado por axo", "Comanchería"),
+            ("Pel·lícules/title_t00.mkv", "La Odisea", "La Odisea"),
+            ("Pel·lícules/Film.1999.1080p.Group.mkv", "credits", "Film"),
+            ("Pel·lícules/Blade.Runner.2049.2160p.HDR10+.x265.mkv", "credits", "Blade Runner 2049"),
+            ("Pel·lícules/S1m0ne.mkv", "credits", "S1m0ne"),
+            ("Pel·lícules/The HDR Story.mkv", "credits", "The HDR Story"),
+        ] {
+            assert_eq!(movie_title(Path::new(path), Some(tag)), expected, "{path}");
         }
     }
 
