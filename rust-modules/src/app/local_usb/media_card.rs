@@ -511,9 +511,10 @@ fn format_labels(full: [Option<&'static str>; 4], available: f32, gap: f32, size
     let widths = |labels: [Option<&str>; 4], size| {
         labels.map(|label| label.map_or(0.0, |text| measure.width_str(text, size, true).ceil() + 10.0))
     };
+    let fits = |widths: [f32; 4]| widths.iter().all(|&width| width <= available)
+        && format_rows(widths.into_iter(), gap, available) <= preferred_rows;
     let full_widths = widths(full, size);
-    if full_widths.iter().all(|&width| width <= available)
-        && format_rows(full_widths.into_iter(), gap, available) <= preferred_rows {
+    if fits(full_widths) {
         return (full, full_widths, size);
     }
     let short = full.map(|label| label.map(|text| match text {
@@ -527,7 +528,15 @@ fn format_labels(full: [Option<&'static str>; 4], available: f32, gap: f32, size
         _ => text,
     }));
     let short_widths = widths(short, size);
-    if size > theme::size::USB_CARD_META && format_rows(short_widths.into_iter(), gap, available) > preferred_rows {
+    for index in [2, 1] {
+        if full[index] == short[index] { continue; }
+        let mut labels = full;
+        let mut widths = full_widths;
+        labels[index] = short[index];
+        widths[index] = short_widths[index];
+        if fits(widths) { return (labels, widths, size); }
+    }
+    if size > theme::size::USB_CARD_META && !fits(short_widths) {
         let smaller = theme::size::USB_CARD_META;
         return (short, widths(short, smaller), smaller);
     }
@@ -608,6 +617,13 @@ mod usb_browser_tests {
     #[test]
     fn hdr_and_dolby_badges_fit_without_miniature_logos() {
         let measure = plx_base::fontcov::advances::ShippedMeasure;
+        let size = theme::size::DIAGNOSTIC;
+        let only_audio_short = ["4K UHD", "Dolby Vision", "DD+"];
+        let width = only_audio_short.into_iter().map(|text| measure.width_str(text, size, true).ceil() + 10.0)
+            .sum::<f32>() + 14.0;
+        let (names, _, _) = format_labels([Some("4K UHD"), Some("Dolby Vision"), Some("Dolby Digital Plus"), None],
+            width, 7.0, size, 1, &measure);
+        assert_eq!(names, [Some("4K UHD"), Some("Dolby Vision"), Some("DD+"), None]);
         for video in ["HDR", "HDR10+", "Dolby Vision"] {
             let labels = [Some("4K UHD"), Some(video), Some("Dolby Digital Plus"), None];
             let (wide_names, _, _) = format_labels(labels, 475.0, 7.0, theme::size::DIAGNOSTIC, 1, &measure);
