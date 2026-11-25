@@ -425,7 +425,8 @@ pub(super) fn recent(drives: &[Drive]) -> Vec<Recent> {
             }
             let folder = series.as_ref().map(|key| drive.volume.path.join(&key.folder));
             let title = series.as_ref().and_then(|key| key.title(video));
-            latest.push((video.modified, series, Recent { item: item(drive, video, title, false, 0), folder }));
+            let item = item(drive, video, title, false, 0);
+            latest.push((video.modified, series, Recent { item, folder }));
             latest.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.item.path.cmp(&b.2.item.path)));
             latest.truncate(3);
         }
