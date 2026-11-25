@@ -219,42 +219,38 @@ const EPISODE_BADGE_PAD: f32 = 9.0;
 struct EpisodeBadge {
     season: String,
     episode: String,
-    season_size: i32,
-    episode_size: i32,
+    size: i32,
 }
 
 impl EpisodeBadge {
     fn new((season, episode): (u32, u32), language: Language, compact: bool) -> Self {
-        let label = local(language, "Episodio", "Episodi", "Episode");
+        let season_label = local(language, "Temporada", "Temporada", "Season");
+        let episode_label = local(language, "Episodio", "Episodi", "Episode");
         Self {
-            season: format!("T{season}"),
-            episode: format!("{label} {episode}"),
-            season_size: if compact { theme::size::USB_CARD_META_TIGHT } else { theme::size::USB_CARD_META },
-            episode_size: if compact { theme::size::USB_CARD_META } else { theme::size::MICRO },
+            season: format!("{season_label} {season}"),
+            episode: format!("{episode_label} {episode}"),
+            size: if compact { theme::size::USB_CARD_META } else { theme::size::MICRO },
         }
     }
 
     fn rect(&self, title: Rect, title_h: f32, width: f32, measure: &dyn Measure) -> Rect {
-        let text_width = measure.width_str(&self.season, self.season_size, true)
-            .max(measure.width_str(&self.episode, self.episode_size, true));
+        let text_width = measure.width_str(&self.season, self.size, true)
+            .max(measure.width_str(&self.episode, self.size, true));
         Rect::new(title.x, title.y + title_h + 4.0, (text_width.ceil() + EPISODE_BADGE_PAD * 2.0).min(width),
-            (self.season_size + self.episode_size) as f32 + 12.0)
+            2.0 * self.size as f32 + 12.0)
     }
 
     fn draw(&self, p: Painter, rect: Rect) {
         let ink = theme::USB_FAVORITES;
         p.rrect(rect, 7.0, 7.0, theme::USB_FAVORITES_GROUND);
         p.rring(rect, 7.0, 1.0, theme::with_a(ink, 0.72));
-        let top = rect.y + 4.0;
-        let season_h = self.season_size as f32 + 2.0;
+        let line_h = self.size as f32 + 2.0;
         let x = rect.x + EPISODE_BADGE_PAD;
         let w = rect.w - EPISODE_BADGE_PAD * 2.0;
-        for (text, size, y, h) in [
-            (&self.season, self.season_size, top, season_h),
-            (&self.episode, self.episode_size, top + season_h, self.episode_size as f32 + 2.0),
-        ] {
-            let run = TtfMeasure.fit_line(text, w, size, true);
-            Label::new(run.as_ptr(), size, ink).bold().draw(p, Rect::new(x, y, w, h));
+        for (index, text) in [&self.season, &self.episode].into_iter().enumerate() {
+            let y = rect.y + 4.0 + index as f32 * line_h;
+            let run = TtfMeasure.fit_line(text, w, self.size, true);
+            Label::new(run.as_ptr(), self.size, ink).bold().draw(p, Rect::new(x, y, w, line_h));
         }
     }
 }
@@ -640,12 +636,13 @@ mod usb_browser_tests {
                     let layout = Layout::new(Rect::new(0.0, 0.0, grid.w * scale, grid.h * scale),
                         false, true, false, false, 26.0);
                     let badge = EpisodeBadge::new((12, 103), language, layout.compact);
-                    assert_eq!(badge.season, "T12");
+                    assert_eq!(badge.season, "Temporada 12");
                     assert_eq!(badge.episode, label);
-                    assert!(badge.episode_size > badge.season_size);
                     let r = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
                     assert!(r.y >= layout.title.y + layout.title.h && r.x + r.w <= layout.title.x + layout.title.w);
-                    assert!(measure.width_str(label, badge.episode_size, true) + EPISODE_BADGE_PAD * 2.0 <= r.w);
+                    for line in [&badge.season, &badge.episode] {
+                        assert!(measure.width_str(line, badge.size, true) + EPISODE_BADGE_PAD * 2.0 <= r.w);
+                    }
                     let art = layout.art_below_formats(r.y + r.h);
                     assert!(r.y + r.h <= art.y && art.h > 0.0 && art.y + art.h < layout.progress.y);
                 }
@@ -661,8 +658,9 @@ mod usb_browser_tests {
                 let layout = Layout::new(Rect::new(0.0, 0.0, super::super::HOME_CARD_W * scale, height * scale),
                     true, false, true, false, 0.0);
                 let badge = EpisodeBadge::new((1, 2), Language::Ca, layout.compact);
-                let badge = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
-                assert!(badge.x + badge.w < layout.art.x && badge.y + badge.h < layout.progress.y);
+                let badge_rect = badge.rect(layout.title, layout.title.h, layout.formats_w, &measure);
+                assert!(badge_rect.x + badge_rect.w < layout.art.x && badge_rect.y + badge_rect.h < layout.progress.y);
+                assert!(measure.width_str(&badge.season, badge.size, true) + EPISODE_BADGE_PAD * 2.0 <= badge_rect.w);
                 let (formats, time) = resume_episode_footer(layout.footer, "Queden 2 h 52 min", &measure);
                 assert!(formats.x + formats.w < time.unwrap().x);
                 assert!(layout.progress.y + layout.progress.h < formats.y);
