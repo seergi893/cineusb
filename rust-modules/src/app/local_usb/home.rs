@@ -404,6 +404,35 @@ fn item(drive: &Drive, video: &Video, show: Option<&str>, favorite: bool, progre
         episode: numbers(video).map(|e| (e.season, e.first)), show: show.is_some() }
 }
 
+#[derive(Debug)]
+pub(super) struct Recent {
+    pub item: Item,
+    pub folder: Option<PathBuf>,
+}
+
+/// The inventory records modification times, the portable date available on our USB filesystems.
+pub(super) fn recent(drives: &[Drive]) -> Vec<Recent> {
+    let mut latest: Vec<(i64, Option<SeriesKey>, Recent)> = Vec::with_capacity(4);
+    for drive in drives {
+        for video in &drive.videos {
+            if latest.len() == 3 && latest.last().is_some_and(|entry| entry.0 > video.modified) { continue; }
+            let series = video.show.as_ref().map(|folder| SeriesKey { folder: folder.clone(), flat_title: None })
+                .or_else(|| SeriesKey::for_video(video));
+            if let Some(previous) = series.as_ref().and_then(|key| latest.iter().position(|(_, existing, recent)|
+                existing.as_ref() == Some(key) && recent.item.volume == drive.volume)) {
+                if latest[previous].0 >= video.modified { continue; }
+                latest.remove(previous);
+            }
+            let folder = series.as_ref().map(|key| drive.volume.path.join(&key.folder));
+            let title = series.as_ref().and_then(|key| key.title(video));
+            latest.push((video.modified, series, Recent { item: item(drive, video, title, false, 0), folder }));
+            latest.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.item.path.cmp(&b.2.item.path)));
+            latest.truncate(3);
+        }
+    }
+    latest.into_iter().map(|(_, _, recent)| recent).collect()
+}
+
 fn verified_recommendations(drive: &mut Drive, stop: &AtomicBool) -> io::Result<Vec<Item>> {
     // Recompute after pruning missing files so deleted seasons can expose
     // a recommendation in another parent directory immediately.
@@ -556,6 +585,24 @@ mod usb_browser_tests {
     fn drive(volume: Volume, history: BTreeMap<String, u64>) -> Drive {
         let inventory = scan(&volume, "uuid:test", &[], &AtomicBool::new(false)).unwrap();
         Drive { volume, facts: (None, Some("uuid:test".into())), stats: Some(inventory.stats), videos: inventory.videos, history: Some(history) }
+    }
+
+    #[test]
+    fn recent_uses_the_latest_episode_once_per_series_and_limits_the_row() {
+        let (root, volume) = fixture("cineusb-recent-series");
+        let mut disk = drive(volume, BTreeMap::new());
+        for video in &mut disk.videos {
+            video.modified = if video.path.ends_with("Show S03E01.mkv") { 30 }
+                else if video.path.ends_with("Show S02E01.mkv") { 20 }
+                else { 10 };
+        }
+        let latest = recent(&[disk]);
+        assert!(latest.len() <= 3);
+        assert_eq!(latest[0].item.episode, Some((3, 1)));
+        let folder = latest[0].folder.as_ref().unwrap();
+        assert!(latest[0].item.path.starts_with(folder));
+        assert_eq!(latest.iter().filter(|entry| entry.folder.as_ref() == Some(folder)).count(), 1);
+        plx_base::testscratch::remove_tree(&root);
     }
 
     #[test]
