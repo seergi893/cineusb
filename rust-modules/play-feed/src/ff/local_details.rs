@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VideoRange {
     Sdr,
     Hdr10,
@@ -10,13 +10,30 @@ pub enum VideoRange {
     DolbyVisionHdr10,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct LocalAudioFormat {
     pub label: &'static str,
     pub channels: Option<u8>,
 }
 
-#[derive(Clone, Debug, Default)]
+impl<'de> serde::Deserialize<'de> for LocalAudioFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct SavedAudio { label: String, channels: Option<u8> }
+        let saved = <SavedAudio as serde::Deserialize>::deserialize(deserializer)?;
+        let label = [
+            ("ac3", -99), ("eac3", 30), ("eac3", -99), ("truehd", -99),
+            ("dts", 61), ("dts", 60), ("dts", 50), ("dts", -99),
+            ("aac", -99), ("flac", -99), ("mp3", -99), ("mp2", -99),
+            ("opus", -99), ("vorbis", -99), ("alac", -99), ("pcm_s16le", -99),
+        ].into_iter().filter_map(|(codec, profile)| audio_label(codec, profile))
+            .find(|known| *known == saved.label.as_str())
+            .ok_or_else(|| serde::de::Error::custom("unknown audio format"))?;
+        Ok(Self { label, channels: saved.channels })
+    }
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct LocalVideoDetails {
     pub bytes: Option<u64>,
     pub resolution: Option<(u32, u32)>,

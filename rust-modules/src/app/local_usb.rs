@@ -6,6 +6,7 @@ mod demo;
 mod series;
 mod home;
 mod media_card;
+mod details_cache;
 
 use art::Cover;
 use super::{App, Key, playback};
@@ -468,6 +469,16 @@ struct PlayingVideo {
 
 type DetailKey = (PathBuf, Option<u64>, Option<i64>);
 
+struct CardLabel {
+    show: Option<PathBuf>,
+    movie: bool,
+    source_title: Option<String>,
+    title: String,
+    category: Category,
+    numbers: Option<(u32, u32)>,
+    episodic: bool,
+}
+
 struct DetailsRequest {
     volume: Volume,
     key: DetailKey,
@@ -555,6 +566,8 @@ pub(super) struct Browser {
     series_job: Option<SeriesRequest>,
     series_cache: BTreeMap<PathBuf, SeriesCacheEntry>,
     dashboard: home::Dashboard,
+    inventory_paths: BTreeMap<PathBuf, (usize, usize)>,
+    card_labels: std::cell::RefCell<BTreeMap<DetailKey, CardLabel>>,
     home_job: Option<HomeRequest>,
     home_refresh: Instant,
     home_first_open: Option<Instant>,
@@ -624,6 +637,7 @@ impl Browser {
             series_job: None, series_cache: BTreeMap::new(),
             media_art: Default::default(),
             dashboard: home::Dashboard { drives: vec![], items: vec![], refreshed_folder: None }, home_job: None,
+            inventory_paths: BTreeMap::new(), card_labels: Default::default(),
             home_refresh: now, home_first_open: Some(now), home_force_refresh: false,
             manual_refresh: None, refresh_notice: None,
             facts: None, facts_job: None, prepared: None, ready: None, playing: None,
@@ -689,6 +703,25 @@ impl Browser {
                 self.movie_entries.push(index);
                 self.movie_count += 1;
             }
+        }
+    }
+
+    fn accept_video_details(&mut self, key: DetailKey, details: plx_play_feed::LocalVideoDetails) {
+        let quality = |details: &plx_play_feed::LocalVideoDetails| {
+            details.resolution.and_then(|(width, height)| MovieQuality::of(width, height))
+        };
+        let new_quality = quality(&details);
+        let previous = self.details.insert(key.clone(), details);
+        if !self.movie_grid() { return; }
+        let folder = self.folders.last().expect("movie directory is open");
+        if key.0.parent() != Some(folder.path.as_path()) || !folder.entries.iter().any(|entry| {
+            entry.kind == Kind::Video && key.0.file_name() == Some(entry.name.as_os_str())
+                && key.1 == entry.size && key.2 == entry.modified
+        }) { return; }
+        if self.movie_filter.matches(previous.as_ref().and_then(quality)) != self.movie_filter.matches(new_quality) {
+            self.refresh_movie_grid();
+        } else if previous.is_none() {
+            self.movie_pending = self.movie_pending.saturating_sub(1);
         }
     }
 
@@ -1788,16 +1821,29 @@ impl Browser {
         (folder.path.join(&entry.name), entry.size, entry.modified)
     }
 
+    fn index_inventory_paths(&mut self) {
+        self.inventory_paths.clear();
+        for (drive_index, drive) in self.dashboard.drives.iter().enumerate() {
+            for (video_index, video) in drive.videos.iter().enumerate() {
+                self.inventory_paths.insert(drive.volume.path.join(&video.path), (drive_index, video_index));
+            }
+        }
+    }
+
+    fn inventory_video(&self, path: &std::path::Path) -> Option<(&Volume, &home::Video)> {
+        let &(drive, video) = self.inventory_paths.get(path)?;
+        let drive = &self.dashboard.drives[drive];
+        Some((&drive.volume, &drive.videos[video]))
+    }
+
     fn detail_key_for(&self, path: &std::path::Path) -> DetailKey {
         self.folders.last().filter(|folder| path.parent() == Some(folder.path.as_path()))
             .and_then(|folder| folder.entries.iter()
             .find(|entry| path.file_name() == Some(entry.name.as_os_str()))
             .map(|entry| Self::detail_key(folder, entry)))
             .or_else(|| self.dashboard.items.iter().find(|item| item.path == path).map(|item| item.detail_key.clone()))
-            .or_else(|| self.dashboard.drives.iter().find_map(|drive| {
-                let relative = path.strip_prefix(&drive.volume.path).ok()?;
-                let video = drive.videos.iter().find(|video| video.path == relative)?;
-                Some((path.to_path_buf(), Some(video.size), Some(video.modified)))
+            .or_else(|| self.inventory_video(path).map(|(_, video)| {
+                (path.to_path_buf(), Some(video.size), Some(video.modified))
             }))
             .unwrap_or_else(|| (path.to_path_buf(), None, None))
     }
@@ -1824,8 +1870,7 @@ impl Browser {
                 Err(TryRecvError::Empty) => return false,
                 result => {
                     if self.scan.volumes.contains(&job.volume) {
-                        self.details.insert(job.key.clone(), result.unwrap_or_default());
-                        self.refresh_movie_grid();
+                        self.accept_video_details(job.key.clone(), result.unwrap_or_default());
                     }
                     self.details_job = None;
                     changed = true;
@@ -1856,18 +1901,23 @@ impl Browser {
         };
         let Some((volume, key)) = target else { return changed };
         let mount = system_mount(&volume);
-        let file = key.0.clone();
+        let identity = self.identity(&volume).map(str::to_owned);
+        let source = volume.clone();
+        let detail = key.clone();
         let (send, reply) = mpsc::sync_channel(1);
         if plx_base::task::spawn_off_frame("cineusb-video-details", move |_| {
-            let details = open_for_details(&file, mount).map_or_else(|_| Default::default(), |file| {
-                plx_play_feed::probe_local_details(&file)
-            });
+            let cache = if detail.1.is_some() && detail.2.is_some() {
+                identity.or_else(|| volume_facts(&source).1)
+                    .and_then(|identity| details_cache::Key::new(&identity, &source, &detail))
+            } else {
+                None
+            };
+            let details = details_cache::probe(cache.as_ref(), || open_for_details(&detail.0, mount));
             let _ = send.send(details);
         }) {
             self.details_job = Some(DetailsRequest { volume, key, reply });
         } else {
-            self.details.insert(key, Default::default());
-            self.refresh_movie_grid();
+            self.accept_video_details(key, Default::default());
         }
         changed
     }
@@ -2014,7 +2064,11 @@ impl Browser {
         let had_missing_drive = self.dashboard.drives.iter().any(|drive| !self.scan.volumes.contains(&drive.volume));
         self.dashboard.drives.retain(|drive| self.scan.volumes.contains(&drive.volume));
         self.dashboard.items.retain(|item| self.scan.volumes.contains(&item.volume));
-        if had_missing_drive { self.home_refresh = now; changed = true; }
+        if had_missing_drive {
+            self.index_inventory_paths();
+            self.home_refresh = now;
+            changed = true;
+        }
         if let Some(job) = &self.home_job {
             if job.volumes != self.scan.volumes {
                 job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2076,6 +2130,7 @@ impl Browser {
                                 self.dashboard.items.truncate(12);
                                 self.discovery_cache.clear();
                             } else { self.dashboard = dashboard; }
+                            self.index_inventory_paths();
                             self.refresh_series_watched(None);
                             if job.manual {
                                 self.invalidate_series_counts();
@@ -3793,28 +3848,39 @@ impl Browser {
             let details = self.details.get(&key);
             let show = self.episode_show(volume, path);
             let movie = self.is_library_movie(volume, path);
-            let episode_path = show.as_ref().and_then(|show| path.strip_prefix(show).ok())
-                .or_else(|| path.strip_prefix(&volume.path).ok()).unwrap_or(path);
-            let numbers = (!movie).then(|| home::episode_numbers(episode_path, show.is_some())).flatten();
-            let episodic = !movie && (numbers.is_some() || show.is_some());
-            let category = Self::category(volume, path, episodic);
+            let source_title = details.and_then(|value| value.title.as_deref());
+            let mut labels = self.card_labels.borrow_mut();
+            if labels.len() >= 512 && !labels.contains_key(&key) { labels.clear(); }
+            let valid = labels.get(&key).is_some_and(|label|
+                label.show == show && label.movie == movie && label.source_title.as_deref() == source_title);
+            if !valid {
+                let episode_path = show.as_ref().and_then(|show| path.strip_prefix(show).ok())
+                    .or_else(|| path.strip_prefix(&volume.path).ok()).unwrap_or(path);
+                let numbers = (!movie).then(|| home::episode_numbers(episode_path, show.is_some())).flatten();
+                let episodic = !movie && (numbers.is_some() || show.is_some());
+                let category = Self::category(volume, path, episodic);
+                let title = if episodic {
+                    show.as_deref().and_then(std::path::Path::file_name).and_then(|name| name.to_str())
+                        .map(clean_series_name)
+                        .or_else(|| {
+                            let (prefix, _, _) = continuity::episode(path.file_name()?)?;
+                            let prefix = std::str::from_utf8(prefix).ok()?;
+                            (!prefix.is_empty()).then(|| clean_series_name(prefix))
+                        }).unwrap_or_else(|| video_title(path, source_title))
+                } else { video_title(path, source_title) };
+                labels.insert(key.clone(), CardLabel {
+                    show, movie, source_title: source_title.map(str::to_owned), title, category, numbers, episodic,
+                });
+            }
+            let label = labels.get(&key).expect("prepared card label");
             let duration = details.and_then(|details| details.duration_secs);
             let record = self.file_record(volume, &key);
             let (fraction, _) = media_card::file_progress(record, duration);
-            let title = if episodic {
-                show.as_deref().and_then(std::path::Path::file_name).and_then(|name| name.to_str())
-                    .map(clean_series_name)
-                    .or_else(|| {
-                        let (prefix, _, _) = continuity::episode(path.file_name()?)?;
-                        let prefix = std::str::from_utf8(prefix).ok()?;
-                        (!prefix.is_empty()).then(|| clean_series_name(prefix))
-                    }).unwrap_or_else(|| video_title(path, details.and_then(|details| details.title.as_deref())))
-            } else { video_title(path, details.and_then(|details| details.title.as_deref())) };
-            let favorite = !episodic && self.favorite_marked(volume, path);
+            let favorite = !label.episodic && self.favorite_marked(volume, path);
             self.media_art.draw(p, frame, media_card::Card {
-                title: &title, category, fraction, favorite, watched: record == WATCHED,
+                title: &label.title, category: label.category, fraction, favorite, watched: record == WATCHED,
                 formats: details.map_or_else(Default::default, |details| media_card::Formats::file(details, self.settings.spanish_audio)),
-                readout: if episodic { Readout::Episode { number: numbers, duration } } else { Readout::File(duration) },
+                readout: if label.episodic { Readout::Episode { number: label.numbers, duration } } else { Readout::File(duration) },
             });
             return true;
         }
@@ -3839,9 +3905,8 @@ impl Browser {
 
     fn episode_show(&self, volume: &Volume, path: &std::path::Path) -> Option<PathBuf> {
         if self.is_library_movie(volume, path) { return None; }
-        let relative = path.strip_prefix(&volume.path).ok()?;
-        if let Some(video) = self.dashboard.drives.iter().find(|drive| &drive.volume == volume)
-            .and_then(|drive| drive.videos.iter().find(|video| video.path == relative)) {
+        path.strip_prefix(&volume.path).ok()?;
+        if let Some((_, video)) = self.inventory_video(path).filter(|(disk, _)| *disk == volume) {
             return video.show.as_ref().map(|show| volume.path.join(show));
         }
         let folder = self.folders.last().filter(|folder| &folder.volume == volume)?;
@@ -5558,6 +5623,27 @@ mod usb_browser_tests {
             assert!(!browser.action_available(Action::Select));
             assert!(!browser.action_available(Action::DeleteFolders));
         }
+    }
+
+    #[test]
+    fn metadata_only_changes_movie_membership_when_it_matches_the_active_filter() {
+        let mut browser = movie_quality_browser();
+        browser.select(1, true);
+        let selected = browser.selected;
+        let entries = browser.movie_entries.clone();
+        let folder = browser.folders.last().unwrap();
+        let pending = folder.entries.iter().find(|entry| entry.name == "D.mkv").unwrap();
+        let key = Browser::detail_key(folder, pending);
+        let hd = plx_play_feed::LocalVideoDetails { resolution: Some((1920, 1080)), ..Default::default() };
+        browser.accept_video_details(key.clone(), hd);
+        assert_eq!(browser.movie_entries, entries);
+        assert_eq!(browser.selected, selected);
+        assert_eq!(browser.movie_pending, 0);
+
+        browser.choose_movie_filter(1);
+        let uhd = plx_play_feed::LocalVideoDetails { resolution: Some((3840, 2160)), ..Default::default() };
+        browser.accept_video_details(key, uhd);
+        assert_eq!(movie_names(&browser), ["A.mkv", "B.mkv", "D.mkv"]);
     }
 
     #[test]
