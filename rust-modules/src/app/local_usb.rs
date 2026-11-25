@@ -4996,7 +4996,7 @@ pub(super) fn finish_clock(app: &App) -> Option<plx_appkit::player_hud::model::F
 }
 
 pub(super) fn observe_playback(app: &mut App) {
-    let menu_audio = app.usb.settings.christmas && app.usb.settings.christmas_music
+    let menu_audio = app.running && app.usb.settings.christmas && app.usb.settings.christmas_music
         && app.route() == AppArg::LocalUsb && app.window_activity.allow_present(true)
         && app.usb.playing.is_none() && !super::bridge::player_arriving(&app.pages);
     app.usb.christmas_music.sync(menu_audio);
@@ -5057,6 +5057,7 @@ pub(super) fn playback_completed(app: &mut App) {
 
 pub(super) fn flush_playback(app: &mut App) {
     observe_playback(app);
+    app.usb.christmas_music.sync(false);
     app.usb.finish_video(false);
     app.usb.flush_progress(true);
 }

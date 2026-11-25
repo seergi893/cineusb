@@ -101,7 +101,7 @@ impl AudioApi {
 struct Device {
     api: AudioApi,
     id: u32,
-    _cursor: Box<usize>,
+    cursor: *mut usize,
 }
 
 impl Device {
@@ -109,19 +109,22 @@ impl Device {
         let api = AudioApi::resolve()?;
         // SAFETY: this lease is released on open failure or by Device::drop.
         if unsafe { (api.init)(AUDIO_INIT) } != 0 { return None; }
-        let mut cursor = Box::new(0usize);
+        let cursor = Box::into_raw(Box::new(0usize));
         let spec = AudioSpec { frequency: 24000, format: AUDIO_S16LE, channels: 1, silence: 0,
             samples: 512, padding: 0, size: 0, callback: Some(fill_music),
-            user_data: (&mut *cursor as *mut usize).cast() };
+            user_data: cursor.cast() };
         // SAFETY: the callback's cursor outlives the device. No changes are allowed
         // to the PCM format expected by the callback.
         let id = unsafe { (api.open)(std::ptr::null(), 0, &spec, std::ptr::null_mut(), 0) };
         if id == 0 {
-            unsafe { (api.quit)(AUDIO_INIT) };
+            unsafe {
+                drop(Box::from_raw(cursor));
+                (api.quit)(AUDIO_INIT);
+            }
             return None;
         }
         unsafe { (api.pause)(id, 0) };
-        Some(Self { api, id, _cursor: cursor })
+        Some(Self { api, id, cursor })
     }
 }
 
@@ -130,6 +133,7 @@ impl Drop for Device {
         // SDL joins the callback before returning, so it cannot see a freed cursor.
         unsafe {
             (self.api.close)(self.id);
+            drop(Box::from_raw(self.cursor));
             (self.api.quit)(AUDIO_INIT);
         }
     }
